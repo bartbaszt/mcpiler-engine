@@ -1,0 +1,3 @@
+# Blocking sleeps are forbidden in application/test code.
+M:System.Threading.Thread.Sleep(System.Int32);Use Task.Delay with a CancellationToken when waiting is required.
+M:System.Threading.Thread.Sleep(System.TimeSpan);Use Task.Delay with a CancellationToken when waiting is required.

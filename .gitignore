@@ -1,0 +1,37 @@
+# .NET build output
+bin/
+obj/
+artifacts/
+
+# Test runner diagnostics
+TestResults/
+coverage/
+
+# IDE / editor
+.idea/
+.vscode/
+*.user
+*.suo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+.secrets/
+
+# Private development tooling belonging to the MCPiler Platform superproject.
+# These MUST NOT exist in this repository; CI additionally fails if any are present.
+.agents/
+.opencode/
+LESSONS.md
+LESSONS-TRIAGE.md
+work/

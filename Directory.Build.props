@@ -1,0 +1,41 @@
+<Project>
+
+  <!--
+    MCPiler Engine build baseline. This file is intentionally self-contained: the Engine
+    repository MUST restore, build and test from a standalone checkout and MUST NOT
+    depend on any file outside its own root, in particular not on a parent-directory
+    Directory.Build.props belonging to a superproject that embeds Engine as a submodule.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!-- Quality baseline: compiler, SDK analyzers, and explicitly enabled third-party
+         analyzer diagnostics participate in every project build. -->
+    <AnalysisLevel>latest-Recommended</AnalysisLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!-- Meziantou ships many useful rules but also opinionated design/style rules.
+         Start from none and opt in to the curated rules in .editorconfig. -->
+    <MeziantouAnalysisMode>None</MeziantouAnalysisMode>
+
+    <!-- Reproducible builds matter for a runtime whose artifacts are meant to be verifiable. -->
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Meziantou.Analyzer" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" PrivateAssets="all" />
+    <PackageReference Include="Microsoft.VisualStudio.Threading.Analyzers" PrivateAssets="all" />
+
+    <AdditionalFiles Include="$(MSBuildThisFileDirectory)BannedSymbols.txt" />
+  </ItemGroup>
+
+</Project>

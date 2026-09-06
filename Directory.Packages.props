@@ -1,0 +1,26 @@
+<Project>
+
+  <!--
+    Central package versions for MCPiler Engine.
+
+    Engine's dependency graph is deliberately small and permissively licensed. The
+    following MUST NOT appear here: any OpenAPI/Postman/cURL parser, any YAML parser,
+    Entity Framework Core, or any UI/component library. Engine consumes a compiled
+    MCPiler Manifest; it never interprets a source API description.
+  -->
+
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+
+  <ItemGroup Label="Analyzers">
+    <PackageVersion Include="Meziantou.Analyzer" Version="3.0.167" />
+    <PackageVersion Include="Microsoft.CodeAnalysis.BannedApiAnalyzers" Version="5.6.0" />
+    <PackageVersion Include="Microsoft.VisualStudio.Threading.Analyzers" Version="18.7.23" />
+  </ItemGroup>
+
+  <ItemGroup Label="Testing">
+    <PackageVersion Include="xunit.v3" Version="4.0.0" />
+  </ItemGroup>
+
+</Project>
