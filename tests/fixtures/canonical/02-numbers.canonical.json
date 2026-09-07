@@ -1,0 +1,1 @@
+{"bounds":{"exclusiveMaximum":1e3,"minimum":1.50,"multipleOf":0.010},"expLower":1e3,"expNegative":1.5e-7,"expUpperPlus":1E+2,"int":1,"largeInteger":9007199254740993,"manyDigits":0.10000000000000000555,"negative":-42,"negativeZero":-0,"trailingZero":1.0,"twoDecimals":1.50,"zero":0}

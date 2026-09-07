@@ -1,0 +1,1 @@
+{"arrayOfArrays":[[2,1],[1,2],[]],"arrayOfObjects":[{"a":2,"z":1},{"a":4,"z":3}],"arrayOrderIsSemantic":[3,1,2,"b","a",null,true],"emptyArray":[],"emptyObject":{},"falseValue":false,"mixed":{"a":null,"b":[{"c":[],"d":{"f":[null,{}]}}]},"nullValue":null,"trueValue":true}

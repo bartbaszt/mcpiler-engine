@@ -1,0 +1,4 @@
+# These fixtures are byte contracts. The *.canonical.json files are the exact output of the
+# canonical writer and the *.input.json files are hashed after parsing, so no end-of-line
+# normalization may be applied to anything in this directory.
+* -text

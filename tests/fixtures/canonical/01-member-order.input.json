@@ -1,0 +1,17 @@
+{
+  "zeta": 1,
+  "b": 2,
+  "B": 3,
+  "a": 4,
+  "A": 5,
+  "_underscore": 6,
+  "0digit": 7,
+  "": 8,
+  "\u00e9accent": 9,
+  "\ud83d\ude00emoji": 10,
+  "\ue000private": 11,
+  "nested": {
+    "y": { "second": 1, "first": 2 },
+    "x": [ { "q": 1, "p": 2 } ]
+  }
+}

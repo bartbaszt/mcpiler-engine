@@ -1,0 +1,17 @@
+{
+  "emptyObject": {},
+  "emptyArray": [],
+  "nullValue": null,
+  "trueValue": true,
+  "falseValue": false,
+  "arrayOrderIsSemantic": [3, 1, 2, "b", "a", null, true],
+  "arrayOfObjects": [
+    { "z": 1, "a": 2 },
+    { "z": 3, "a": 4 }
+  ],
+  "arrayOfArrays": [[2, 1], [1, 2], []],
+  "mixed": {
+    "b": [ { "d": { "f": [ null, {} ] }, "c": [] } ],
+    "a": null
+  }
+}

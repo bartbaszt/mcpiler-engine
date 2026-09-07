@@ -1,0 +1,18 @@
+{
+  "int": 1,
+  "trailingZero": 1.0,
+  "twoDecimals": 1.50,
+  "expLower": 1e3,
+  "expUpperPlus": 1E+2,
+  "expNegative": 1.5e-7,
+  "negativeZero": -0,
+  "negative": -42,
+  "largeInteger": 9007199254740993,
+  "manyDigits": 0.10000000000000000555,
+  "zero": 0,
+  "bounds": {
+    "minimum": 1.50,
+    "exclusiveMaximum": 1e3,
+    "multipleOf": 0.010
+  }
+}

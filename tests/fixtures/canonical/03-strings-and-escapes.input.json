@@ -1,0 +1,19 @@
+{
+  "escapedMemberName\u0062": "escaped member name",
+  "literalAscii": "plain",
+  "quote": "he said \"hi\"",
+  "backslash": "c:\\temp\\x",
+  "solidus": "a/b",
+  "controlChars": "tab\there\nnewline\rcr\bbs\fff",
+  "htmlSensitive": "<a href='x'>&amp;</a> 1+1",
+  "nonAscii": "\u00e9\u00fc\u0142",
+  "escapedNonAscii": "\u00e9",
+  "literalNonAscii": "é",
+  "nonBmp": "\ud83d\ude00",
+  "combining": "e\u0301",
+  "precomposed": "\u00e9",
+  "empty": "",
+  "nullChar": "a\u0000b",
+  "delete": "a\u007fb",
+  "lineSeparator": "a\u2028b\u2029c"
+}

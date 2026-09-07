@@ -1,0 +1,74 @@
+{
+  "manifestFormatVersion": "0.1",
+  "sections": {
+    "server": {
+      "inline": {
+        "formatVersion": 1,
+        "name": "Example API",
+        "surfaces": [
+          {
+            "slug": "default",
+            "isDefault": true,
+            "navigator": { "enabled": true, "pageSize": 25 },
+            "operations": [
+              { "operation": "list-pets", "exposure": "direct" },
+              { "operation": "delete-pet", "exposure": "navigator" }
+            ]
+          }
+        ]
+      }
+    },
+    "policy": {
+      "inline": {
+        "formatVersion": 1,
+        "baseUrl": "https://api.example.com/v1",
+        "allowedOrigins": ["https://api.example.com"],
+        "limits": { "redirectHopLimit": 5, "concurrency": 8 },
+        "schemaBounds": { "maxDepth": 32, "maxNodes": 2048, "maxPropertiesPerLevel": 256 }
+      }
+    },
+    "operations": {
+      "path": "sections/operations.json",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "bytes": 1234
+    },
+    "agentSurface": {
+      "inline": {
+        "formatVersion": 1,
+        "components": {
+          "schemas": {
+            "Error": {
+              "type": "object",
+              "properties": { "message": { "type": "string" } },
+              "required": ["message"]
+            }
+          }
+        },
+        "operations": [
+          {
+            "slug": "list-pets",
+            "name": "List pets",
+            "summary": "Lists pets in the inventory",
+            "inputSchema": {
+              "type": "object",
+              "properties": { "limit": { "type": "integer", "minimum": 1, "maximum": 100 } }
+            },
+            "annotations": { "readOnly": true, "idempotent": true, "openWorld": true },
+            "binding": { "type": "http", "operation": "GET /pets" }
+          },
+          {
+            "slug": "delete-pet",
+            "name": "Delete pet",
+            "annotations": { "destructive": true, "idempotent": true },
+            "binding": { "type": "http", "operation": "DELETE /pets/{petId}" }
+          }
+        ]
+      }
+    }
+  },
+  "completeness": { "algorithm": "sha256", "value": "0000000000000000000000000000000000000000000000000000000000000000" },
+  "provenance": {
+    "connectorRevisionId": "0f9c1e2b3a4d5e6f7a8b9c0d1e2f3a4b",
+    "studio": { "estimatorVersion": 3, "weights": { "userPriority": 6, "sizeCost": 1 } }
+  }
+}
