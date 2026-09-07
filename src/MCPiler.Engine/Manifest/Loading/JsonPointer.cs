@@ -58,6 +58,49 @@ public static class JsonPointer
     }
 
     /// <summary>
+    /// True when <paramref name="pointer"/> is a syntactically valid RFC 6901 pointer.
+    /// </summary>
+    /// <remarks>
+    /// A pointer is either empty or begins with <c>/</c>, and every <c>~</c> must introduce a
+    /// valid escape. A malformed escape is refused rather than passed through, because
+    /// <c>~2</c> would otherwise silently address a member nobody declared.
+    /// </remarks>
+    public static bool IsSyntacticallyValid(string? pointer)
+    {
+        if (pointer is null)
+        {
+            return false;
+        }
+
+        if (pointer.Length == 0)
+        {
+            return true;
+        }
+
+        if (pointer[0] != '/')
+        {
+            return false;
+        }
+
+        for (var index = 0; index < pointer.Length; index++)
+        {
+            if (pointer[index] != '~')
+            {
+                continue;
+            }
+
+            if (index + 1 >= pointer.Length || pointer[index + 1] is not ('0' or '1'))
+            {
+                return false;
+            }
+
+            index++;
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// True when <paramref name="reference"/> is a fragment-only reference into the same
     /// document.
     /// </summary>

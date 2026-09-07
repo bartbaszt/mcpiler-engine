@@ -34,6 +34,22 @@ public static class ManifestDiagnosticCodes
     /// <summary>A member appears that this format version does not define.</summary>
     public const string UnknownMember = "manifest/unknown-member";
 
+    /// <summary>A member this format version requires here is absent or empty.</summary>
+    public const string MemberRequired = "manifest/member-required";
+
+    /// <summary>
+    /// A member's JSON type is not the type this format version defines here.
+    /// </summary>
+    /// <remarks>
+    /// This is a distinct condition from an unknown member. Reading a wrongly typed member as
+    /// if it were absent would turn an authoring typo into a silently changed contract, so a
+    /// type mismatch is reported instead of defaulted.
+    /// </remarks>
+    public const string MemberTypeInvalid = "manifest/member-type-invalid";
+
+    /// <summary>A section payload parses as JSON but is not a JSON object.</summary>
+    public const string SectionNotAnObject = "manifest/section-not-an-object";
+
     /// <summary>A section name appears that this format version does not define.</summary>
     public const string SectionUnknown = "manifest/section-unknown";
 
@@ -130,6 +146,18 @@ public static class ManifestDiagnosticCodes
     /// <summary>A compound step references another compound operation. Nesting is forbidden.</summary>
     public const string CompoundNested = "binding/compound-nested";
 
+    /// <summary>Two steps of one compound workflow declare the same step identifier.</summary>
+    /// <remarks>
+    /// A duplicate identifier makes every later <c>fromStep</c> reference ambiguous, and
+    /// resolving it by position would make the workflow's meaning depend on declaration order.
+    /// </remarks>
+    public const string DuplicateStepId = "binding/duplicate-step-id";
+
+    /// <summary>
+    /// A mapping reads from a step that is not declared, or that is declared later.
+    /// </summary>
+    public const string StepReferenceUnknown = "binding/step-reference-unknown";
+
     /// <summary>A compound binding declares an unsupported binding grammar version.</summary>
     public const string CompoundBindingVersionUnsupported = "binding/compound-binding-version-unsupported";
 
@@ -158,6 +186,13 @@ public static class ManifestDiagnosticCodes
 
     /// <summary>Warning: a surface exposes no operation, so it advertises nothing useful.</summary>
     public const string SurfaceHasNoOperations = "surface/no-operations";
+
+    /// <summary>One surface lists the same agent operation more than once.</summary>
+    /// <remarks>
+    /// Two entries for one operation can declare different exposures, and resolving that by
+    /// position would let declaration order decide whether an operation is advertised.
+    /// </remarks>
+    public const string DuplicateSurfaceOperation = "surface/duplicate-operation";
 
     // ---- policy ---------------------------------------------------------------------
 
@@ -224,6 +259,9 @@ public static class ManifestDiagnosticCodes
         FormatVersionUnsupported,
         RootNotAnObject,
         UnknownMember,
+        MemberRequired,
+        MemberTypeInvalid,
+        SectionNotAnObject,
         SectionUnknown,
         SectionMissing,
         SectionBothInlineAndPath,
@@ -254,6 +292,8 @@ public static class ManifestDiagnosticCodes
         BindingOperationKeyUnknown,
         CompoundStepUnknownOperation,
         CompoundNested,
+        DuplicateStepId,
+        StepReferenceUnknown,
         CompoundBindingVersionUnsupported,
         BindingTypeUnknown,
         TransformInvalid,
@@ -263,6 +303,7 @@ public static class ManifestDiagnosticCodes
         NoDefaultSurface,
         SurfaceOperationUnknown,
         SurfaceHasNoOperations,
+        DuplicateSurfaceOperation,
         BaseUrlInvalid,
         OriginInvalid,
         LimitWidened,

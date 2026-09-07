@@ -112,7 +112,7 @@ public static class ManifestLoader
 
         RejectUnknownMembers(root, RootMembers, section: null, pointer: string.Empty, diagnostics);
 
-        var evaluation = ManifestFormatSupport.Evaluate(ReadString(root, FormatVersionMember));
+        var evaluation = ManifestFormatSupport.Evaluate(ReadDeclaredFormatVersion(root));
 
         if (!evaluation.IsSupported)
         {
@@ -610,30 +610,39 @@ public static class ManifestLoader
         return resolved;
     }
 
+    // Member checking and string reading are delegated rather than reimplemented: the section
+    // readers apply the same rules, and two copies of "what counts as an unknown member" would
+    // eventually disagree about the same document.
     private static void RejectUnknownMembers(
         JsonObject document,
         IReadOnlyList<string> allowed,
         string? section,
         string pointer,
         List<ManifestDiagnostic> diagnostics)
-    {
-        foreach (var (name, _) in document)
-        {
-            if (allowed.Contains(name, StringComparer.Ordinal))
-            {
-                continue;
-            }
-
-            diagnostics.Add(ManifestDiagnostic.Error(
-                ManifestDiagnosticCodes.UnknownMember,
-                $"'{DiagnosticText.Echo(name)}' is not a member this manifest format defines here. Expected one of: {DiagnosticText.List(allowed)}.",
-                section,
-                pointer + "/" + JsonPointer.Escape(name)));
-        }
-    }
+        => new SectionReadContext(section, diagnostics)
+            .RejectUnknownMembers(document, allowed, pointer);
 
     private static string? ReadString(JsonObject document, string member)
-        => document[member] is JsonValue value && value.TryGetValue<string>(out var text)
-            ? text
-            : null;
+        => SectionReadContext.TextOrNull(document, member);
+
+    /// <summary>
+    /// Renders the declared format version for evaluation.
+    /// </summary>
+    /// <remarks>
+    /// A non-string value is rendered as JSON rather than read as absent, so
+    /// <c>"manifestFormatVersion": 1</c> is reported as malformed instead of missing. Telling
+    /// an author the version is missing when it is present is a diagnostic that sends them to
+    /// the wrong line.
+    /// </remarks>
+    private static string? ReadDeclaredFormatVersion(JsonObject root)
+    {
+        var node = root[FormatVersionMember];
+
+        return node switch
+        {
+            null => null,
+            JsonValue value when value.TryGetValue<string>(out var text) => text,
+            _ => node.ToJsonString(),
+        };
+    }
 }
