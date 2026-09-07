@@ -1,4 +1,5 @@
 using System.Globalization;
+using MCPiler.Engine.Manifest.Validation;
 
 namespace MCPiler.Engine.Manifest;
 
@@ -49,9 +50,6 @@ public static class ManifestFormatSupport
 
     /// <summary>Newest manifest format version this Engine build accepts.</summary>
     public static ManifestFormatVersion Maximum { get; } = new(0, 1);
-
-    /// <summary>Maximum number of characters of a rejected value echoed back in a message.</summary>
-    private const int MaxEchoedLength = 32;
 
     /// <summary>Human-readable description of the supported range, for diagnostics.</summary>
     public static string SupportedRange { get; } =
@@ -109,8 +107,5 @@ public static class ManifestFormatSupport
             string.Create(CultureInfo.InvariantCulture, $"Manifest format {version} is supported."));
     }
 
-    private static string Echo(string value)
-        => value.Length <= MaxEchoedLength
-            ? value
-            : string.Concat(value.AsSpan(0, MaxEchoedLength), "…");
+    private static string Echo(string value) => DiagnosticText.Echo(value);
 }
