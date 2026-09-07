@@ -208,6 +208,19 @@ public static class ManifestDiagnosticCodes
     /// <summary>A declared limit is outside the range this format version permits.</summary>
     public const string LimitOutOfRange = "policy/limit-out-of-range";
 
+    /// <summary>
+    /// A compiled destination lies outside the allowed-origin perimeter, so every request to
+    /// it fails closed.
+    /// </summary>
+    /// <remarks>
+    /// This covers the base URL and any per-operation server URL. It is reported at load
+    /// rather than left to the first invocation because the affected operations can never
+    /// execute: the manifest advertises tools that are guaranteed to fail. Distinguishing it
+    /// from <see cref="OriginInvalid"/> matters — the perimeter entries are well formed here,
+    /// they simply do not cover the destination the manifest routes to.
+    /// </remarks>
+    public const string DestinationNotAllowed = "policy/destination-not-allowed";
+
     // ---- credentials ----------------------------------------------------------------
 
     /// <summary>A credential declares a scheme outside the vocabulary.</summary>
@@ -230,6 +243,14 @@ public static class ManifestDiagnosticCodes
 
     /// <summary>A credential value declares more than one source, or none.</summary>
     public const string CredentialReferenceAmbiguous = "credential/reference-ambiguous";
+
+    /// <summary>Two credentials target the same destination slot.</summary>
+    /// <remarks>
+    /// Credentials are applied in order, so a duplicate slot means the value that reaches the
+    /// upstream service depends on declaration order rather than on anything the author
+    /// stated. For a header slot the outcome is worse than ambiguous: two values may be sent.
+    /// </remarks>
+    public const string DuplicateCredentialSlot = "credential/slot-duplicate";
 
     // ---- derivation and optional sections -------------------------------------------
 
@@ -308,6 +329,7 @@ public static class ManifestDiagnosticCodes
         OriginInvalid,
         LimitWidened,
         LimitOutOfRange,
+        DestinationNotAllowed,
         CredentialSchemeUnknown,
         CredentialLocationInvalid,
         CredentialSlotInvalid,
@@ -315,6 +337,7 @@ public static class ManifestDiagnosticCodes
         CredentialInlineNotPermitted,
         CredentialInlineDiscouraged,
         CredentialReferenceAmbiguous,
+        DuplicateCredentialSlot,
         ToolDerivationMismatch,
         NavigatorNameRequired,
         DuplicateToolName,

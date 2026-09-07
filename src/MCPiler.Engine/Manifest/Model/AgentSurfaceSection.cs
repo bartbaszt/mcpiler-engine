@@ -101,11 +101,12 @@ public sealed record AgentOperationEntry(
     public string EffectiveRisk => Risk ?? NoRisk;
 
     /// <summary>The operation kind implied by the binding when none is declared.</summary>
-    public AgentOperationKind DerivedKind => Binding switch
-    {
-        CompoundBinding => AgentOperationKind.Compound,
-        _ => AgentOperationKind.SourceBacked,
-    };
+    /// <remarks>
+    /// Resolved through <see cref="ManifestBindingDispatcher"/> rather than by a local type
+    /// test, so this cannot drift from what validation and execution conclude about the same
+    /// binding.
+    /// </remarks>
+    public AgentOperationKind DerivedKind => ManifestBindingDispatcher.DeriveKind(Binding);
 
     /// <summary>The effective operation kind.</summary>
     public AgentOperationKind EffectiveKind => Kind ?? DerivedKind;
