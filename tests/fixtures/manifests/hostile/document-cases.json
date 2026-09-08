@@ -1,0 +1,822 @@
+{
+  "note": "Each case is a complete manifest document plus the single diagnostic code it must produce. Cases live here rather than in one directory each because every one of them is a *document* defect; only the bundle/ cases need real files on disk.",
+  "cases": [
+    {
+      "name": "root-not-an-object",
+      "code": "manifest/root-not-an-object",
+      "why": "A manifest that is not an object has no grammar at all, so nothing later can be interpreted.",
+      "manifest": ["manifestFormatVersion", "0.1"]
+    },
+    {
+      "name": "format-version-missing",
+      "code": "manifest/format-version-missing",
+      "why": "Without a declared format version the reader would have to guess which grammar applies.",
+      "manifest": {
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "format-version-unsupported",
+      "code": "manifest/format-version-unsupported",
+      "why": "A future major version must be refused with the observed value and the supported range, never partially interpreted.",
+      "manifest": {
+        "manifestFormatVersion": "9.0",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "section-missing",
+      "code": "manifest/section-missing",
+      "why": "policy is omitted. The perimeter and the outbound bounds have no safe default, so the manifest cannot load without it.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "section-unknown",
+      "code": "manifest/section-unknown",
+      "why": "An unknown section name is usually a misspelling of a real one. Ignoring it would silently drop whatever the author intended it to configure.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "polcy": { "inline": { "baseUrl": "https://attacker.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "section-both-inline-and-path",
+      "code": "manifest/section-both-inline-and-path",
+      "why": "Two payload sources for one section leave the effective content ambiguous, and a reader that silently prefers one would let the other be a decoy.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" }, "path": "sections/server.json" },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "section-neither-inline-nor-path",
+      "code": "manifest/section-neither-inline-nor-path",
+      "why": "An entry with no payload source is a declaration with nothing behind it.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": {},
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "section-must-be-external",
+      "code": "manifest/section-must-be-external",
+      "why": "The vector matrix is a binary payload outside the determinism contract; admitting it inline would put unbounded base64 inside the document the seal covers.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } },
+          "vectors": { "inline": { "ids": [] } }
+        }
+      }
+    },
+    {
+      "name": "root-unknown-member",
+      "code": "manifest/unknown-member",
+      "why": "An unrecognised root member is either a typo or an attempt to smuggle configuration past a strict reader.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "allowInsecureTransport": true,
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "inline-payload-with-digest",
+      "code": "manifest/unknown-member",
+      "why": "A digest on an inline payload is a second authority over bytes that already sit inside the sealed document, with no independent writer to disagree with.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" }, "sha256": "0000000000000000000000000000000000000000000000000000000000000000" },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "section-unknown-member",
+      "code": "manifest/unknown-member",
+      "why": "A misspelled policy member would otherwise silently fall back to a default perimeter the author did not intend.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com", "allowedOrigin": ["https://attacker.example.com"] } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "section-not-an-object",
+      "code": "manifest/section-not-an-object",
+      "why": "A section payload of the wrong JSON kind has no members to read.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": ["Hostile"] },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "operations-duplicate-key",
+      "code": "operations/duplicate-key",
+      "why": "The execution key is the address a binding resolves. Two operations sharing it would make the executed request depend on declaration order.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": {
+            "inline": {
+              "operations": [
+                { "key": "GET /ping", "method": "GET", "path": "/ping" },
+                { "key": "GET /ping", "method": "GET", "path": "/ping" }
+              ]
+            }
+          },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "operations-key-disagrees",
+      "code": "operations/key-disagrees-with-method-path",
+      "why": "A key that disagrees with the method and path it claims to address would let the advertised operation and the executed request diverge.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "DELETE", "path": "/accounts" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "operations-querystring-parameter",
+      "code": "operations/unsupported-parameter-location",
+      "why": "The intermediate model has a querystring location but the request compiler refuses it, so admitting it here would create an authorable but unexecutable operation.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": {
+            "inline": {
+              "operations": [
+                {
+                  "key": "GET /ping",
+                  "method": "GET",
+                  "path": "/ping",
+                  "parameters": [{ "name": "raw", "in": "querystring", "schema": { "type": "string" } }]
+                }
+              ]
+            }
+          },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "operations-unknown-style",
+      "code": "operations/unknown-style",
+      "why": "An unknown serialization style has no defined wire behavior, and falling back to the default would silently change the request shape.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": {
+            "inline": {
+              "operations": [
+                {
+                  "key": "GET /ping",
+                  "method": "GET",
+                  "path": "/ping",
+                  "parameters": [{ "name": "tags", "in": "query", "style": "wobble", "schema": { "type": "array", "items": { "type": "string" } } }]
+                }
+              ]
+            }
+          },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "schema-ref-not-local",
+      "code": "schema/ref-not-local",
+      "why": "A non-local reference would turn manifest loading into a network fetch, which the format deliberately cannot do.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": {
+            "inline": {
+              "operations": [
+                {
+                  "key": "GET /ping",
+                  "method": "GET",
+                  "path": "/ping",
+                  "parameters": [{ "name": "q", "in": "query", "schema": { "$ref": "https://attacker.example.com/schema.json#/definitions/Q" } }]
+                }
+              ]
+            }
+          },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "schema-ref-unresolvable",
+      "code": "schema/ref-unresolvable",
+      "why": "A dangling pointer must be reported at load, not discovered as an empty schema during the first invocation.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": {
+            "inline": {
+              "components": { "schemas": { "Present": { "type": "string" } } },
+              "operations": [
+                {
+                  "key": "GET /ping",
+                  "method": "GET",
+                  "path": "/ping",
+                  "parameters": [{ "name": "q", "in": "query", "schema": { "$ref": "#/components/schemas/Absent" } }]
+                }
+              ]
+            }
+          },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "schema-ref-cycle",
+      "code": "schema/ref-unresolvable",
+      "why": "A reference chain that never reaches a schema is unresolvable rather than a bound violation, so the message names the cycle instead of blaming the depth limit.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": {
+            "inline": {
+              "components": {
+                "schemas": {
+                  "A": { "$ref": "#/components/schemas/B" },
+                  "B": { "$ref": "#/components/schemas/A" }
+                }
+              },
+              "operations": [
+                {
+                  "key": "GET /ping",
+                  "method": "GET",
+                  "path": "/ping",
+                  "parameters": [{ "name": "q", "in": "query", "schema": { "$ref": "#/components/schemas/A" } }]
+                }
+              ]
+            }
+          },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "surface-duplicate-slug",
+      "code": "surface/duplicate-slug",
+      "why": "The slug is the route segment. Two surfaces sharing it would make the served catalogue depend on declaration order.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": {
+            "inline": {
+              "name": "Hostile",
+              "surfaces": [
+                { "slug": "default", "isDefault": true, "operations": [{ "operation": "ping", "exposure": "direct" }] },
+                { "slug": "default", "operations": [] }
+              ]
+            }
+          },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "surface-no-default",
+      "code": "surface/no-default",
+      "why": "Without a default surface the unqualified route has nothing to resolve to.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": {
+            "inline": {
+              "name": "Hostile",
+              "surfaces": [{ "slug": "alpha", "operations": [{ "operation": "ping", "exposure": "direct" }] }]
+            }
+          },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "surface-multiple-defaults",
+      "code": "surface/multiple-defaults",
+      "why": "Two defaults make the unqualified route ambiguous, and picking the first would let declaration order decide which catalogue is served.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": {
+            "inline": {
+              "name": "Hostile",
+              "surfaces": [
+                { "slug": "alpha", "isDefault": true, "operations": [{ "operation": "ping", "exposure": "direct" }] },
+                { "slug": "beta", "isDefault": true, "operations": [] }
+              ]
+            }
+          },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "surface-operation-unknown",
+      "code": "surface/operation-unknown",
+      "why": "A surface entry naming an operation that does not exist is a dangling grant; refusing it keeps the exposure list the single runtime authority.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": {
+            "inline": {
+              "name": "Hostile",
+              "surfaces": [
+                {
+                  "slug": "default",
+                  "isDefault": true,
+                  "operations": [
+                    { "operation": "ping", "exposure": "direct" },
+                    { "operation": "purge-everything", "exposure": "direct" }
+                  ]
+                }
+              ]
+            }
+          },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "surface-duplicate-operation",
+      "code": "surface/duplicate-operation",
+      "why": "The same operation listed twice with different exposures would let declaration order decide whether it is advertised.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": {
+            "inline": {
+              "name": "Hostile",
+              "surfaces": [
+                {
+                  "slug": "default",
+                  "isDefault": true,
+                  "operations": [
+                    { "operation": "ping", "exposure": "hidden" },
+                    { "operation": "ping", "exposure": "direct" }
+                  ]
+                }
+              ]
+            }
+          },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "agent-duplicate-slug",
+      "code": "agent/duplicate-slug",
+      "why": "The slug is the manifest-local identity used by surfaces, compound steps and derived sections. Duplicates make every one of those references ambiguous.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": {
+            "inline": {
+              "operations": [
+                { "key": "GET /ping", "method": "GET", "path": "/ping" },
+                { "key": "DELETE /ping", "method": "DELETE", "path": "/ping" }
+              ]
+            }
+          },
+          "agentSurface": {
+            "inline": {
+              "operations": [
+                { "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } },
+                { "slug": "ping", "name": "Ping again", "binding": { "type": "http", "operation": "DELETE /ping" } }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "agent-unknown-group",
+      "code": "agent/unknown-group",
+      "why": "Group membership joins by name. An undeclared name is a typo that would otherwise silently drop the operation out of its group.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": {
+            "inline": {
+              "groups": [{ "name": "diagnostics", "priority": 1 }],
+              "operations": [
+                { "slug": "ping", "name": "Ping", "groups": ["Diagnostics"], "binding": { "type": "http", "operation": "GET /ping" } }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "agent-kind-binding-mismatch",
+      "code": "agent/kind-binding-mismatch",
+      "why": "A declared kind that contradicts the binding shape would let the two disagree about what actually executes.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": {
+            "inline": {
+              "operations": [
+                { "slug": "ping", "kind": "compound", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "binding-operation-key-unknown",
+      "code": "binding/operation-key-unknown",
+      "why": "A binding naming a key with no operation behind it is an advertised tool that can never execute.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": {
+            "inline": {
+              "operations": [
+                { "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /pong" } }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "binding-compound-nested",
+      "code": "binding/compound-nested",
+      "why": "Nesting a compound inside a compound removes the single-level bound on how much work one invocation can start.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": {
+            "inline": {
+              "operations": [
+                { "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } },
+                {
+                  "slug": "inner",
+                  "name": "Inner workflow",
+                  "binding": {
+                    "type": "compound",
+                    "steps": [{ "stepId": "a", "operation": "ping", "inputMappings": [] }]
+                  }
+                },
+                {
+                  "slug": "outer",
+                  "name": "Outer workflow",
+                  "binding": {
+                    "type": "compound",
+                    "steps": [{ "stepId": "b", "operation": "inner", "inputMappings": [] }]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "binding-compound-step-unknown-operation",
+      "code": "binding/compound-step-unknown-operation",
+      "why": "A step referencing a slug that does not exist is a workflow that fails partway through after earlier steps have already run.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": {
+            "inline": {
+              "operations": [
+                { "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } },
+                {
+                  "slug": "workflow",
+                  "name": "Workflow",
+                  "binding": {
+                    "type": "compound",
+                    "steps": [
+                      { "stepId": "a", "operation": "ping", "inputMappings": [] },
+                      { "stepId": "b", "operation": "pong", "inputMappings": [] }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "binding-duplicate-step-id",
+      "code": "binding/duplicate-step-id",
+      "why": "Step identifiers address step outputs. Duplicates would let declaration order decide which response a later mapping reads.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": {
+            "inline": {
+              "operations": [
+                { "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } },
+                {
+                  "slug": "workflow",
+                  "name": "Workflow",
+                  "binding": {
+                    "type": "compound",
+                    "steps": [
+                      { "stepId": "a", "operation": "ping", "inputMappings": [] },
+                      { "stepId": "a", "operation": "ping", "inputMappings": [] }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "binding-step-reference-unknown",
+      "code": "binding/step-reference-unknown",
+      "why": "A step reading its own response, or a later step's, describes a workflow that can never execute in the declared order.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": {
+            "inline": {
+              "operations": [
+                {
+                  "key": "GET /ping",
+                  "method": "GET",
+                  "path": "/ping",
+                  "parameters": [{ "name": "id", "in": "query", "schema": { "type": "string" } }]
+                }
+              ]
+            }
+          },
+          "agentSurface": {
+            "inline": {
+              "operations": [
+                { "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } },
+                {
+                  "slug": "workflow",
+                  "name": "Workflow",
+                  "binding": {
+                    "type": "compound",
+                    "steps": [
+                      {
+                        "stepId": "a",
+                        "operation": "ping",
+                        "inputMappings": [{ "target": "/query/id", "fromStep": "a", "response": "/body/id" }]
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "policy-base-url-invalid",
+      "code": "policy/base-url-invalid",
+      "why": "The base URL seeds the default perimeter, so an unparseable value must refuse the section rather than produce an empty one.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "api.example.com/v1" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "policy-origin-invalid",
+      "code": "policy/origin-invalid",
+      "why": "An origin carrying a path implies a narrower permission than the origin comparison actually applies, so accepting and truncating it would record a perimeter the operator did not authorise.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": {
+            "inline": {
+              "baseUrl": "https://api.example.com",
+              "allowedOrigins": ["https://api.example.com", "https://partner.example.com/only/this/prefix"]
+            }
+          },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } }
+        }
+      }
+    },
+    {
+      "name": "policy-destination-not-allowed",
+      "code": "policy/destination-not-allowed",
+      "why": "A per-operation server URL outside the perimeter is refused at load, because it can never widen the perimeter at execution time and would otherwise fail on every call.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": {
+            "inline": {
+              "operations": [
+                {
+                  "slug": "ping",
+                  "name": "Ping",
+                  "binding": { "type": "http", "operation": "GET /ping", "serverUrl": "https://attacker.example.com" }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "credential-scheme-unknown",
+      "code": "credential/scheme-unknown",
+      "why": "No applier branch matches an unknown scheme, so accepting it would produce a credential that is silently never sent.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } },
+          "credentials": {
+            "inline": {
+              "credentials": [{ "scheme": "none", "slot": "Authorization", "value": { "fromEnv": "TOKEN" } }]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "credential-slot-duplicate",
+      "code": "credential/slot-duplicate",
+      "why": "Two credentials addressing the same header make the value actually sent depend on declaration order.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } },
+          "credentials": {
+            "inline": {
+              "credentials": [
+                { "scheme": "bearer", "slot": "Authorization", "value": { "fromEnv": "TOKEN_A" } },
+                { "scheme": "bearer", "slot": "Authorization", "value": { "fromEnv": "TOKEN_B" } }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "credential-slot-invalid",
+      "code": "credential/slot-invalid",
+      "why": "A basic credential missing one half produces an Authorization header built from a value the author never supplied.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } },
+          "credentials": {
+            "inline": {
+              "credentials": [{ "scheme": "basic", "slot": "username", "value": { "fromEnv": "USER" } }]
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "credential-inline-not-permitted",
+      "code": "credential/inline-not-permitted",
+      "why": "A literal secret in the manifest is refused unless the operator opts in, because a manifest is a file that gets copied, committed and shipped in images.",
+      "manifest": {
+        "manifestFormatVersion": "0.1",
+        "sections": {
+          "server": { "inline": { "name": "Hostile" } },
+          "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+          "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
+          "agentSurface": { "inline": { "operations": [{ "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }] } },
+          "credentials": {
+            "inline": {
+              "credentials": [
+                { "scheme": "bearer", "slot": "Authorization", "value": { "inline": "CANARY-fixture-secret-must-not-appear" } }
+              ]
+            }
+          }
+        }
+      }
+    }
+  ]
+}

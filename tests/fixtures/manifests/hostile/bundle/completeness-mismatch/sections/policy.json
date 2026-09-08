@@ -1,0 +1,34 @@
+{
+  "formatVersion": 1,
+  "baseUrl": "https://widgets.example.com/api",
+  "allowedOrigins": ["https://widgets.example.com"],
+  "limits": {
+    "upstreamConnectTimeoutSeconds": 10,
+    "upstreamRequestTimeoutSeconds": 100,
+    "upstreamResponseSizeLimitBytes": 52428800,
+    "redirectHopLimit": 5,
+    "concurrency": 8,
+    "mcpRequestSizeLimitBytes": 1048576
+  },
+  "transformCeiling": {
+    "maxSteps": 64,
+    "maxDepth": 32,
+    "maxNodes": 8192,
+    "maxOutputBytes": 262144,
+    "maxArrayFanout": 1024
+  },
+  "compound": {
+    "maxTotalResponseBytes": 104857600,
+    "workflowTimeoutSeconds": 120
+  },
+  "schemaBounds": {
+    "maxDepth": 32,
+    "maxNodes": 2048,
+    "maxPropertiesPerLevel": 256
+  },
+  "files": {
+    "handleLifetimeSeconds": 86400,
+    "uploadSizeLimitBytes": 104857600,
+    "rejectMagicMismatch": true
+  }
+}

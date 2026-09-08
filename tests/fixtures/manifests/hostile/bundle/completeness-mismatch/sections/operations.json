@@ -1,0 +1,71 @@
+{
+  "formatVersion": 1,
+  "servers": ["https://widgets.example.com/api"],
+  "securitySchemes": {
+    "apiKey": { "scheme": "apiKey", "in": "header", "description": "Tenant API key" }
+  },
+  "security": [{ "apiKey": [] }],
+  "components": {
+    "schemas": {
+      "Widget": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "weight": { "type": "number", "minimum": 0.10, "exclusiveMaximum": 1000 }
+        }
+      }
+    }
+  },
+  "operations": [
+    {
+      "key": "GET /widgets",
+      "method": "GET",
+      "path": "/widgets",
+      "upstreamId": "listWidgets",
+      "summary": "List widgets",
+      "tags": ["widgets"],
+      "parameters": [
+        {
+          "name": "cursor",
+          "in": "query",
+          "schema": { "type": "string" }
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/Widget" }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "key": "POST /widgets",
+      "method": "POST",
+      "path": "/widgets",
+      "upstreamId": "createWidget",
+      "summary": "Create a widget",
+      "tags": ["widgets"],
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": { "schema": { "$ref": "#/components/schemas/Widget" } }
+        }
+      },
+      "responses": {
+        "201": {
+          "content": {
+            "application/json": { "schema": { "$ref": "#/components/schemas/Widget" } }
+          }
+        }
+      }
+    }
+  ]
+}

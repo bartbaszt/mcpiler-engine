@@ -1,0 +1,41 @@
+{
+  "formatVersion": 1,
+  "groups": [{ "name": "widgets", "priority": 5 }],
+  "operations": [
+    {
+      "slug": "list-widgets",
+      "kind": "source-backed",
+      "name": "List widgets",
+      "summary": "Lists widgets page by page",
+      "groups": ["widgets"],
+      "inputSchema": {
+        "type": "object",
+        "properties": { "cursor": { "type": "string" } }
+      },
+      "outputSchema": { "type": "array", "items": { "type": "object" } },
+      "annotations": { "readOnly": true, "destructive": false, "idempotent": true, "openWorld": true },
+      "risk": "readOnly",
+      "search": { "aliases": ["widgets"], "keywords": ["catalogue"], "exampleIntents": ["list the widgets"] },
+      "binding": { "type": "http", "operation": "GET /widgets" }
+    },
+    {
+      "slug": "create-widget",
+      "kind": "source-backed",
+      "name": "Create widget",
+      "summary": "Creates a widget",
+      "groups": ["widgets"],
+      "inputSchema": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "weight": { "type": "number" }
+        }
+      },
+      "annotations": { "readOnly": false, "destructive": false, "idempotent": false, "openWorld": true },
+      "risk": "mutating",
+      "binding": { "type": "http", "operation": "POST /widgets" }
+    }
+  ]
+}

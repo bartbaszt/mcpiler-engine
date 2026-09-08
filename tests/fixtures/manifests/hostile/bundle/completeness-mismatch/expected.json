@@ -1,0 +1,4 @@
+{
+  "code": "manifest/completeness-mismatch",
+  "why": "This is sealed-bundle with the credentials entry deleted from the index. Every surviving section still verifies against its own digest, so only a hash over the index itself detects that a section was removed. That is why the seal covers the index and not the concatenated payloads."
+}

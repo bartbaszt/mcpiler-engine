@@ -1,0 +1,179 @@
+{
+  "manifestFormatVersion": "0.1",
+  "sections": {
+    "server": {
+      "inline": {
+        "name": "Document API",
+        "surfaces": [
+          {
+            "slug": "default",
+            "isDefault": true,
+            "operations": [
+              { "operation": "upload-document", "exposure": "direct" },
+              { "operation": "download-document", "exposure": "direct" },
+              { "operation": "upload-raw", "exposure": "direct" }
+            ]
+          }
+        ]
+      }
+    },
+    "policy": {
+      "inline": {
+        "baseUrl": "https://api.example.com",
+        "files": {
+          "handleLifetimeSeconds": 3600,
+          "uploadSizeLimitBytes": 26214400,
+          "rejectMagicMismatch": true
+        }
+      }
+    },
+    "operations": {
+      "inline": {
+        "operations": [
+          {
+            "key": "POST /documents",
+            "method": "POST",
+            "path": "/documents",
+            "summary": "Upload a document as multipart form data",
+            "requestBody": {
+              "required": true,
+              "content": {
+                "multipart/form-data": {
+                  "schema": {
+                    "type": "object",
+                    "required": ["file"],
+                    "properties": {
+                      "file": { "type": "string", "format": "binary" },
+                      "title": { "type": "string" },
+                      "tags": { "type": "array", "items": { "type": "string" } }
+                    }
+                  },
+                  "encoding": {
+                    "file": {
+                      "contentType": "application/pdf",
+                      "headers": {
+                        "Content-Disposition": { "type": "string" }
+                      }
+                    },
+                    "tags": { "style": "form", "explode": true }
+                  }
+                }
+              }
+            },
+            "responses": {
+              "201": {
+                "content": {
+                  "application/json": {
+                    "schema": {
+                      "type": "object",
+                      "properties": { "id": { "type": "string" } }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "key": "PUT /documents/{documentId}/content",
+            "method": "PUT",
+            "path": "/documents/{documentId}/content",
+            "summary": "Replace document bytes with a raw body",
+            "parameters": [
+              { "name": "documentId", "in": "path", "required": true, "schema": { "type": "string" } }
+            ],
+            "requestBody": {
+              "required": true,
+              "content": {
+                "application/octet-stream": {
+                  "schema": { "type": "string", "format": "binary" }
+                }
+              }
+            },
+            "responses": { "204": { "description": "Replaced" } }
+          },
+          {
+            "key": "GET /documents/{documentId}/content",
+            "method": "GET",
+            "path": "/documents/{documentId}/content",
+            "summary": "Download document bytes",
+            "parameters": [
+              { "name": "documentId", "in": "path", "required": true, "schema": { "type": "string" } }
+            ],
+            "responses": {
+              "200": {
+                "content": {
+                  "application/pdf": { "schema": { "type": "string", "format": "binary" } },
+                  "application/octet-stream": { "schema": { "type": "string", "format": "binary" } }
+                }
+              },
+              "404": {
+                "content": {
+                  "application/json": {
+                    "schema": {
+                      "type": "object",
+                      "properties": { "message": { "type": "string" } }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "operations": [
+          {
+            "slug": "upload-document",
+            "name": "Upload document",
+            "summary": "Uploads a PDF and returns its identifier",
+            "inputSchema": {
+              "type": "object",
+              "required": ["file"],
+              "properties": {
+                "file": {
+                  "type": "string",
+                  "format": "binary",
+                  "x-mcp-file": true,
+                  "x-mcp-file-accepted-media-types": ["application/pdf"]
+                },
+                "title": { "type": "string" }
+              }
+            },
+            "annotations": { "readOnly": false, "destructive": false, "idempotent": false, "openWorld": true },
+            "risk": "mutating",
+            "binding": { "type": "http", "operation": "POST /documents" }
+          },
+          {
+            "slug": "upload-raw",
+            "name": "Replace document content",
+            "summary": "Replaces the stored bytes of an existing document",
+            "inputSchema": {
+              "type": "object",
+              "required": ["documentId", "body"],
+              "properties": {
+                "documentId": { "type": "string" },
+                "body": { "type": "string", "format": "binary", "x-mcp-file": true }
+              }
+            },
+            "risk": "mutating,idempotent",
+            "binding": { "type": "http", "operation": "PUT /documents/{documentId}/content" }
+          },
+          {
+            "slug": "download-document",
+            "name": "Download document",
+            "summary": "Returns the stored bytes as a file handle",
+            "inputSchema": {
+              "type": "object",
+              "required": ["documentId"],
+              "properties": { "documentId": { "type": "string" } }
+            },
+            "risk": "readOnly",
+            "binding": { "type": "http", "operation": "GET /documents/{documentId}/content" }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,4 @@
+{
+  "code": "manifest/section-size-mismatch",
+  "why": "The digest matches the bytes on disk, so only the declared size disagrees. The size is checked on its own because it is what a loader can enforce before reading the payload."
+}

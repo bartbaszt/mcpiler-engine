@@ -1,0 +1,201 @@
+{
+  "manifestFormatVersion": "0.1",
+  "sections": {
+    "server": {
+      "inline": {
+        "name": "Order API",
+        "surfaces": [
+          {
+            "slug": "default",
+            "isDefault": true,
+            "operations": [
+              { "operation": "place-order", "exposure": "direct" },
+              { "operation": "create-cart", "exposure": "navigator" },
+              { "operation": "add-item", "exposure": "navigator" },
+              { "operation": "checkout", "exposure": "navigator" }
+            ]
+          }
+        ]
+      }
+    },
+    "policy": {
+      "inline": {
+        "baseUrl": "https://api.example.com",
+        "compound": { "maxTotalResponseBytes": 8388608, "workflowTimeoutSeconds": 60 }
+      }
+    },
+    "operations": {
+      "inline": {
+        "operations": [
+          {
+            "key": "POST /carts",
+            "method": "POST",
+            "path": "/carts",
+            "requestBody": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": { "currency": { "type": "string" } }
+                  }
+                }
+              }
+            },
+            "responses": {
+              "201": {
+                "content": {
+                  "application/json": {
+                    "schema": {
+                      "type": "object",
+                      "properties": { "id": { "type": "string" } }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "key": "POST /carts/{cartId}/items",
+            "method": "POST",
+            "path": "/carts/{cartId}/items",
+            "parameters": [
+              { "name": "cartId", "in": "path", "required": true, "schema": { "type": "string" } }
+            ],
+            "requestBody": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "properties": {
+                      "sku": { "type": "string" },
+                      "quantity": { "type": "integer" }
+                    }
+                  }
+                }
+              }
+            },
+            "responses": { "204": { "description": "Added" } }
+          },
+          {
+            "key": "POST /carts/{cartId}/checkout",
+            "method": "POST",
+            "path": "/carts/{cartId}/checkout",
+            "parameters": [
+              { "name": "cartId", "in": "path", "required": true, "schema": { "type": "string" } }
+            ],
+            "responses": {
+              "200": {
+                "content": {
+                  "application/json": {
+                    "schema": {
+                      "type": "object",
+                      "properties": {
+                        "orderId": { "type": "string" },
+                        "total": { "type": "number" }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "operations": [
+          {
+            "slug": "create-cart",
+            "name": "Create cart",
+            "inputSchema": {
+              "type": "object",
+              "properties": { "currency": { "type": "string" } }
+            },
+            "binding": { "type": "http", "operation": "POST /carts" }
+          },
+          {
+            "slug": "add-item",
+            "name": "Add item",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "cartId": { "type": "string" },
+                "sku": { "type": "string" },
+                "quantity": { "type": "integer" }
+              }
+            },
+            "binding": { "type": "http", "operation": "POST /carts/{cartId}/items" }
+          },
+          {
+            "slug": "checkout",
+            "name": "Checkout",
+            "inputSchema": {
+              "type": "object",
+              "properties": { "cartId": { "type": "string" } }
+            },
+            "binding": { "type": "http", "operation": "POST /carts/{cartId}/checkout" }
+          },
+          {
+            "slug": "place-order",
+            "kind": "compound",
+            "name": "Place order",
+            "summary": "Creates a cart, adds one item and checks out",
+            "inputSchema": {
+              "type": "object",
+              "required": ["sku"],
+              "properties": {
+                "sku": { "type": "string" },
+                "quantity": { "type": "integer" },
+                "currency": { "type": "string" }
+              }
+            },
+            "annotations": { "readOnly": false, "destructive": false, "idempotent": false, "openWorld": true },
+            "risk": "mutating",
+            "binding": {
+              "type": "compound",
+              "bindingVersion": 1,
+              "failurePolicy": "failFast",
+              "workflowTimeoutSeconds": 45,
+              "steps": [
+                {
+                  "stepId": "cart",
+                  "name": "Create cart",
+                  "operation": "create-cart",
+                  "inputMappings": [
+                    { "target": "/body/currency", "argument": "/currency" }
+                  ]
+                },
+                {
+                  "stepId": "item",
+                  "name": "Add the requested item",
+                  "operation": "add-item",
+                  "inputMappings": [
+                    { "target": "/path/cartId", "fromStep": "cart", "response": "/body/id" },
+                    { "target": "/body/sku", "argument": "/sku" },
+                    { "target": "/body/quantity", "constant": 1 }
+                  ]
+                },
+                {
+                  "stepId": "order",
+                  "name": "Check out",
+                  "operation": "checkout",
+                  "inputMappings": [
+                    { "target": "/path/cartId", "fromStep": "cart", "response": "/body/id" }
+                  ]
+                }
+              ],
+              "outputSelection": {
+                "entries": [
+                  { "target": "/orderId", "fromStep": "order", "response": "/body/orderId" },
+                  { "target": "/total", "fromStep": "order", "response": "/body/total" },
+                  { "target": "/currency", "argument": "/currency" }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

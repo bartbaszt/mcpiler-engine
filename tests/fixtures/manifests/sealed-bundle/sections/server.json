@@ -1,0 +1,19 @@
+{
+  "formatVersion": 1,
+  "name": "Sealed Example",
+  "description": "A multi-section bundle with per-section digests and a completeness hash.",
+  "version": "2.0.0",
+  "surfaces": [
+    {
+      "slug": "default",
+      "name": "Default",
+      "isDefault": true,
+      "navigator": { "enabled": true, "pageSize": 25 },
+      "outputSchemas": true,
+      "operations": [
+        { "operation": "list-widgets", "exposure": "direct" },
+        { "operation": "create-widget", "exposure": "navigator" }
+      ]
+    }
+  ]
+}

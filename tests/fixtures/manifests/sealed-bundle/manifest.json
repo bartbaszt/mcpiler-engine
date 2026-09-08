@@ -1,0 +1,51 @@
+{
+  "manifestFormatVersion": "0.1",
+  "generator": {
+    "name": "mcpiler-studio",
+    "version": "0.6.0",
+    "producedAtUtc": "2026-09-08T10:00:00Z"
+  },
+  "sections": {
+    "server": {
+      "path": "sections/server.json",
+      "sha256": "619083a27a90ea76582f9c6fc5e9861c4532b500a8091527895b0c27dcc54990",
+      "bytes": 520
+    },
+    "policy": {
+      "path": "sections/policy.json",
+      "sha256": "dcc1d1e38059c7e66953de9e0321bb838a84c0b74ffb9ba94f43c2bd1f8bcbc8",
+      "bytes": 833
+    },
+    "credentials": {
+      "path": "sections/credentials.json",
+      "sha256": "c41dbdc1e23240152d277e71b354460b53ae7ba81f252ae7b3def0214c98c277",
+      "bytes": 190
+    },
+    "operations": {
+      "path": "sections/operations.json",
+      "sha256": "373576c060e889026ea8aef9de48e202ce5a515dd31b62f3a2860098e69b2cf4",
+      "bytes": 1733
+    },
+    "agentSurface": {
+      "path": "sections/agentSurface.json",
+      "sha256": "c1d52f2d5682657ccd53964f4be2a1f3f594f63c4c5c1fde1f5e6a11acd80e2f",
+      "bytes": 1385
+    }
+  },
+  "completeness": {
+    "algorithm": "sha256",
+    "value": "d30da132e220e3bbadbb1a83fa7e951495717482252810abc2c807881c8a7143"
+  },
+  "provenance": {
+    "connectorId": "0f3f7f6a5c8b4a2d9e1c7b5a3d2f4e60",
+    "connectorRevisionId": "7c2a1b9d4e5f4c3a8b6d2e1f0a9c8b7d",
+    "publicationSnapshotHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "surfaces": {
+      "default": {
+        "publishedSurfaceId": "1a2b3c4d5e6f47889a0b1c2d3e4f5061",
+        "publicationProfileId": "2b3c4d5e6f70489a1b2c3d4e5f607182"
+      }
+    },
+    "note": "Engine never reads this object; unknown members here are intentional."
+  }
+}

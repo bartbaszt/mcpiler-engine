@@ -35,7 +35,6 @@ internal static class CredentialsSectionReader
 
         var elements = context.ObjectArray(root, "credentials", string.Empty);
         var credentials = new List<ManifestCredential>(elements.Count);
-        var slots = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var (element, pointer) in elements)
         {
@@ -83,23 +82,13 @@ internal static class CredentialsSectionReader
                 continue;
             }
 
-            var effectiveLocation = location?.Value ?? CredentialLocation.Header;
-            var identity = string.Concat(
-                Vocabulary.Write(scheme),
-                "|",
-                slot,
-                "|",
-                Vocabulary.Write(effectiveLocation));
-
-            if (!slots.Add(identity))
-            {
-                context.Error(
-                    ManifestDiagnosticCodes.CredentialSlotInvalid,
-                    $"Slot '{DiagnosticText.Echo(slot)}' is declared more than once for scheme '{Vocabulary.Write(scheme)}'. Which value applies would depend on declaration order.",
-                    SectionReadContext.Child(pointer, "slot"));
-                continue;
-            }
-
+            // Uniqueness is deliberately NOT checked here. Two credentials collide when they
+            // address the same destination, and that is a property of scheme plus slot plus
+            // location together: a bearer credential and a basic credential both write
+            // Authorization while declaring different schemes. Checking a scheme-scoped identity
+            // here would shadow the destination check with a narrower rule and a different code,
+            // so the operator would see a different refusal depending on whether the two
+            // credentials happened to share a scheme. ManifestValidator owns the invariant.
             credentials.Add(new ManifestCredential(scheme, slot, reference, location?.Value));
         }
 
@@ -223,7 +212,7 @@ internal static class CredentialsSectionReader
                 return CredentialReference.Env(text);
 
             case "fromFile":
-                if (!Path.IsPathFullyQualified(text))
+                if (!IsAbsoluteSecretPath(text))
                 {
                     context.Error(
                         ManifestDiagnosticCodes.CredentialReferenceUnresolved,
@@ -251,5 +240,41 @@ internal static class CredentialsSectionReader
 
                 return CredentialReference.Literal(text);
         }
+    }
+
+    /// <summary>
+    /// Decides whether a secret path is absolute, without asking the host operating system.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Path.IsPathFullyQualified(string)"/> answers a different question: whether the
+    /// running OS would resolve the path without consulting the current directory. On Windows it
+    /// rejects <c>/run/secrets/token</c>, which is the normal shape for the Linux container Engine
+    /// actually ships in. Using it would make the same manifest valid in production and invalid
+    /// when an operator runs <c>validate</c> on a laptop, which is exactly the portability the
+    /// format is supposed to guarantee. The rule is therefore about the text: a POSIX root, a
+    /// Windows drive root, or a UNC root. Nothing here touches the filesystem — whether the file
+    /// exists and can be read is an execution-time auth question, not a load-time one.
+    /// </remarks>
+    private static bool IsAbsoluteSecretPath(string path)
+    {
+        if (path.Length == 0)
+        {
+            return false;
+        }
+
+        if (path[0] is '/')
+        {
+            return true;
+        }
+
+        if (path.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return path.Length >= 3
+            && char.IsAsciiLetter(path[0])
+            && path[1] == ':'
+            && path[2] is '/' or '\\';
     }
 }

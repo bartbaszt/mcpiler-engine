@@ -1,0 +1,190 @@
+{
+  "manifestFormatVersion": "0.1",
+  "generator": { "name": "hand-authored", "version": "0.0.0" },
+  "sections": {
+    "server": {
+      "inline": {
+        "formatVersion": 1,
+        "name": "Pet Store",
+        "description": "Two surfaces over the same operation set.",
+        "version": "1.4.0",
+        "surfaces": [
+          {
+            "slug": "default",
+            "name": "Full access",
+            "isDefault": true,
+            "navigator": { "enabled": true, "pageSize": 10 },
+            "outputSchemas": true,
+            "operations": [
+              { "operation": "list-pets", "exposure": "direct" },
+              { "operation": "get-pet", "exposure": "direct" },
+              { "operation": "delete-pet", "exposure": "navigator" }
+            ]
+          },
+          {
+            "slug": "read-only",
+            "name": "Read only",
+            "requiredScopes": ["pets.read"],
+            "operations": [
+              { "operation": "list-pets", "exposure": "direct" },
+              { "operation": "get-pet", "exposure": "direct" },
+              { "operation": "delete-pet", "exposure": "hidden" }
+            ]
+          }
+        ]
+      }
+    },
+    "policy": {
+      "inline": {
+        "formatVersion": 1,
+        "baseUrl": "https://api.example.com/v1",
+        "allowedOrigins": ["https://api.example.com", "https://eu.example.com"],
+        "limits": {
+          "upstreamConnectTimeoutSeconds": 5,
+          "upstreamRequestTimeoutSeconds": 30,
+          "upstreamResponseSizeLimitBytes": 8388608,
+          "redirectHopLimit": 2,
+          "concurrency": 4,
+          "mcpRequestSizeLimitBytes": 262144
+        },
+        "schemaBounds": { "maxDepth": 16, "maxNodes": 512, "maxPropertiesPerLevel": 64 }
+      }
+    },
+    "operations": {
+      "inline": {
+        "formatVersion": 1,
+        "servers": ["https://api.example.com/v1"],
+        "securitySchemes": {
+          "bearerAuth": { "scheme": "bearer", "bearerFormat": "JWT" }
+        },
+        "security": [{ "bearerAuth": [] }],
+        "operations": [
+          {
+            "key": "GET /pets",
+            "method": "GET",
+            "path": "/pets",
+            "upstreamId": "listPets",
+            "summary": "List pets",
+            "tags": ["pets"],
+            "parameters": [
+              {
+                "name": "limit",
+                "in": "query",
+                "schema": { "type": "integer", "minimum": 1, "maximum": 100 }
+              },
+              {
+                "name": "tags",
+                "in": "query",
+                "style": "form",
+                "explode": false,
+                "schema": { "type": "array", "items": { "type": "string" } }
+              }
+            ],
+            "responses": {
+              "200": {
+                "content": {
+                  "application/json": {
+                    "schema": { "type": "array", "items": { "type": "object" } }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "key": "GET /pets/{petId}",
+            "method": "GET",
+            "path": "/pets/{petId}",
+            "upstreamId": "getPetById",
+            "summary": "Get a pet",
+            "parameters": [
+              { "name": "petId", "in": "path", "required": true, "schema": { "type": "string" } },
+              { "name": "X-Trace", "in": "header", "schema": { "type": "string" } },
+              { "name": "session", "in": "cookie", "schema": { "type": "string" } }
+            ],
+            "responses": {
+              "200": { "content": { "application/json": { "schema": { "type": "object" } } } },
+              "default": { "content": { "application/json": { "schema": { "type": "object" } } } }
+            }
+          },
+          {
+            "key": "DELETE /pets/{petId}",
+            "method": "DELETE",
+            "path": "/pets/{petId}",
+            "summary": "Delete a pet",
+            "servers": ["https://eu.example.com/v1"],
+            "parameters": [
+              { "name": "petId", "in": "path", "required": true, "schema": { "type": "string" } }
+            ],
+            "responses": { "204": { "description": "Deleted" } }
+          }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "formatVersion": 1,
+        "groups": [
+          { "name": "pets", "priority": 10 },
+          { "name": "admin", "priority": 1 }
+        ],
+        "operations": [
+          {
+            "slug": "list-pets",
+            "kind": "source-backed",
+            "name": "List pets",
+            "summary": "Lists pets in the inventory",
+            "groups": ["pets"],
+            "tags": ["read"],
+            "inputSchema": {
+              "type": "object",
+              "properties": { "limit": { "type": "integer" } }
+            },
+            "outputSchema": { "type": "object" },
+            "outputSchemaPolicy": { "generate": true, "advertise": "yes", "useInternally": false },
+            "annotations": { "readOnly": true, "destructive": false, "idempotent": true, "openWorld": true },
+            "risk": "readOnly",
+            "search": { "aliases": ["pets"], "keywords": ["inventory"], "exampleIntents": ["show me the pets"] },
+            "binding": { "type": "http", "operation": "GET /pets" }
+          },
+          {
+            "slug": "get-pet",
+            "name": "Get pet",
+            "summary": "Fetches one pet",
+            "groups": ["pets"],
+            "inputSchema": {
+              "type": "object",
+              "required": ["petId"],
+              "properties": { "petId": { "type": "string" } }
+            },
+            "binding": { "type": "http", "operation": "GET /pets/{petId}" }
+          },
+          {
+            "slug": "delete-pet",
+            "name": "Delete pet",
+            "summary": "Removes a pet from the inventory",
+            "groups": ["admin"],
+            "inputSchema": {
+              "type": "object",
+              "required": ["petId"],
+              "properties": { "petId": { "type": "string" } }
+            },
+            "risk": "destructive,mutating",
+            "binding": {
+              "type": "http",
+              "operation": "DELETE /pets/{petId}",
+              "serverUrl": "https://eu.example.com/v1"
+            }
+          }
+        ]
+      }
+    },
+    "credentials": {
+      "inline": {
+        "formatVersion": 1,
+        "credentials": [
+          { "scheme": "bearer", "slot": "Authorization", "value": { "fromEnv": "EXAMPLE_TOKEN" } }
+        ]
+      }
+    }
+  }
+}

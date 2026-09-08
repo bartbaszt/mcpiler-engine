@@ -1,0 +1,25 @@
+{
+  "manifestFormatVersion": "0.1",
+  "sections": {
+    "server": { "inline": { "name": "Example API" } },
+    "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+    "operations": {
+      "inline": {
+        "operations": [
+          { "key": "GET /pets", "method": "GET", "path": "/pets" }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "operations": [
+          {
+            "slug": "list-pets",
+            "name": "List pets",
+            "binding": { "type": "http", "operation": "GET /pets" }
+          }
+        ]
+      }
+    }
+  }
+}

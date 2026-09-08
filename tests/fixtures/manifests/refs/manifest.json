@@ -1,0 +1,150 @@
+{
+  "manifestFormatVersion": "0.1",
+  "sections": {
+    "server": {
+      "inline": {
+        "name": "Reference API",
+        "surfaces": [
+          {
+            "slug": "default",
+            "isDefault": true,
+            "operations": [
+              { "operation": "create-node", "exposure": "direct" },
+              { "operation": "get-tree", "exposure": "direct" }
+            ]
+          }
+        ]
+      }
+    },
+    "policy": {
+      "inline": {
+        "baseUrl": "https://api.example.com",
+        "schemaBounds": { "maxDepth": 32, "maxNodes": 2048, "maxPropertiesPerLevel": 256 }
+      }
+    },
+    "operations": {
+      "inline": {
+        "components": {
+          "schemas": {
+            "Error": {
+              "type": "object",
+              "properties": {
+                "code": { "type": "string" },
+                "message": { "type": "string" }
+              }
+            },
+            "Node": {
+              "type": "object",
+              "required": ["id"],
+              "properties": {
+                "id": { "type": "string" },
+                "label": { "type": "string" },
+                "parent": { "$ref": "#/components/schemas/Node" },
+                "children": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/Node" }
+                }
+              }
+            },
+            "NodeEnvelope": {
+              "type": "object",
+              "properties": {
+                "node": { "$ref": "#/components/schemas/Node" },
+                "error": { "$ref": "#/components/schemas/Error" }
+              }
+            }
+          }
+        },
+        "operations": [
+          {
+            "key": "POST /nodes",
+            "method": "POST",
+            "path": "/nodes",
+            "summary": "Create a node",
+            "requestBody": {
+              "required": true,
+              "content": {
+                "application/json": { "schema": { "$ref": "#/components/schemas/Node" } }
+              }
+            },
+            "responses": {
+              "201": {
+                "content": {
+                  "application/json": { "schema": { "$ref": "#/components/schemas/NodeEnvelope" } }
+                }
+              },
+              "default": {
+                "content": {
+                  "application/json": { "schema": { "$ref": "#/components/schemas/Error" } }
+                }
+              }
+            }
+          },
+          {
+            "key": "GET /nodes/{nodeId}",
+            "method": "GET",
+            "path": "/nodes/{nodeId}",
+            "summary": "Get a node tree",
+            "parameters": [
+              { "name": "nodeId", "in": "path", "required": true, "schema": { "type": "string" } },
+              {
+                "name": "depth",
+                "in": "query",
+                "schema": { "type": "integer", "minimum": 0, "maximum": 10 }
+              }
+            ],
+            "responses": {
+              "200": {
+                "content": {
+                  "application/json": { "schema": { "$ref": "#/components/schemas/NodeEnvelope" } }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "components": {
+          "schemas": {
+            "NodeInput": {
+              "type": "object",
+              "required": ["id"],
+              "properties": {
+                "id": { "type": "string" },
+                "children": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/NodeInput" }
+                }
+              }
+            }
+          }
+        },
+        "operations": [
+          {
+            "slug": "create-node",
+            "name": "Create node",
+            "summary": "Creates a node, optionally with children",
+            "inputSchema": { "$ref": "#/components/schemas/NodeInput" },
+            "binding": { "type": "http", "operation": "POST /nodes" }
+          },
+          {
+            "slug": "get-tree",
+            "name": "Get tree",
+            "summary": "Reads a node and its descendants",
+            "inputSchema": {
+              "type": "object",
+              "required": ["nodeId"],
+              "properties": {
+                "nodeId": { "type": "string" },
+                "depth": { "type": "integer" }
+              }
+            },
+            "binding": { "type": "http", "operation": "GET /nodes/{nodeId}" }
+          }
+        ]
+      }
+    }
+  }
+}

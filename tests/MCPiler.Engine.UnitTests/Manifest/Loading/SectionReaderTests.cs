@@ -494,9 +494,13 @@ public sealed class SectionReaderTests
     }
 
     [Fact]
-    public void Credentials_refuses_a_duplicate_slot_for_one_scheme()
+    public void Credentials_leaves_destination_uniqueness_to_the_validator()
     {
-        SectionReader.ReadCredentials(
+        // Each of these credentials is well formed on its own; they conflict only because they
+        // address the same header. Deciding that here would need a scheme-scoped identity, which
+        // would miss a bearer and a basic credential both writing Authorization and would report
+        // a different code than the cross-scheme case. ManifestValidator owns the invariant.
+        var section = SectionReader.ReadCredentials(
             Json(
                 """
                 {
@@ -508,7 +512,47 @@ public sealed class SectionReaderTests
                 """),
             _diagnostics);
 
-        Assert.Contains(ManifestDiagnosticCodes.CredentialSlotInvalid, ErrorCodes, StringComparer.Ordinal);
+        Assert.NotNull(section);
+        Assert.Equal(2, section!.Credentials.Count);
+        Assert.Empty(ErrorCodes);
+    }
+
+    [Fact]
+    public void Credentials_accept_a_posix_secret_path_on_every_host()
+    {
+        // Path.IsPathFullyQualified would reject this on Windows, so the same manifest would load
+        // in the Linux container and fail when an operator validates it on a laptop.
+        var section = SectionReader.ReadCredentials(
+            Json(
+                """
+                {
+                  "credentials": [
+                    { "scheme": "bearer", "slot": "Authorization", "value": { "fromFile": "/run/secrets/token" } }
+                  ]
+                }
+                """),
+            _diagnostics);
+
+        Assert.NotNull(section);
+        Assert.Empty(ErrorCodes);
+        Assert.Equal("/run/secrets/token", Assert.Single(section!.Credentials).Value.FromFile);
+    }
+
+    [Fact]
+    public void Credentials_refuse_a_relative_secret_path()
+    {
+        SectionReader.ReadCredentials(
+            Json(
+                """
+                {
+                  "credentials": [
+                    { "scheme": "bearer", "slot": "Authorization", "value": { "fromFile": "secrets/token" } }
+                  ]
+                }
+                """),
+            _diagnostics);
+
+        Assert.Contains(ManifestDiagnosticCodes.CredentialReferenceUnresolved, ErrorCodes, StringComparer.Ordinal);
     }
 
     // ---- operations ---------------------------------------------------------------------

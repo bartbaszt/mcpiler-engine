@@ -1,0 +1,18 @@
+{
+  "manifestFormatVersion": "0.1",
+  "sections": {
+    "server": { "inline": { "name": "Hostile Fixture" } },
+    "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+    "operations": {
+      "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] }
+    },
+    "agentSurface": {
+      "inline": {
+        "operations": [
+          { "slug": "ping", "name": "Ping", "binding": { "type": "http", "operation": "GET /ping" } }
+        ]
+      }
+    },
+    "credentials": { "path": "../secrets/credentials.json" }
+  }
+}

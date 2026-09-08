@@ -1,0 +1,29 @@
+{
+  "manifestFormatVersion": "0.1",
+  "sections": {
+    "server": {
+      "path": "sections/server.json",
+      "sha256": "619083a27a90ea76582f9c6fc5e9861c4532b500a8091527895b0c27dcc54990",
+      "bytes": 520
+    },
+    "policy": {
+      "path": "sections/policy.json",
+      "sha256": "dcc1d1e38059c7e66953de9e0321bb838a84c0b74ffb9ba94f43c2bd1f8bcbc8",
+      "bytes": 833
+    },
+    "operations": {
+      "path": "sections/operations.json",
+      "sha256": "373576c060e889026ea8aef9de48e202ce5a515dd31b62f3a2860098e69b2cf4",
+      "bytes": 1733
+    },
+    "agentSurface": {
+      "path": "sections/agentSurface.json",
+      "sha256": "c1d52f2d5682657ccd53964f4be2a1f3f594f63c4c5c1fde1f5e6a11acd80e2f",
+      "bytes": 1385
+    }
+  },
+  "completeness": {
+    "algorithm": "sha256",
+    "value": "d30da132e220e3bbadbb1a83fa7e951495717482252810abc2c807881c8a7143"
+  }
+}
