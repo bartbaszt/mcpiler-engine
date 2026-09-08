@@ -32,7 +32,7 @@ public sealed class EngineBoundaryTests
     /// Manifest; it never interprets a source API description, never uses an ORM, and
     /// never ships a user interface.
     /// </summary>
-    private static readonly string[] ForbiddenPackages =
+    internal static readonly string[] ForbiddenPackages =
     [
         "Microsoft.OpenApi",
         "YamlDotNet",
@@ -48,7 +48,7 @@ public sealed class EngineBoundaryTests
     /// prohibition is on interpreting source API description formats and on reaching into
     /// Platform persistence, identity, AI, validation and UI.
     /// </summary>
-    private static readonly string[] ForbiddenNamespaces =
+    internal static readonly string[] ForbiddenNamespaces =
     [
         "MCPiler.Storage",
         "MCPiler.Identity",
@@ -65,10 +65,8 @@ public sealed class EngineBoundaryTests
     [Fact]
     public void Repository_contains_no_private_platform_artifacts()
     {
-        var root = RepositoryRoot();
-
         var present = ForbiddenRootEntries
-            .Where(entry => Directory.Exists(Path.Combine(root, entry)) || File.Exists(Path.Combine(root, entry)))
+            .Where(EngineRepository.Exists)
             .ToArray();
 
         Assert.True(
@@ -132,50 +130,11 @@ public sealed class EngineBoundaryTests
     }
 
     private static IEnumerable<string> SourceFiles(params string[] patterns)
-    {
-        var root = RepositoryRoot();
-
-        return patterns
-            .SelectMany(pattern => Directory.EnumerateFiles(root, pattern, SearchOption.AllDirectories))
-            .Where(path => !IsBuildOutput(path, root))
-            .OrderBy(path => path, StringComparer.Ordinal);
-    }
-
-    private static bool IsBuildOutput(string path, string root)
-    {
-        var relative = Path.GetRelativePath(root, path);
-        var segments = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-
-        return segments.Any(segment =>
-            string.Equals(segment, "bin", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(segment, "obj", StringComparison.OrdinalIgnoreCase));
-    }
+        => EngineRepository.Files(patterns);
 
     private static string Relative(string path)
-        => Path.GetRelativePath(RepositoryRoot(), path).Replace('\\', '/');
+        => EngineRepository.Relative(path);
 
     private static string CurrentSourceFile()
-        => Path.Combine(
-            RepositoryRoot(),
-            "tests",
-            "MCPiler.Engine.ArchitectureTests",
-            "EngineBoundaryTests.cs");
-
-    private static string RepositoryRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-
-        while (directory is not null)
-        {
-            if (File.Exists(Path.Combine(directory.FullName, "MCPiler.Engine.slnx")))
-            {
-                return directory.FullName;
-            }
-
-            directory = directory.Parent;
-        }
-
-        throw new InvalidOperationException(
-            $"Could not locate the Engine repository root above '{AppContext.BaseDirectory}'.");
-    }
+        => EngineRepository.Absolute("tests/MCPiler.Engine.ArchitectureTests/EngineBoundaryTests.cs");
 }

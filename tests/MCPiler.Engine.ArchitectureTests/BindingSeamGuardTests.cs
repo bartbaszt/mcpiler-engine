@@ -82,7 +82,7 @@ public sealed class BindingSeamGuardTests
     [Fact]
     public void The_dispatcher_exists_where_the_guard_expects_it()
         => Assert.True(
-            File.Exists(Path.Combine(RepositoryRoot(), Dispatcher.Replace('/', Path.DirectorySeparatorChar))),
+            EngineRepository.Exists(Dispatcher),
             $"The binding seam is missing from {Dispatcher}, so this guard would silently pass.");
 
     /// <summary>
@@ -93,7 +93,7 @@ public sealed class BindingSeamGuardTests
     public void Every_permitted_file_exists()
     {
         var missing = PermittedFiles
-            .Where(entry => !File.Exists(Path.Combine(RepositoryRoot(), entry.Replace('/', Path.DirectorySeparatorChar))))
+            .Where(entry => !EngineRepository.Exists(entry))
             .ToList();
 
         Assert.True(missing.Count == 0, $"Stale binding-seam exemption: {string.Join(", ", missing)}");
@@ -102,10 +102,8 @@ public sealed class BindingSeamGuardTests
     [Fact]
     public void The_guard_recognizes_every_binding_type_in_the_model()
     {
-        var declared = File
-            .ReadAllText(Path.Combine(
-                RepositoryRoot(),
-                "src", "MCPiler.Engine", "Manifest", "Model", "ManifestBinding.cs"));
+        var declared = File.ReadAllText(
+            EngineRepository.Absolute("src/MCPiler.Engine/Manifest/Model/ManifestBinding.cs"));
 
         var missing = new Regex(
                 @"public sealed record (\w+Binding)\b",
@@ -122,36 +120,8 @@ public sealed class BindingSeamGuardTests
     }
 
     private static IEnumerable<string> ProductionSources()
-        => Directory
-            .EnumerateFiles(Path.Combine(RepositoryRoot(), "src"), "*.cs", SearchOption.AllDirectories)
-            .Where(path => !IsBuildOutput(path))
-            .OrderBy(path => path, StringComparer.Ordinal);
-
-    private static bool IsBuildOutput(string path)
-        => Path
-            .GetRelativePath(RepositoryRoot(), path)
-            .Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-            .Any(segment =>
-                string.Equals(segment, "bin", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(segment, "obj", StringComparison.OrdinalIgnoreCase));
+        => EngineRepository.ProductionSources();
 
     private static string Relative(string path)
-        => Path.GetRelativePath(RepositoryRoot(), path).Replace('\\', '/');
-
-    private static string RepositoryRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-
-        while (directory is not null)
-        {
-            if (File.Exists(Path.Combine(directory.FullName, "MCPiler.Engine.slnx")))
-            {
-                return directory.FullName;
-            }
-
-            directory = directory.Parent;
-        }
-
-        throw new InvalidOperationException("Could not locate the Engine repository root.");
-    }
+        => EngineRepository.Relative(path);
 }

@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text.Json.Nodes;
 using MCPiler.Engine.Manifest.Loading;
 using MCPiler.Engine.Manifest.Model;
@@ -370,5 +371,53 @@ public sealed class SchemaReferenceResolverTests
             pointer: string.Empty);
 
         Assert.Equal("/$defs/A", Assert.Single(diagnostics).Pointer);
+    }
+
+    /// <summary>
+    /// The resolver is constructed from a document that is already in memory and a set of
+    /// bounds. It holds no source, no loader, no stream and no client, so it has no way to
+    /// fetch a reference regardless of what a future author writes inside it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the structural half of the guarantee. The textual half lives in
+    /// <c>ManifestBoundaryTests</c>, which forbids every manifest component outside three named
+    /// filesystem components from naming an I/O or network type at all. Together they mean a
+    /// hostile <c>$ref</c> cannot become an outbound request: the resolver refuses a non-local
+    /// reference by rule, and could not act on one anyway.
+    /// </para>
+    /// <para>
+    /// The inspection is one level deep, which is sufficient because the textual guard
+    /// independently prevents any type this one holds from acquiring such a capability.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void Cannot_reach_anything_beyond_the_document_it_was_given()
+    {
+        var resolver = typeof(SchemaReferenceResolver);
+
+        var surface = resolver
+            .GetConstructors()
+            .SelectMany(constructor => constructor.GetParameters().Select(parameter => parameter.ParameterType))
+            .Concat(resolver
+                .GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                .Select(field => field.FieldType))
+            .Distinct()
+            .ToList();
+
+        Assert.NotEmpty(surface);
+
+        var capable = surface
+            .Where(type => type.Namespace is not null
+                && (type.Namespace.StartsWith("System.IO", StringComparison.Ordinal)
+                    || type.Namespace.StartsWith("System.Net", StringComparison.Ordinal)
+                    || type.Namespace.StartsWith("System.Diagnostics", StringComparison.Ordinal)))
+            .Select(type => type.FullName ?? type.Name)
+            .ToList();
+
+        Assert.True(
+            capable.Count == 0,
+            "The reference resolver must be built from an in-memory document and nothing else. "
+                + $"It can currently reach: {string.Join(", ", capable)}");
     }
 }

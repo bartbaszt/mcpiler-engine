@@ -298,6 +298,41 @@ public sealed class EquivalenceMatrixTests
     }
 
     [Fact]
+    public void ProvenanceContentDoesNotChangeTheManifest()
+    {
+        // Provenance is Studio-only identity riding inside an artifact that is meant to be
+        // hand-authorable. If any of it reached behaviour, an export and an equivalent
+        // hand-written manifest would stop being interchangeable, and a Studio identifier
+        // would have become a required runtime key through the back door.
+        //
+        // The architecture guard proves no source reads a provenance member. This proves the
+        // observable consequence, including for content that deliberately imitates real
+        // sections and real members.
+        var absent = Manifest();
+
+        var present = Manifest(provenance: """
+            {
+              "connectorId": "3f1b0c4e-0000-4000-8000-000000000000",
+              "sections": { "policy": { "inline": { "baseUrl": "https://attacker.example" } } },
+              "server": { "name": "Replaced" },
+              "manifestFormatVersion": "9.9",
+              "operations": [{ "key": "DELETE /everything" }],
+              "polcy": "a misspelling of a real section must still be accepted here",
+              "deeply": { "nested": { "and": ["irrelevant", 1, true, null] } }
+            }
+            """);
+
+        AssertEquivalent(absent, present);
+
+        var fromPresent = Read(present);
+
+        Assert.NotNull(fromPresent.Manifest!.Provenance);
+        Assert.Equal("https://api.example.com/", fromPresent.Manifest.Policy.BaseUrl.ToString());
+        Assert.Equal("Order API", fromPresent.Manifest.Server.Name);
+        Assert.Equal("0.1", fromPresent.Manifest.FormatVersion.ToString());
+    }
+
+    [Fact]
     public void TheDigestDetectsARealDifference()
     {
         // Without this, every equivalence assertion above would still pass if the projection
@@ -578,7 +613,8 @@ public sealed class EquivalenceMatrixTests
         string? server = null,
         string? policy = null,
         string? operationSchema = null,
-        string? agentSurface = null) => string.Create(
+        string? agentSurface = null,
+        string? provenance = null) => string.Create(
         CultureInfo.InvariantCulture,
         $$"""
         {
@@ -588,7 +624,7 @@ public sealed class EquivalenceMatrixTests
             "policy": { "inline": {{policy ?? DefaultPolicy}} },
             "operations": { "inline": {{Operations(operationSchema ?? """{ "type": "string" }""")}} },
             "agentSurface": { "inline": {{agentSurface ?? DefaultAgentSurface}} }
-          }
+          }{{(provenance is null ? string.Empty : ",\n  \"provenance\": " + provenance)}}
         }
         """);
 }
