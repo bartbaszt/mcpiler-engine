@@ -63,5 +63,9 @@ so changes the digest of every manifest and of every already-pinned Platform doc
 ## Regenerating
 
 Do not regenerate to make a failing test pass. A digest change means the canonical
-representation changed, which the versioning policy in `../../../docs/manifest.md` makes a
+representation changed, which the manifest format's versioning policy makes a
 format-version-level change. Change the documented format version first.
+
+This file is duplicated byte-for-byte into the other repository, so its text must be true in
+both. That is why it names no path and cites no decision record: a relative link would resolve
+in only one tree, and a decision record exists in only one of them.
