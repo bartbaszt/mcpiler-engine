@@ -1,4 +1,5 @@
 {
   "code": "manifest/section-path-escapes-bundle",
+  "schemaRefuses": true,
   "why": "The format has no URI resolver. A section path that looks like a URL must be refused rather than fetched, because loading a manifest must never make a network request."
 }

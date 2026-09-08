@@ -16,11 +16,11 @@ namespace MCPiler.Engine.Manifest.Loading;
 /// </remarks>
 internal static class DerivedSectionReader
 {
-    private static readonly string[] ToolsSectionMembers = ["formatVersion", "surfaces"];
+    internal static readonly string[] ToolsSectionMembers = ["formatVersion", "surfaces"];
 
-    private static readonly string[] SurfaceToolSetMembers = ["tools"];
+    internal static readonly string[] SurfaceToolSetMembers = ["tools"];
 
-    private static readonly string[] ToolMembers =
+    internal static readonly string[] ToolMembers =
     [
         "name",
         "description",
@@ -33,16 +33,16 @@ internal static class DerivedSectionReader
         "sizeTokens",
     ];
 
-    private static readonly string[] AnnotationMembers =
+    internal static readonly string[] AnnotationMembers =
         ["readOnly", "destructive", "idempotent", "openWorld"];
 
-    private static readonly string[] SearchSectionMembers =
+    internal static readonly string[] SearchSectionMembers =
         ["formatVersion", "builderVersion", "indexedFields", "scoring", "operations"];
 
-    private static readonly string[] ScoringMembers =
+    internal static readonly string[] ScoringMembers =
         ["quantizationStep", "metaMultiplier", "vectorScale", "fieldWeights"];
 
-    private static readonly string[] SearchDocumentMembers = ["operation", "summary", "risk", "terms"];
+    internal static readonly string[] SearchDocumentMembers = ["operation", "summary", "risk", "terms"];
 
     internal static ToolsSection? ReadTools(JsonNode? document, SectionReadContext context)
     {

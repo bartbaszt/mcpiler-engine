@@ -1,4 +1,5 @@
 {
   "code": "manifest/section-hash-mismatch",
+  "schemaRefuses": false,
   "why": "The declared size still matches, so only the digest detects that the credential section was swapped. Integrity is advisory in this format, but a declared digest is verified or the section does not load."
 }

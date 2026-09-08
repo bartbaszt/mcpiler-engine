@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mcpiler:manifest:0.1:tools",
+  "title": "MCPiler Manifest tools section",
+  "description": "Optional. Omit it and Engine derives the advertised tool set from server, agentSurface and operations. When present it must agree with that derivation.",
+  "type": "object",
+  "required": ["surfaces"],
+  "additionalProperties": false,
+  "properties": {
+    "formatVersion": { "const": 1 },
+    "surfaces": {
+      "description": "Keyed by surface slug.",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/surfaceToolSet" }
+    }
+  },
+  "$defs": {
+    "surfaceToolSet": {
+      "type": "object",
+      "required": ["tools"],
+      "additionalProperties": false,
+      "properties": {
+        "tools": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/tool" }
+        }
+      }
+    },
+    "tool": {
+      "type": "object",
+      "required": ["name", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9_.-]+$"
+        },
+        "description": { "type": "string" },
+        "inputSchema": { "$ref": "urn:mcpiler:manifest:0.1:schema" },
+        "outputSchema": { "$ref": "urn:mcpiler:manifest:0.1:schema" },
+        "operation": {
+          "description": "An agentSurface slug. A tool without one is legal only when its name starts with 'catalogue.'.",
+          "type": ["string", "null"]
+        },
+        "operationKey": { "type": ["string", "null"] },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "readOnly": { "type": "boolean" },
+            "destructive": { "type": "boolean" },
+            "idempotent": { "type": "boolean" },
+            "openWorld": { "type": "boolean" }
+          }
+        },
+        "sizeBytes": {
+          "description": "Studio budget accounting. Engine never reads it.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "sizeTokens": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

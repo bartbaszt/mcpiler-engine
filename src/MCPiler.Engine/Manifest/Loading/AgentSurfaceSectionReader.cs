@@ -10,11 +10,11 @@ namespace MCPiler.Engine.Manifest.Loading;
 /// </summary>
 internal static class AgentSurfaceSectionReader
 {
-    private static readonly string[] SectionMembers = ["formatVersion", "groups", "components", "operations"];
+    internal static readonly string[] SectionMembers = ["formatVersion", "groups", "components", "operations"];
 
-    private static readonly string[] GroupMembers = ["name", "priority"];
+    internal static readonly string[] GroupMembers = ["name", "priority"];
 
-    private static readonly string[] OperationMembers =
+    internal static readonly string[] OperationMembers =
     [
         "slug",
         "kind",
@@ -32,20 +32,20 @@ internal static class AgentSurfaceSectionReader
         "binding",
     ];
 
-    private static readonly string[] PolicyMembers = ["generate", "advertise", "useInternally"];
+    internal static readonly string[] PolicyMembers = ["generate", "advertise", "useInternally"];
 
-    private static readonly string[] AnnotationMembers = ["readOnly", "destructive", "idempotent", "openWorld"];
+    internal static readonly string[] AnnotationMembers = ["readOnly", "destructive", "idempotent", "openWorld"];
 
-    private static readonly string[] SearchMembers = ["aliases", "keywords", "exampleIntents"];
+    internal static readonly string[] SearchMembers = ["aliases", "keywords", "exampleIntents"];
 
-    private static readonly string[] HttpBindingMembers = ["type", "bindingId", "operation", "serverUrl"];
+    internal static readonly string[] HttpBindingMembers = ["type", "bindingId", "operation", "serverUrl"];
 
-    private static readonly string[] HttpBaseMembers = ["operation", "serverUrl"];
+    internal static readonly string[] HttpBaseMembers = ["operation", "serverUrl"];
 
-    private static readonly string[] TransformedBindingMembers =
+    internal static readonly string[] TransformedBindingMembers =
         ["type", "bindingId", "base", "inputProgram", "outputProgram"];
 
-    private static readonly string[] CompoundBindingMembers =
+    internal static readonly string[] CompoundBindingMembers =
     [
         "type",
         "bindingId",
@@ -57,12 +57,12 @@ internal static class AgentSurfaceSectionReader
         "outputSelection",
     ];
 
-    private static readonly string[] StepMembers =
+    internal static readonly string[] StepMembers =
         ["stepId", "operation", "inputMappings", "name", "summary", "inputProgram"];
 
-    private static readonly string[] MappingMembers = ["target", "argument", "fromStep", "response", "constant"];
+    internal static readonly string[] MappingMembers = ["target", "argument", "fromStep", "response", "constant"];
 
-    private static readonly string[] OutputSelectionMembers = ["entries", "outputProgram"];
+    internal static readonly string[] OutputSelectionMembers = ["entries", "outputProgram"];
 
     private static readonly string[] BindingTypeNames =
         [HttpBinding.TypeName, TransformedHttpBinding.TypeName, CompoundBinding.TypeName];

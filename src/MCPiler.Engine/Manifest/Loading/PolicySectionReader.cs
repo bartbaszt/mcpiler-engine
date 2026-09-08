@@ -15,7 +15,7 @@ namespace MCPiler.Engine.Manifest.Loading;
 /// </remarks>
 internal static class PolicySectionReader
 {
-    private static readonly string[] SectionMembers =
+    internal static readonly string[] SectionMembers =
     [
         "formatVersion",
         "baseUrl",
@@ -27,7 +27,7 @@ internal static class PolicySectionReader
         "files",
     ];
 
-    private static readonly string[] LimitMembers =
+    internal static readonly string[] LimitMembers =
     [
         "upstreamConnectTimeoutSeconds",
         "upstreamRequestTimeoutSeconds",
@@ -37,16 +37,16 @@ internal static class PolicySectionReader
         "mcpRequestSizeLimitBytes",
     ];
 
-    private static readonly string[] CeilingMembers =
+    internal static readonly string[] CeilingMembers =
         ["maxSteps", "maxDepth", "maxNodes", "maxOutputBytes", "maxArrayFanout"];
 
-    private static readonly string[] CompoundMembers =
+    internal static readonly string[] CompoundMembers =
         ["maxTotalResponseBytes", "workflowTimeoutSeconds"];
 
-    private static readonly string[] SchemaBoundMembers =
+    internal static readonly string[] SchemaBoundMembers =
         ["maxDepth", "maxNodes", "maxPropertiesPerLevel"];
 
-    private static readonly string[] FileMembers =
+    internal static readonly string[] FileMembers =
         ["handleLifetimeSeconds", "uploadSizeLimitBytes", "rejectMagicMismatch"];
 
     internal static PolicySection? Read(JsonNode? document, SectionReadContext context)

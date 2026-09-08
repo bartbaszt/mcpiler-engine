@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mcpiler:manifest:0.1:operations",
+  "title": "MCPiler Manifest operations section",
+  "description": "The effective HTTP operation model. This is what actually goes on the wire.",
+  "type": "object",
+  "required": ["operations"],
+  "additionalProperties": false,
+  "properties": {
+    "formatVersion": { "const": 1 },
+    "servers": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "securitySchemes": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/securityScheme" }
+    },
+    "security": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "components": {
+      "description": "Local schema components. Referenced with a fragment-only JSON Pointer from within this section.",
+      "type": "object"
+    },
+    "operations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/operation" }
+    }
+  },
+  "$defs": {
+    "operation": {
+      "type": "object",
+      "required": ["method", "path"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "description": "The durable execution address, '{METHOD} {path}'. Omit it to have it derived from method and path; a present key that disagrees is refused.",
+          "type": "string"
+        },
+        "method": { "type": "string" },
+        "path": { "type": "string" },
+        "upstreamId": { "type": "string" },
+        "summary": { "type": "string" },
+        "description": { "type": "string" },
+        "deprecated": { "type": "boolean" },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "parameters": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/parameter" }
+        },
+        "requestBody": { "$ref": "#/$defs/requestBody" },
+        "responses": {
+          "description": "Declared response media types decide file classification and the response schema drives structured-content validation, so omitting this changes runtime behaviour.",
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/response" }
+        },
+        "security": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "servers": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "parameter": {
+      "type": "object",
+      "required": ["name", "in"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "in": {
+          "$comment": "'querystring' exists in the Studio intermediate model but the request compiler refuses it, so admitting it here would create an authorable construct that can never execute.",
+          "enum": ["query", "header", "path", "cookie"]
+        },
+        "required": { "type": "boolean" },
+        "description": { "type": "string" },
+        "style": { "$ref": "#/$defs/style" },
+        "explode": { "type": "boolean" },
+        "allowReserved": { "type": "boolean" },
+        "allowEmptyValue": { "type": "boolean" },
+        "deprecated": { "type": "boolean" },
+        "schema": { "$ref": "urn:mcpiler:manifest:0.1:schema" },
+        "content": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/mediaType" }
+        }
+      }
+    },
+    "requestBody": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/mediaType" }
+        },
+        "required": { "type": "boolean" },
+        "description": { "type": "string" }
+      }
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/mediaType" }
+        },
+        "description": { "type": "string" }
+      }
+    },
+    "mediaType": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema": { "$ref": "urn:mcpiler:manifest:0.1:schema" },
+        "itemSchema": { "$ref": "urn:mcpiler:manifest:0.1:schema" },
+        "encoding": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/encoding" }
+        },
+        "itemEncoding": { "$ref": "#/$defs/encoding" },
+        "prefixEncoding": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/encoding" }
+        }
+      }
+    },
+    "encoding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "propertyName": {
+          "description": "Optional in the map form, where the key already names the property.",
+          "type": "string"
+        },
+        "contentType": { "type": "string" },
+        "headers": {
+          "type": "object",
+          "additionalProperties": { "$ref": "urn:mcpiler:manifest:0.1:schema" }
+        },
+        "style": { "$ref": "#/$defs/style" },
+        "explode": { "type": "boolean" },
+        "allowReserved": { "type": "boolean" }
+      }
+    },
+    "securityScheme": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scheme": { "type": ["string", "null"] },
+        "bearerFormat": { "type": ["string", "null"] },
+        "in": { "type": ["string", "null"] },
+        "description": { "type": ["string", "null"] }
+      }
+    },
+    "style": {
+      "enum": [
+        "matrix",
+        "label",
+        "form",
+        "simple",
+        "spaceDelimited",
+        "pipeDelimited",
+        "deepObject",
+        "cookie"
+      ]
+    }
+  }
+}

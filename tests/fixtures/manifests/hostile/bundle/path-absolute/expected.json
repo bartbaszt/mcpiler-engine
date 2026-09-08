@@ -1,4 +1,5 @@
 {
   "code": "manifest/section-path-escapes-bundle",
+  "schemaRefuses": true,
   "why": "An absolute path lets a manifest read any file the Engine process can read, so it is refused before the filesystem is touched."
 }

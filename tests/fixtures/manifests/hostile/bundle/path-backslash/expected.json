@@ -1,4 +1,5 @@
 {
   "code": "manifest/section-path-escapes-bundle",
+  "schemaRefuses": true,
   "why": "A backslash separator is refused rather than translated. Translating it would make a Windows-authored bundle load on Windows and fail on Linux as an unexplained missing-file error."
 }

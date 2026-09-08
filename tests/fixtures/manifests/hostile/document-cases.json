@@ -4,12 +4,14 @@
     {
       "name": "root-not-an-object",
       "code": "manifest/root-not-an-object",
+      "schemaRefuses": true,
       "why": "A manifest that is not an object has no grammar at all, so nothing later can be interpreted.",
       "manifest": ["manifestFormatVersion", "0.1"]
     },
     {
       "name": "format-version-missing",
       "code": "manifest/format-version-missing",
+      "schemaRefuses": true,
       "why": "Without a declared format version the reader would have to guess which grammar applies.",
       "manifest": {
         "sections": {
@@ -23,6 +25,7 @@
     {
       "name": "format-version-unsupported",
       "code": "manifest/format-version-unsupported",
+      "schemaRefuses": false,
       "why": "A future major version must be refused with the observed value and the supported range, never partially interpreted.",
       "manifest": {
         "manifestFormatVersion": "9.0",
@@ -37,6 +40,7 @@
     {
       "name": "section-missing",
       "code": "manifest/section-missing",
+      "schemaRefuses": true,
       "why": "policy is omitted. The perimeter and the outbound bounds have no safe default, so the manifest cannot load without it.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -50,6 +54,7 @@
     {
       "name": "section-unknown",
       "code": "manifest/section-unknown",
+      "schemaRefuses": true,
       "why": "An unknown section name is usually a misspelling of a real one. Ignoring it would silently drop whatever the author intended it to configure.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -65,6 +70,7 @@
     {
       "name": "section-both-inline-and-path",
       "code": "manifest/section-both-inline-and-path",
+      "schemaRefuses": true,
       "why": "Two payload sources for one section leave the effective content ambiguous, and a reader that silently prefers one would let the other be a decoy.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -79,6 +85,7 @@
     {
       "name": "section-neither-inline-nor-path",
       "code": "manifest/section-neither-inline-nor-path",
+      "schemaRefuses": true,
       "why": "An entry with no payload source is a declaration with nothing behind it.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -93,6 +100,7 @@
     {
       "name": "section-must-be-external",
       "code": "manifest/section-must-be-external",
+      "schemaRefuses": true,
       "why": "The vector matrix is a binary payload outside the determinism contract; admitting it inline would put unbounded base64 inside the document the seal covers.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -108,6 +116,7 @@
     {
       "name": "root-unknown-member",
       "code": "manifest/unknown-member",
+      "schemaRefuses": true,
       "why": "An unrecognised root member is either a typo or an attempt to smuggle configuration past a strict reader.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -123,6 +132,7 @@
     {
       "name": "inline-payload-with-digest",
       "code": "manifest/unknown-member",
+      "schemaRefuses": true,
       "why": "A digest on an inline payload is a second authority over bytes that already sit inside the sealed document, with no independent writer to disagree with.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -137,6 +147,7 @@
     {
       "name": "section-unknown-member",
       "code": "manifest/unknown-member",
+      "schemaRefuses": true,
       "why": "A misspelled policy member would otherwise silently fall back to a default perimeter the author did not intend.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -151,6 +162,7 @@
     {
       "name": "section-not-an-object",
       "code": "manifest/section-not-an-object",
+      "schemaRefuses": true,
       "why": "A section payload of the wrong JSON kind has no members to read.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -165,6 +177,7 @@
     {
       "name": "operations-duplicate-key",
       "code": "operations/duplicate-key",
+      "schemaRefuses": false,
       "why": "The execution key is the address a binding resolves. Two operations sharing it would make the executed request depend on declaration order.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -186,6 +199,7 @@
     {
       "name": "operations-key-disagrees",
       "code": "operations/key-disagrees-with-method-path",
+      "schemaRefuses": false,
       "why": "A key that disagrees with the method and path it claims to address would let the advertised operation and the executed request diverge.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -200,6 +214,7 @@
     {
       "name": "operations-querystring-parameter",
       "code": "operations/unsupported-parameter-location",
+      "schemaRefuses": true,
       "why": "The intermediate model has a querystring location but the request compiler refuses it, so admitting it here would create an authorable but unexecutable operation.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -225,6 +240,7 @@
     {
       "name": "operations-unknown-style",
       "code": "operations/unknown-style",
+      "schemaRefuses": true,
       "why": "An unknown serialization style has no defined wire behavior, and falling back to the default would silently change the request shape.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -250,6 +266,7 @@
     {
       "name": "schema-ref-not-local",
       "code": "schema/ref-not-local",
+      "schemaRefuses": true,
       "why": "A non-local reference would turn manifest loading into a network fetch, which the format deliberately cannot do.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -275,6 +292,7 @@
     {
       "name": "schema-ref-unresolvable",
       "code": "schema/ref-unresolvable",
+      "schemaRefuses": false,
       "why": "A dangling pointer must be reported at load, not discovered as an empty schema during the first invocation.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -301,6 +319,7 @@
     {
       "name": "schema-ref-cycle",
       "code": "schema/ref-unresolvable",
+      "schemaRefuses": false,
       "why": "A reference chain that never reaches a schema is unresolvable rather than a bound violation, so the message names the cycle instead of blaming the depth limit.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -332,6 +351,7 @@
     {
       "name": "surface-duplicate-slug",
       "code": "surface/duplicate-slug",
+      "schemaRefuses": false,
       "why": "The slug is the route segment. Two surfaces sharing it would make the served catalogue depend on declaration order.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -354,6 +374,7 @@
     {
       "name": "surface-no-default",
       "code": "surface/no-default",
+      "schemaRefuses": true,
       "why": "Without a default surface the unqualified route has nothing to resolve to.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -373,6 +394,7 @@
     {
       "name": "surface-multiple-defaults",
       "code": "surface/multiple-defaults",
+      "schemaRefuses": true,
       "why": "Two defaults make the unqualified route ambiguous, and picking the first would let declaration order decide which catalogue is served.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -395,6 +417,7 @@
     {
       "name": "surface-operation-unknown",
       "code": "surface/operation-unknown",
+      "schemaRefuses": false,
       "why": "A surface entry naming an operation that does not exist is a dangling grant; refusing it keeps the exposure list the single runtime authority.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -423,6 +446,7 @@
     {
       "name": "surface-duplicate-operation",
       "code": "surface/duplicate-operation",
+      "schemaRefuses": false,
       "why": "The same operation listed twice with different exposures would let declaration order decide whether it is advertised.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -451,6 +475,7 @@
     {
       "name": "agent-duplicate-slug",
       "code": "agent/duplicate-slug",
+      "schemaRefuses": false,
       "why": "The slug is the manifest-local identity used by surfaces, compound steps and derived sections. Duplicates make every one of those references ambiguous.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -479,6 +504,7 @@
     {
       "name": "agent-unknown-group",
       "code": "agent/unknown-group",
+      "schemaRefuses": false,
       "why": "Group membership joins by name. An undeclared name is a typo that would otherwise silently drop the operation out of its group.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -500,6 +526,7 @@
     {
       "name": "agent-kind-binding-mismatch",
       "code": "agent/kind-binding-mismatch",
+      "schemaRefuses": false,
       "why": "A declared kind that contradicts the binding shape would let the two disagree about what actually executes.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -520,6 +547,7 @@
     {
       "name": "binding-operation-key-unknown",
       "code": "binding/operation-key-unknown",
+      "schemaRefuses": false,
       "why": "A binding naming a key with no operation behind it is an advertised tool that can never execute.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -540,6 +568,7 @@
     {
       "name": "binding-compound-nested",
       "code": "binding/compound-nested",
+      "schemaRefuses": false,
       "why": "Nesting a compound inside a compound removes the single-level bound on how much work one invocation can start.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -576,6 +605,7 @@
     {
       "name": "binding-compound-step-unknown-operation",
       "code": "binding/compound-step-unknown-operation",
+      "schemaRefuses": false,
       "why": "A step referencing a slug that does not exist is a workflow that fails partway through after earlier steps have already run.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -607,6 +637,7 @@
     {
       "name": "binding-duplicate-step-id",
       "code": "binding/duplicate-step-id",
+      "schemaRefuses": false,
       "why": "Step identifiers address step outputs. Duplicates would let declaration order decide which response a later mapping reads.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -638,6 +669,7 @@
     {
       "name": "binding-step-reference-unknown",
       "code": "binding/step-reference-unknown",
+      "schemaRefuses": false,
       "why": "A step reading its own response, or a later step's, describes a workflow that can never execute in the declared order.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -683,6 +715,7 @@
     {
       "name": "policy-base-url-invalid",
       "code": "policy/base-url-invalid",
+      "schemaRefuses": true,
       "why": "The base URL seeds the default perimeter, so an unparseable value must refuse the section rather than produce an empty one.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -697,6 +730,7 @@
     {
       "name": "policy-origin-invalid",
       "code": "policy/origin-invalid",
+      "schemaRefuses": true,
       "why": "An origin carrying a path implies a narrower permission than the origin comparison actually applies, so accepting and truncating it would record a perimeter the operator did not authorise.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -716,6 +750,7 @@
     {
       "name": "policy-destination-not-allowed",
       "code": "policy/destination-not-allowed",
+      "schemaRefuses": false,
       "why": "A per-operation server URL outside the perimeter is refused at load, because it can never widen the perimeter at execution time and would otherwise fail on every call.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -740,6 +775,7 @@
     {
       "name": "credential-scheme-unknown",
       "code": "credential/scheme-unknown",
+      "schemaRefuses": true,
       "why": "No applier branch matches an unknown scheme, so accepting it would produce a credential that is silently never sent.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -759,6 +795,7 @@
     {
       "name": "credential-slot-duplicate",
       "code": "credential/slot-duplicate",
+      "schemaRefuses": false,
       "why": "Two credentials addressing the same header make the value actually sent depend on declaration order.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -781,6 +818,7 @@
     {
       "name": "credential-slot-invalid",
       "code": "credential/slot-invalid",
+      "schemaRefuses": false,
       "why": "A basic credential missing one half produces an Authorization header built from a value the author never supplied.",
       "manifest": {
         "manifestFormatVersion": "0.1",
@@ -800,6 +838,7 @@
     {
       "name": "credential-inline-not-permitted",
       "code": "credential/inline-not-permitted",
+      "schemaRefuses": false,
       "why": "A literal secret in the manifest is refused unless the operator opts in, because a manifest is a file that gets copied, committed and shipped in images.",
       "manifest": {
         "manifestFormatVersion": "0.1",

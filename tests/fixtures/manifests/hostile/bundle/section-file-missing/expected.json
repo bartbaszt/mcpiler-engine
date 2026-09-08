@@ -1,4 +1,5 @@
 {
   "code": "manifest/section-file-missing",
+  "schemaRefuses": false,
   "why": "A declared section whose file is absent is a truncated bundle. It must name the missing section rather than degrade to loading the manifest without its credentials."
 }

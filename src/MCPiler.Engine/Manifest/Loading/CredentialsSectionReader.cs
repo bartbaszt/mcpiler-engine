@@ -14,11 +14,11 @@ namespace MCPiler.Engine.Manifest.Loading;
 /// </remarks>
 internal static class CredentialsSectionReader
 {
-    private static readonly string[] SectionMembers = ["formatVersion", "credentials"];
+    internal static readonly string[] SectionMembers = ["formatVersion", "credentials"];
 
-    private static readonly string[] CredentialMembers = ["scheme", "slot", "location", "value"];
+    internal static readonly string[] CredentialMembers = ["scheme", "slot", "location", "value"];
 
-    private static readonly string[] ValueMembers = ["fromEnv", "fromFile", "inline"];
+    internal static readonly string[] ValueMembers = ["fromEnv", "fromFile", "inline"];
 
     internal static CredentialsSection? Read(
         JsonNode? document,

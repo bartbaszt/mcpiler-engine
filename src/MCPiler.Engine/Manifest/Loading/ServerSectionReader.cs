@@ -10,10 +10,10 @@ namespace MCPiler.Engine.Manifest.Loading;
 /// </summary>
 internal static class ServerSectionReader
 {
-    private static readonly string[] SectionMembers =
+    internal static readonly string[] SectionMembers =
         ["formatVersion", "name", "description", "version", "surfaces"];
 
-    private static readonly string[] SurfaceMembers =
+    internal static readonly string[] SurfaceMembers =
     [
         "slug",
         "name",
@@ -25,9 +25,9 @@ internal static class ServerSectionReader
         "operations",
     ];
 
-    private static readonly string[] NavigatorMembers = ["enabled", "pageSize"];
+    internal static readonly string[] NavigatorMembers = ["enabled", "pageSize"];
 
-    private static readonly string[] OperationMembers = ["operation", "exposure"];
+    internal static readonly string[] OperationMembers = ["operation", "exposure"];
 
     internal static ServerSection? Read(JsonNode? document, SectionReadContext context)
     {

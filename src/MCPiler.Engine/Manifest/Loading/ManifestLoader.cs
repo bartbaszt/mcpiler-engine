@@ -39,7 +39,7 @@ public static class ManifestLoader
     private const string ModelMember = "model";
     private const string DimensionMember = "dimension";
 
-    private static readonly string[] RootMembers =
+    internal static readonly string[] RootMembers =
     [
         FormatVersionMember,
         GeneratorMember,
@@ -48,9 +48,19 @@ public static class ManifestLoader
         ProvenanceMember,
     ];
 
-    private static readonly string[] GeneratorMembers = ["name", "version", "producedAtUtc"];
+    internal static readonly string[] GeneratorMembers = ["name", "version", "producedAtUtc"];
 
-    private static readonly string[] CompletenessMembers = ["algorithm", "value"];
+    internal static readonly string[] CompletenessMembers = ["algorithm", "value"];
+
+    internal static readonly string[] SectionEntryMembers =
+        [InlineMember, PathMember, Sha256Member, BytesMember];
+
+    /// <summary>
+    /// The vector section carries the two facts a ranker needs to decide whether a query
+    /// embedding is comparable, so its entry accepts two members no other section may declare.
+    /// </summary>
+    internal static readonly string[] VectorSectionEntryMembers =
+        [InlineMember, PathMember, Sha256Member, BytesMember, ModelMember, DimensionMember];
 
     /// <summary>Loads a manifest from <paramref name="source"/>.</summary>
     /// <param name="source">Where the manifest bytes come from.</param>
@@ -328,9 +338,7 @@ public static class ManifestLoader
     {
         var isVectorSection = string.Equals(name, ManifestSectionName.Vectors, StringComparison.Ordinal);
 
-        string[] allowed = isVectorSection
-            ? [InlineMember, PathMember, Sha256Member, BytesMember, ModelMember, DimensionMember]
-            : [InlineMember, PathMember, Sha256Member, BytesMember];
+        var allowed = isVectorSection ? VectorSectionEntryMembers : SectionEntryMembers;
 
         RejectUnknownMembers(entry, allowed, name, pointer, diagnostics);
 

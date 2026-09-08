@@ -9,10 +9,10 @@ namespace MCPiler.Engine.Manifest.Loading;
 /// </summary>
 internal static class OperationsSectionReader
 {
-    private static readonly string[] SectionMembers =
+    internal static readonly string[] SectionMembers =
         ["formatVersion", "servers", "securitySchemes", "security", "components", "operations"];
 
-    private static readonly string[] OperationMembers =
+    internal static readonly string[] OperationMembers =
     [
         "key",
         "method",
@@ -29,7 +29,7 @@ internal static class OperationsSectionReader
         "servers",
     ];
 
-    private static readonly string[] ParameterMembers =
+    internal static readonly string[] ParameterMembers =
     [
         "name",
         "in",
@@ -44,17 +44,17 @@ internal static class OperationsSectionReader
         "content",
     ];
 
-    private static readonly string[] RequestBodyMembers = ["content", "required", "description"];
+    internal static readonly string[] RequestBodyMembers = ["content", "required", "description"];
 
-    private static readonly string[] ResponseMembers = ["content", "description"];
+    internal static readonly string[] ResponseMembers = ["content", "description"];
 
-    private static readonly string[] MediaTypeMembers =
+    internal static readonly string[] MediaTypeMembers =
         ["schema", "itemSchema", "encoding", "itemEncoding", "prefixEncoding"];
 
-    private static readonly string[] EncodingMembers =
+    internal static readonly string[] EncodingMembers =
         ["propertyName", "contentType", "headers", "style", "explode", "allowReserved"];
 
-    private static readonly string[] SecuritySchemeMembers =
+    internal static readonly string[] SecuritySchemeMembers =
         ["scheme", "bearerFormat", "in", "description"];
 
     /// <summary>

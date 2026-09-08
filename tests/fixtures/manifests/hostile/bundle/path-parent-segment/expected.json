@@ -1,4 +1,5 @@
 {
   "code": "manifest/section-path-escapes-bundle",
+  "schemaRefuses": true,
   "why": "A parent segment is refused even when normalization would land back inside the bundle, because the bundle boundary is the only reference-resolution surface in the format."
 }

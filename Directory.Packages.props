@@ -21,6 +21,15 @@
 
   <ItemGroup Label="Testing">
     <PackageVersion Include="xunit.v3" Version="4.0.0" />
+
+    <!--
+      Test-only. The published JSON Schemas under schemas/ describe the manifest format
+      for editors and third-party tooling; the readers in Manifest/Loading remain the
+      runtime authority. An independent evaluator is what makes the schema tests evidence
+      rather than a restatement of the readers. MIT licensed, same evaluator the Studio
+      already uses, so the two agree on JSON Schema semantics.
+    -->
+    <PackageVersion Include="JsonSchema.Net" Version="9.4.0" />
   </ItemGroup>
 
 </Project>
