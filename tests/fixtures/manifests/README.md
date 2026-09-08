@@ -35,6 +35,22 @@ a `sections/` directory.
 | `credentials/` | every credential scheme and every API-key location, all by reference. |
 | `search/` | a pinned lexical index written by hand from the documented rules, so a drift in either derivation or the rules fails a test instead of quietly changing relevance. |
 
+## `archive/`
+
+`archive/sealed-bundle.mcpiler-manifest` is the deterministic transport archive of
+`sealed-bundle/`, byte-identical to `tests/fixtures/manifests/archive/` in the Platform
+repository.
+
+The generator that produces manifests packs archives too, and it cannot reference this
+project, so the two packers are independent implementations of one specified byte layout.
+This file is what reconciles them: each side asserts it produces exactly these bytes, so a
+divergence fails on whichever side changed. It was accepted only after both packers produced
+it independently and agreed.
+
+Agreeing on bytes is not sufficient on its own, because two packers could agree on a pattern
+that is not a loadable bundle. `ArchiveByteContractTests` therefore also unpacks this file and
+loads the result as a sealed manifest.
+
 ## Hostile fixtures
 
 `hostile/bundle/<case>/` holds cases that need real files on disk: path
@@ -56,3 +72,10 @@ of the required size would be unreadable and would not document anything.
 Both hostile sources are enumerated by the tests, so a new case is asserted the
 moment it is added; there is no separate list to update. A new valid fixture
 directory is likewise picked up and must load without errors.
+
+`ManifestCorpus` classifies a directory as a bundle when it holds a `manifest.json`, and
+`CorpusContainsTheDocumentedFixtures` asserts both the bundle list and the list of directories
+that are not bundles. Adding either kind therefore requires recording the decision there. The
+classification is positive rather than a list of excluded names so that a bundle whose root
+went missing shows up as unaccounted material instead of quietly dropping out of the
+valid-fixture theories.

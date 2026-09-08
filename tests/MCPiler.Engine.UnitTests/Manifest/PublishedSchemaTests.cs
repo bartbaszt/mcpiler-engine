@@ -36,7 +36,7 @@ public sealed class PublishedSchemaTests
             [ManifestSectionName.Search] = "urn:mcpiler:manifest:0.1:search",
         };
 
-    private static string CorpusRoot => TestRepository.Fixture("manifests");
+    private static string CorpusRoot => ManifestCorpus.Root;
 
     private static string SchemaRoot => Path.Combine(TestRepository.Root, SchemaDirectory);
 
@@ -604,14 +604,8 @@ public sealed class PublishedSchemaTests
         new("DerivedSectionReader.SearchDocumentMembers", "search.schema.json", ["#/$defs/document"], DerivedSectionReader.SearchDocumentMembers),
     ];
 
-    private static IReadOnlyList<string> ValidFixtureNames() =>
-        Directory
-            .GetDirectories(CorpusRoot)
-            .Select(Path.GetFileName)
-            .Where(name => !string.Equals(name, "hostile", StringComparison.Ordinal))
-            .Select(name => name!)
-            .Order(StringComparer.Ordinal)
-            .ToList();
+    private static IReadOnlyList<string> ValidFixtureNames() => ManifestCorpus.BundleNames();
+
 
     private static bool ReadSchemaRefuses(JsonObject element, string name)
     {

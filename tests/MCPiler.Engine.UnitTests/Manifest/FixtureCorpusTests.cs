@@ -20,7 +20,7 @@ public sealed class FixtureCorpusTests
 {
     private const string InlineSecretCanary = "CANARY-fixture-secret-must-not-appear";
 
-    private static string CorpusRoot => TestRepository.Fixture("manifests");
+    private static string CorpusRoot => ManifestCorpus.Root;
 
     public static TheoryData<string> ValidFixtures()
     {
@@ -68,6 +68,10 @@ public sealed class FixtureCorpusTests
         };
 
         Assert.Equal(expected, ValidFixtureNames());
+
+        // Everything in the corpus is accounted for as either a bundle or named support
+        // material, so neither kind can be added without a decision recorded here.
+        Assert.Equal(["archive", "hostile"], ManifestCorpus.SupportingNames());
     }
 
     [Theory]
@@ -421,14 +425,7 @@ public sealed class FixtureCorpusTests
             .Replace("__SCHEMA__", schema, System.StringComparison.Ordinal);
     }
 
-    private static IReadOnlyList<string> ValidFixtureNames() =>
-        Directory
-            .GetDirectories(CorpusRoot)
-            .Select(Path.GetFileName)
-            .Where(name => !string.Equals(name, "hostile", System.StringComparison.Ordinal))
-            .Select(name => name!)
-            .Order(System.StringComparer.Ordinal)
-            .ToList();
+    private static IReadOnlyList<string> ValidFixtureNames() => ManifestCorpus.BundleNames();
 
     private static ManifestReadResult ReadFixture(string fixture, ManifestLoadOptions? options = null) =>
         ManifestReader.Read(new DirectoryManifestSource(Path.Combine(CorpusRoot, fixture)), options);
