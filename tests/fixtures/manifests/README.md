@@ -8,6 +8,16 @@ tooling, so the corpus is written the way an operator would write it.
 `sealed-bundle` digests are over the exact bytes on disk, and a checkout that
 rewrote line endings would silently invalidate them.
 
+## `defaults.json`
+
+Every value the format treats as the meaning of an absent member, stated once. Byte-identical
+to `tests/fixtures/manifests/defaults.json` in the Platform repository.
+
+The producer decides what to omit and this reader decides what an omission means, in separate
+repositories with no shared code. `SharedDefaultsTests` asserts the reader against this file by
+parsing documents that omit the member, so what is pinned is the value an absence actually
+produces rather than a constant that happens to sit nearby.
+
 ## Valid fixtures
 
 Each directory holds a `manifest.json` and, where the fixture is a real bundle,

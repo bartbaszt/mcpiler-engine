@@ -1,0 +1,66 @@
+{
+  "note": "Every value the MCPiler Manifest format treats as the meaning of an ABSENT member. Duplicated byte-identically into the Engine repository at engine/tests/fixtures/manifests/defaults.json. Each side asserts its own constants against its own copy, so a default changed on one side of the boundary fails that side's test, and a fixture changed on one side fails the byte-equality test. Keys are dotted paths through the wire format, not code identifiers.",
+  "defaults": {
+    "manifestFormatVersion": "0.1",
+    "sectionFormatVersion": 1,
+
+    "server.surface.isDefault": false,
+    "server.surface.enabled": true,
+    "server.surface.outputSchemas": false,
+    "server.surface.navigator.enabled": false,
+    "server.surface.navigator.pageSize": 25,
+    "server.surface.operation.exposure": "direct",
+
+    "policy.limits.upstreamConnectTimeoutSeconds": 10,
+    "policy.limits.upstreamRequestTimeoutSeconds": 100,
+    "policy.limits.upstreamResponseSizeLimitBytes": 52428800,
+    "policy.limits.redirectHopLimit": 5,
+    "policy.limits.concurrency": 8,
+    "policy.limits.mcpRequestSizeLimitBytes": 1048576,
+    "policy.transformCeiling.maxSteps": 64,
+    "policy.transformCeiling.maxDepth": 32,
+    "policy.transformCeiling.maxNodes": 8192,
+    "policy.transformCeiling.maxOutputBytes": 262144,
+    "policy.transformCeiling.maxArrayFanout": 1024,
+    "policy.compound.maxTotalResponseBytes": 104857600,
+    "policy.compound.workflowTimeoutSeconds": 120,
+    "policy.schemaBounds.maxDepth": 32,
+    "policy.schemaBounds.maxNodes": 2048,
+    "policy.schemaBounds.maxPropertiesPerLevel": 256,
+    "policy.files.handleLifetimeSeconds": 86400,
+    "policy.files.uploadSizeLimitBytes": 104857600,
+    "policy.files.rejectMagicMismatch": true,
+
+    "credentials.credential.location": "header",
+
+    "operations.operation.deprecated": false,
+    "operations.parameter.required": false,
+    "operations.parameter.allowReserved": false,
+    "operations.parameter.allowEmptyValue": false,
+    "operations.parameter.deprecated": false,
+    "operations.parameter.style.path": "simple",
+    "operations.parameter.style.query": "form",
+    "operations.parameter.style.header": "simple",
+    "operations.parameter.style.cookie": "form",
+    "operations.parameter.explode.queryForm": true,
+    "operations.parameter.explode.queryOther": false,
+    "operations.parameter.explode.path": false,
+    "operations.parameter.explode.header": false,
+    "operations.parameter.explode.cookie": false,
+    "operations.requestBody.required": false,
+
+    "agentSurface.group.priority": 0,
+    "agentSurface.operation.outputSchemaPolicy.generate": true,
+    "agentSurface.operation.outputSchemaPolicy.advertise": "auto",
+    "agentSurface.operation.outputSchemaPolicy.useInternally": false,
+    "agentSurface.binding.compound.bindingVersion": 1,
+    "agentSurface.binding.compound.failurePolicy": "failFast",
+
+    "search.builderVersion": 1,
+    "search.scoring.quantizationStep": 1,
+    "search.scoring.metaMultiplier": 2,
+    "search.scoring.vectorScale": 10000,
+
+    "tools.tool.nameMaxLength": 128
+  }
+}
