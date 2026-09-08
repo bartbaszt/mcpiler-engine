@@ -6,7 +6,10 @@ namespace MCPiler.Engine.Manifest.Model;
 /// The manifest root document: format identity, the section index, and optional seal and
 /// provenance.
 /// </summary>
-/// <param name="FormatVersion">The declared manifest format version. See ADR-0053.</param>
+/// <param name="FormatVersion">
+/// The declared manifest format version. Its versioning policy is stated in
+/// <c>docs/manifest.md</c> and is independent of the Engine assembly version.
+/// </param>
 /// <param name="Sections">The section index, keyed by <see cref="ManifestSectionName"/>.</param>
 /// <param name="Generator">Diagnostic-only producer information.</param>
 /// <param name="Completeness">Present only in a sealed manifest.</param>
@@ -47,7 +50,7 @@ public sealed record ManifestGenerator(
 /// <param name="Value">Lowercase hex digest.</param>
 /// <remarks>
 /// Hashing the index rather than the concatenated payloads is what makes a *removed* section
-/// detectable instead of inferred from the surviving parts, carrying ADR-0033 forward.
+/// detectable instead of inferred from the surviving parts.
 /// </remarks>
 public sealed record ManifestCompleteness(string Algorithm, string Value)
 {

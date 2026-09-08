@@ -63,5 +63,5 @@ so changes the digest of every manifest and of every already-pinned Platform doc
 ## Regenerating
 
 Do not regenerate to make a failing test pass. A digest change means the canonical
-representation changed, which is a format-version-level change per ADR-0053 §8. Change the
-decision record first.
+representation changed, which the versioning policy in `../../../docs/manifest.md` makes a
+format-version-level change. Change the documented format version first.

@@ -124,7 +124,7 @@ public sealed record TransformCeiling(
 /// <param name="WorkflowTimeout">Whole-workflow budget.</param>
 public sealed record CompoundBounds(long MaxTotalResponseBytes, TimeSpan WorkflowTimeout)
 {
-    /// <summary>The compound defaults fixed by ADR-0034.</summary>
+    /// <summary>The compound defaults the manifest format fixes; see <c>docs/manifest.md</c>.</summary>
     public static CompoundBounds Default { get; } = new(
         MaxTotalResponseBytes: 100L * 1024 * 1024,
         WorkflowTimeout: TimeSpan.FromSeconds(120));

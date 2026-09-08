@@ -112,6 +112,54 @@ public sealed class EngineBoundaryTests
                 + string.Join(", ", offenders));
     }
 
+    /// <summary>
+    /// Decision records live only in the private Platform repository, so an <c>ADR-NNNN</c>
+    /// citation in published Engine content is an identifier no outside reader can resolve.
+    /// It is also fragile in a way a broken link is not: the private repository renumbers a
+    /// draft when it collides with an accepted record, and this repository would silently
+    /// keep pointing at the old number. Engine states its own rules, or points at its own
+    /// documentation, and never borrows Platform's numbering.
+    /// </summary>
+    [Fact]
+    public void No_published_content_cites_a_private_decision_record()
+    {
+        var offenders = EngineRepository.Files("*.md")
+            .Concat(EngineRepository.ProductionSources())
+            .Where(file => CitesADecisionRecord(File.ReadAllText(file)))
+            .Select(EngineRepository.Relative)
+            .Order(StringComparer.Ordinal)
+            .ToList();
+
+        Assert.True(
+            offenders.Count == 0,
+            "Engine content must not cite a private Platform decision record by number; "
+                + "state the rule or point at Engine's own documentation instead: "
+                + string.Join(", ", offenders));
+    }
+
+    private static bool CitesADecisionRecord(string text)
+    {
+        const string Token = "ADR-";
+        var index = text.IndexOf(Token, StringComparison.OrdinalIgnoreCase);
+        while (index >= 0)
+        {
+            var digit = index + Token.Length;
+            if (digit < text.Length && char.IsAsciiDigit(text[digit]))
+            {
+                return true;
+            }
+
+            if (digit >= text.Length)
+            {
+                return false;
+            }
+
+            index = text.IndexOf(Token, digit, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return false;
+    }
+
     [Fact]
     public void Repository_contains_no_private_platform_artifacts()
     {

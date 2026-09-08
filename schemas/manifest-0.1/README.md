@@ -44,8 +44,8 @@ pins the divergence so it stays deliberate.
 published schema host yet and a URL that does not resolve is a worse identifier than one that
 never promised to. A hosted alias can be added at publication.
 
-The version in the identifier is the manifest format version governed by ADR-0053, not the
-Engine assembly version.
+The version in the identifier is the manifest format version, whose versioning policy is
+stated in `../../docs/manifest.md`. It is not the Engine assembly version.
 
 ## Files
 
