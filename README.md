@@ -29,6 +29,11 @@ indefinitely. Engine has no phone-home dependency.
 
 ## Manifests
 
+The format reference is [`docs/manifest.md`](docs/manifest.md): the minimal example, every
+section, the diagnostic catalogue and the versioning policy. Machine-readable schemas are
+in [`schemas/manifest-0.1/`](schemas/manifest-0.1/) and worked examples of every feature
+are in [`tests/fixtures/manifests/`](tests/fixtures/manifests/).
+
 A manifest is a JSON document, or a directory of JSON sections with a small root index.
 Both forms use the same schema and the same loader, so a hand-written single file and a
 Studio-generated multi-section bundle are the same thing to Engine.

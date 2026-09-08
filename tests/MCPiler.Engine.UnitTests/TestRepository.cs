@@ -19,6 +19,10 @@ internal static class TestRepository
     public static string Fixture(params string[] segments)
         => Path.Combine([Root, "tests", "fixtures", .. segments]);
 
+    /// <summary>Absolute path of a repository-relative path, given with forward slashes.</summary>
+    public static string Absolute(string relative)
+        => Path.Combine([Root, .. relative.Split('/', StringSplitOptions.RemoveEmptyEntries)]);
+
     private static string ResolveRoot()
     {
         // <root>/tests/MCPiler.Engine.UnitTests/TestRepository.cs

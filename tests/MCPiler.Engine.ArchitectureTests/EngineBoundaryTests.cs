@@ -62,6 +62,56 @@ public sealed class EngineBoundaryTests
         "MCPiler.Compilation.Diagnostics",
     ];
 
+    /// <summary>
+    /// Path-shaped references to private MCPiler Platform locations, plus the private
+    /// Platform repository URL. Matched with a separator or extension rather than as bare
+    /// words, because "work", "rules" and "archive" are ordinary English and a guard that
+    /// refused them would be turned off rather than obeyed.
+    /// </summary>
+    private static readonly string[] ForbiddenDocumentationReferences =
+    [
+        "work/",
+        "specs/",
+        "decisions/",
+        "rules/",
+        ".opencode/",
+        ".agents/",
+        "AGENTS.md",
+        "LESSONS.md",
+        "LESSONS-TRIAGE.md",
+        "github.com/bartbaszt/mcpiler/",
+        "github.com/bartbaszt/mcpiler.git",
+    ];
+
+    /// <summary>
+    /// Prose is published with the source. A document that cites a Platform-private path
+    /// or repository is either a broken link for every reader outside this repository or a
+    /// disclosure of private development structure, and the two are indistinguishable from
+    /// the outside.
+    /// </summary>
+    [Fact]
+    public void No_document_references_a_private_platform_location()
+    {
+        var offenders = new List<string>();
+
+        foreach (var file in EngineRepository.Files("*.md"))
+        {
+            var text = File.ReadAllText(file);
+            foreach (var reference in ForbiddenDocumentationReferences)
+            {
+                if (text.Contains(reference, StringComparison.OrdinalIgnoreCase))
+                {
+                    offenders.Add($"{EngineRepository.Relative(file)} -> {reference}");
+                }
+            }
+        }
+
+        Assert.True(
+            offenders.Count == 0,
+            "Engine documentation must not reference private MCPiler Platform locations: "
+                + string.Join(", ", offenders));
+    }
+
     [Fact]
     public void Repository_contains_no_private_platform_artifacts()
     {
