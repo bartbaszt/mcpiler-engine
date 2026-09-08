@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Text.Json.Nodes;
 using MCPiler.Engine.Manifest.Canonical;
 using MCPiler.Engine.Manifest.Loading;
+using MCPiler.Engine.Manifest.Sealing;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Manifest.Validation;
 using Xunit;
@@ -17,10 +19,9 @@ namespace MCPiler.Engine.UnitTests.Manifest;
 /// then behaves differently on the same document produced by another writer.
 /// </summary>
 /// <remarks>
-/// Two planned dimensions are not here yet because the code they compare does not exist:
-/// derived-versus-explicit <c>tools</c> and <c>search</c> sections belong with the derivation
-/// work, and directory-versus-archive belongs with packing. Both are named in the plan so their
-/// absence is a sequencing fact rather than an omission.
+/// The derived-versus-explicit dimension for the <c>tools</c> and <c>search</c> sections lives
+/// with the code it compares, in the derivation suites, because proving it needs a deriver and
+/// a ranker rather than a document digest.
 /// </remarks>
 public sealed class EquivalenceMatrixTests
 {
@@ -168,6 +169,63 @@ public sealed class EquivalenceMatrixTests
 
         Assert.True(fromExternal.Succeeded, string.Join('\n', fromExternal.Errors));
         Assert.Equal(Digest(fromInline.Manifest), Digest(fromExternal.Manifest));
+    }
+
+    [Fact]
+    public void ADirectoryAndItsArchiveAreTheSameManifest()
+    {
+        // The directory is the canonical physical form and the archive is only transport, so
+        // moving a bundle through one must not be able to change what Engine reads out of it.
+        var origin = Directory.CreateTempSubdirectory("mcpiler-manifest-origin");
+        var destination = Directory.CreateTempSubdirectory("mcpiler-manifest-unpacked");
+
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(origin.FullName, "sections"));
+
+            File.WriteAllText(
+                Path.Combine(origin.FullName, "manifest.json"),
+                """
+                {
+                  "manifestFormatVersion": "0.1",
+                  "sections": {
+                    "server": { "path": "sections/server.json" },
+                    "policy": { "path": "sections/policy.json" },
+                    "operations": { "path": "sections/operations.json" },
+                    "agentSurface": { "path": "sections/agentSurface.json" }
+                  }
+                }
+                """);
+
+            File.WriteAllText(Path.Combine(origin.FullName, "sections", "server.json"), DefaultServer);
+            File.WriteAllText(Path.Combine(origin.FullName, "sections", "policy.json"), DefaultPolicy);
+            File.WriteAllText(Path.Combine(origin.FullName, "sections", "operations.json"), DefaultOperations);
+            File.WriteAllText(Path.Combine(origin.FullName, "sections", "agentSurface.json"), DefaultAgentSurface);
+
+            using var archive = new MemoryStream();
+
+            Assert.True(ManifestArchive.Pack(origin.FullName, archive).Succeeded);
+
+            archive.Position = 0;
+            Directory.Delete(destination.FullName, recursive: true);
+
+            Assert.True(ManifestArchive.Unpack(archive, destination.FullName).Succeeded);
+
+            var fromDirectory = ManifestReader.Read(new DirectoryManifestSource(origin.FullName));
+            var fromArchive = ManifestReader.Read(new DirectoryManifestSource(destination.FullName));
+
+            Assert.True(fromArchive.Succeeded, string.Join('\n', fromArchive.Errors));
+            Assert.Equal(Digest(fromDirectory.Manifest), Digest(fromArchive.Manifest));
+        }
+        finally
+        {
+            Directory.Delete(origin.FullName, recursive: true);
+
+            if (Directory.Exists(destination.FullName))
+            {
+                Directory.Delete(destination.FullName, recursive: true);
+            }
+        }
     }
 
     [Fact]

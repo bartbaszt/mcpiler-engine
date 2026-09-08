@@ -302,6 +302,28 @@ public static class ManifestDiagnosticCodes
     /// <summary>Warning: the vector matrix dimension does not match the query model.</summary>
     public const string VectorsDimensionMismatch = "vectors/dimension-mismatch";
 
+    // The archive group describes the transport container, never the manifest document inside
+    // it. Keeping it separate means an operator reading an archive code knows immediately that
+    // the bundle never got as far as being parsed as a manifest.
+
+    /// <summary>The archive could not be read as a manifest archive.</summary>
+    public const string ArchiveUnreadable = "archive/unreadable";
+
+    /// <summary>The archive carries an entry that is neither a regular file nor a directory.</summary>
+    public const string ArchiveEntryTypeUnsupported = "archive/entry-type-unsupported";
+
+    /// <summary>An archive entry name does not resolve safely inside the destination.</summary>
+    public const string ArchiveEntryPathUnsafe = "archive/entry-path-unsafe";
+
+    /// <summary>An entry name exceeds what the archive format can represent portably.</summary>
+    public const string ArchiveEntryNameTooLong = "archive/entry-name-too-long";
+
+    /// <summary>The archive exceeds an entry-count or total-size bound.</summary>
+    public const string ArchiveLimitExceeded = "archive/limit-exceeded";
+
+    /// <summary>The unpack destination already holds content.</summary>
+    public const string ArchiveDestinationNotEmpty = "archive/destination-not-empty";
+
     /// <summary>Every code this Engine build can produce.</summary>
     public static IReadOnlySet<string> All { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -378,6 +400,12 @@ public static class ManifestDiagnosticCodes
         SearchBuilderVersionUnsupported,
         VectorsUnreadable,
         VectorsDimensionMismatch,
+        ArchiveUnreadable,
+        ArchiveEntryTypeUnsupported,
+        ArchiveEntryPathUnsafe,
+        ArchiveEntryNameTooLong,
+        ArchiveLimitExceeded,
+        ArchiveDestinationNotEmpty,
     };
 
     /// <summary>
@@ -412,5 +440,6 @@ public static class ManifestDiagnosticCodes
         "tools",
         "search",
         "vectors",
+        "archive",
     };
 }
