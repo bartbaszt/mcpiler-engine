@@ -196,7 +196,7 @@ internal static class DerivedSectionReader
             // A differently built index would rank differently, which is a silent relevance
             // change rather than a visible failure. Engine rebuilds instead.
             context.Warning(
-                ManifestDiagnosticCodes.SearchDerivationMismatch,
+                ManifestDiagnosticCodes.SearchBuilderVersionUnsupported,
                 string.Create(
                     CultureInfo.InvariantCulture,
                     $"The search index was built by builder version {builderVersion}, but this Engine implements version {SearchScoring.BuilderVersion}. The index is ignored and rebuilt."),

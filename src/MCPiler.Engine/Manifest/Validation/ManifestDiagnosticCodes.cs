@@ -283,6 +283,19 @@ public static class ManifestDiagnosticCodes
     /// <summary>An explicit search section disagrees with what derivation produces.</summary>
     public const string SearchDerivationMismatch = "search/derivation-mismatch";
 
+    /// <summary>
+    /// Warning: the search index was produced by an index builder this Engine does not
+    /// implement, so the index is ignored and rebuilt.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="SearchDerivationMismatch"/> on purpose. This condition
+    /// recovers — Engine rebuilds and discovery continues — whereas a content disagreement
+    /// does not, because the declared index is what gets used. One code carrying both
+    /// severities would leave an operator unable to tell from the code whether anything was
+    /// lost.
+    /// </remarks>
+    public const string SearchBuilderVersionUnsupported = "search/builder-version-unsupported";
+
     /// <summary>Warning: the vector matrix could not be read. Ranking degrades to lexical.</summary>
     public const string VectorsUnreadable = "vectors/unreadable";
 
@@ -362,6 +375,7 @@ public static class ManifestDiagnosticCodes
         ToolSurfaceUnknown,
         ToolOperationUnknown,
         SearchDerivationMismatch,
+        SearchBuilderVersionUnsupported,
         VectorsUnreadable,
         VectorsDimensionMismatch,
     };
@@ -379,6 +393,7 @@ public static class ManifestDiagnosticCodes
         NoResponsesDeclared,
         SurfaceHasNoOperations,
         CredentialInlineDiscouraged,
+        SearchBuilderVersionUnsupported,
         VectorsUnreadable,
         VectorsDimensionMismatch,
     };

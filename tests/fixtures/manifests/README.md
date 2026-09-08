@@ -23,6 +23,7 @@ a `sections/` directory.
 | `transformed/` | input and output transformation programs carried verbatim. |
 | `files/` | multipart upload with encoding, raw binary body, and a binary response declared through its media types. |
 | `credentials/` | every credential scheme and every API-key location, all by reference. |
+| `search/` | a pinned lexical index written by hand from the documented rules, so a drift in either derivation or the rules fails a test instead of quietly changing relevance. |
 
 ## Hostile fixtures
 

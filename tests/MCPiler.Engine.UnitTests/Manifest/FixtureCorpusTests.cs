@@ -63,7 +63,8 @@ public sealed class FixtureCorpusTests
     {
         var expected = new[]
         {
-            "compound", "credentials", "files", "minimal", "multi-surface", "refs", "sealed-bundle", "transformed",
+            "compound", "credentials", "files", "minimal", "multi-surface", "refs", "sealed-bundle", "search",
+            "transformed",
         };
 
         Assert.Equal(expected, ValidFixtureNames());

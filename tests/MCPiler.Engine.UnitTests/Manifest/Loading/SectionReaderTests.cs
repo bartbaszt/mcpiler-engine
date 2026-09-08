@@ -1276,7 +1276,9 @@ public sealed class SectionReaderTests
         Assert.Null(SectionReader.ReadSearch(Json("""{ "builderVersion": 2 }"""), _diagnostics));
 
         AssertNoErrors();
-        Assert.Contains(ManifestDiagnosticCodes.SearchDerivationMismatch, Codes, StringComparer.Ordinal);
+        // Its own code, not the derivation-mismatch code: this case recovers by rebuilding,
+        // and severity has to be readable from the code alone.
+        Assert.Contains(ManifestDiagnosticCodes.SearchBuilderVersionUnsupported, Codes, StringComparer.Ordinal);
     }
 
     // ---- reporting behavior -------------------------------------------------------------

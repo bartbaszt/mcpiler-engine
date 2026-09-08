@@ -179,6 +179,7 @@
                 {
                   "stepId": "order",
                   "name": "Check out",
+                  "summary": "Finalises the order and returns its identifier",
                   "operation": "checkout",
                   "inputMappings": [
                     { "target": "/path/cartId", "fromStep": "cart", "response": "/body/id" }

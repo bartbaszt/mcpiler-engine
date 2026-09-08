@@ -1,0 +1,149 @@
+{
+  "manifestFormatVersion": "0.1",
+  "generator": { "name": "hand-authored", "version": "0.0.0" },
+  "sections": {
+    "server": {
+      "inline": {
+        "formatVersion": 1,
+        "name": "Search Fixture",
+        "description": "A manifest whose lexical index is pinned by hand.",
+        "surfaces": [
+          {
+            "slug": "default",
+            "isDefault": true,
+            "navigator": { "enabled": true },
+            "operations": [
+              { "operation": "alpha", "exposure": "direct" },
+              { "operation": "ping", "exposure": "navigator" }
+            ]
+          },
+          {
+            "slug": "restricted",
+            "operations": [
+              { "operation": "alpha", "exposure": "direct" },
+              { "operation": "ping", "exposure": "hidden" }
+            ]
+          }
+        ]
+      }
+    },
+    "policy": {
+      "inline": {
+        "formatVersion": 1,
+        "baseUrl": "https://api.example.com"
+      }
+    },
+    "operations": {
+      "inline": {
+        "formatVersion": 1,
+        "operations": [
+          {
+            "key": "POST /alpha",
+            "method": "POST",
+            "path": "/alpha",
+            "responses": {
+              "200": { "content": { "application/json": { "schema": { "type": "object" } } } }
+            }
+          },
+          {
+            "key": "GET /ping",
+            "method": "GET",
+            "path": "/ping",
+            "responses": {
+              "200": { "content": { "application/json": { "schema": { "type": "object" } } } }
+            }
+          }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "formatVersion": 1,
+        "operations": [
+          {
+            "slug": "ping",
+            "name": "Ping",
+            "summary": "Checks health",
+            "binding": { "type": "http", "operation": "GET /ping" }
+          },
+          {
+            "slug": "alpha",
+            "name": "Alpha",
+            "summary": "Alpha thing",
+            "search": { "aliases": ["health"] },
+            "binding": { "type": "http", "operation": "POST /alpha" }
+          }
+        ]
+      }
+    },
+    "search": {
+      "inline": {
+        "formatVersion": 1,
+        "builderVersion": 1,
+        "indexedFields": [
+          "name",
+          "summary",
+          "description",
+          "tags",
+          "groups",
+          "httpPath",
+          "parameterName",
+          "parameterDescription",
+          "requestSchema",
+          "responseSchema",
+          "alias",
+          "keyword",
+          "exampleIntent",
+          "stepName",
+          "stepSummary"
+        ],
+        "scoring": {
+          "quantizationStep": 1,
+          "metaMultiplier": 2,
+          "vectorScale": 10000,
+          "fieldWeights": {
+            "name": 12000,
+            "alias": 11000,
+            "keyword": 9000,
+            "summary": 7000,
+            "exampleIntent": 6500,
+            "httpPath": 5000,
+            "stepName": 5000,
+            "parameterName": 4500,
+            "tags": 4000,
+            "groups": 4000,
+            "stepSummary": 3500,
+            "description": 3000,
+            "parameterDescription": 2500,
+            "requestSchema": 1500,
+            "responseSchema": 1500
+          }
+        },
+        "operations": [
+          {
+            "operation": "alpha",
+            "summary": "Alpha thing",
+            "risk": "mutating,openWorld,requiresConfirmation",
+            "terms": {
+              "alpha": ["name", "summary", "httpPath"],
+              "thing": ["summary"],
+              "post": ["httpPath"],
+              "health": ["alias"]
+            }
+          },
+          {
+            "operation": "ping",
+            "summary": "Checks health",
+            "risk": "openWorld,readOnly",
+            "terms": {
+              "ping": ["name", "httpPath"],
+              "checks": ["summary"],
+              "health": ["summary"],
+              "get": ["httpPath"]
+            }
+          }
+        ]
+      }
+    }
+  }
+}
