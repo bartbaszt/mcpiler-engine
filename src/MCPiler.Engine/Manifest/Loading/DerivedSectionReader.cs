@@ -104,6 +104,19 @@ internal static class DerivedSectionReader
                 continue;
             }
 
+            // The name is what a caller writes to invoke the tool. A name the protocol
+            // cannot carry produces an entry that is advertised and unusable, so it is
+            // refused here rather than truncated into something the author never wrote.
+            if (!ToolName.IsWellFormed(name))
+            {
+                context.Error(
+                    ManifestDiagnosticCodes.ToolNameInvalid,
+                    $"Tool name '{DiagnosticText.Echo(name)}' is not a valid advertised name. A name must be "
+                    + $"1 to {ManifestTool.MaxNameLength} characters from [A-Za-z0-9_.-].",
+                    SectionReadContext.Child(elementPointer, "name"));
+                continue;
+            }
+
             if (!names.Add(name))
             {
                 context.Error(

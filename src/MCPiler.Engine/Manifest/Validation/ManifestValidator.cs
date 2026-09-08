@@ -37,8 +37,78 @@ public static class ManifestValidator
         ValidateDestinations(manifest, diagnostics);
         ValidateCredentialSlots(manifest, diagnostics);
         ValidateSchemaReferences(manifest, diagnostics);
+        ValidateDeclaredTools(manifest, diagnostics);
 
         return diagnostics;
+    }
+
+    /// <summary>
+    /// A pinned tool set must be internally consistent and must address the surfaces and
+    /// operations the rest of the manifest declares.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Whether a pinned set agrees with derivation is a separate question answered when a
+    /// surface is actually advertised, because that comparison needs the derivation itself.
+    /// What is checked here is the part that is wrong regardless of derivation: a name the
+    /// protocol cannot carry, two tools competing for one name, a tool set addressed to a
+    /// surface that does not exist, and a tool claiming to back an operation the surface does
+    /// not expose directly.
+    /// </para>
+    /// <para>
+    /// A tool with no backing operation is legal only under the reserved Navigator prefix.
+    /// Without that rule an unbacked tool is indistinguishable from an operation tool whose
+    /// binding was lost, and the two need opposite responses.
+    /// </para>
+    /// </remarks>
+    private static void ValidateDeclaredTools(ManifestDocument manifest, List<ManifestDiagnostic> diagnostics)
+    {
+        if (manifest.Tools is not { } section)
+        {
+            return;
+        }
+
+        foreach ((string surfaceSlug, SurfaceToolSet set) in section.Surfaces.OrderBy(static entry => entry.Key, StringComparer.Ordinal))
+        {
+            string surfacePointer = JsonPointer.Build("surfaces", surfaceSlug);
+            ManifestSurface? surface = manifest.Server.Surface(surfaceSlug);
+
+            if (surface is null)
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.ToolSurfaceUnknown,
+                    $"A tool set is declared for surface '{DiagnosticText.Echo(surfaceSlug)}', which the " +
+                    $"'{ManifestSectionName.Server}' section does not declare.",
+                    section: ManifestSectionName.Tools,
+                    pointer: surfacePointer));
+                continue;
+            }
+
+            for (int index = 0; index < set.Tools.Count; index++)
+            {
+                ManifestTool tool = set.Tools[index];
+
+                // Name shape, name uniqueness, and the Navigator naming rule are decided by
+                // the tools reader, which sees the declared document. Repeating them here
+                // would mean one invariant with two enforcement points, and the reader drops
+                // an offending tool, so the copy would never even run.
+                if (tool.Operation is not { } slug)
+                {
+                    continue;
+                }
+
+                if (surface.ExposureOf(slug) != OperationExposure.Direct)
+                {
+                    diagnostics.Add(ManifestDiagnostic.Error(
+                        ManifestDiagnosticCodes.ToolOperationUnknown,
+                        $"Tool '{DiagnosticText.Echo(tool.Name)}' backs operation '{DiagnosticText.Echo(slug)}', " +
+                        $"which surface '{DiagnosticText.Echo(surfaceSlug)}' does not expose directly. Advertising " +
+                        "it would grant through the tool list what the exposure list withheld.",
+                        section: ManifestSectionName.Tools,
+                        pointer: JsonPointer.Build("surfaces", surfaceSlug, "tools", Segment(index), "operation")));
+                }
+            }
+        }
     }
 
     /// <summary>

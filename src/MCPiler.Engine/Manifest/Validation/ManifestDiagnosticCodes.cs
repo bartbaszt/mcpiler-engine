@@ -263,6 +263,23 @@ public static class ManifestDiagnosticCodes
     /// <summary>Two tools on one surface declare the same advertised name.</summary>
     public const string DuplicateToolName = "tools/duplicate-name";
 
+    /// <summary>An advertised tool name is empty, too long, or outside the permitted characters.</summary>
+    /// <remarks>
+    /// The name is what a caller writes to invoke the tool, so a name the protocol cannot
+    /// carry produces a tool that is advertised and unusable.
+    /// </remarks>
+    public const string ToolNameInvalid = "tools/name-invalid";
+
+    /// <summary>A declared tool set names a surface the server section does not declare.</summary>
+    public const string ToolSurfaceUnknown = "tools/surface-unknown";
+
+    /// <summary>A declared tool names an operation the surface does not expose directly.</summary>
+    /// <remarks>
+    /// Distinct from an unknown surface exposure entry: here the exposure list is fine and
+    /// the pinned tool set is what disagrees with it, so the fix is in a different place.
+    /// </remarks>
+    public const string ToolOperationUnknown = "tools/operation-unknown";
+
     /// <summary>An explicit search section disagrees with what derivation produces.</summary>
     public const string SearchDerivationMismatch = "search/derivation-mismatch";
 
@@ -341,6 +358,9 @@ public static class ManifestDiagnosticCodes
         ToolDerivationMismatch,
         NavigatorNameRequired,
         DuplicateToolName,
+        ToolNameInvalid,
+        ToolSurfaceUnknown,
+        ToolOperationUnknown,
         SearchDerivationMismatch,
         VectorsUnreadable,
         VectorsDimensionMismatch,

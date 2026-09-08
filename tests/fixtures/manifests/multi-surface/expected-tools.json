@@ -1,0 +1,113 @@
+{
+  "formatVersion": 1,
+  "surfaces": {
+    "default": {
+      "tools": [
+        {
+          "name": "list-pets",
+          "description": "Lists pets in the inventory",
+          "inputSchema": {
+            "type": "object",
+            "properties": { "limit": { "type": "integer" } }
+          },
+          "outputSchema": { "type": "object" },
+          "operation": "list-pets",
+          "operationKey": "GET /pets",
+          "annotations": { "readOnly": true, "destructive": false, "idempotent": true, "openWorld": true }
+        },
+        {
+          "name": "get-pet",
+          "description": "Fetches one pet",
+          "inputSchema": {
+            "type": "object",
+            "required": ["petId"],
+            "properties": { "petId": { "type": "string" } }
+          },
+          "operation": "get-pet",
+          "operationKey": "GET /pets/{petId}",
+          "annotations": { "readOnly": true, "destructive": false, "idempotent": true, "openWorld": true }
+        },
+        {
+          "name": "catalogue.discover",
+          "description": "Discovers catalogue operations through hybrid retrieval over curated names, summaries, descriptions, tags, groups, HTTP paths, parameters, schemas, and search metadata. Returns a bounded, deterministically ordered ranked page and a continuation token when more results exist.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "Optional natural-language query; matching is hybrid retrieval, not an identifier substring filter."
+              },
+              "pageSize": { "type": "integer", "minimum": 1, "maximum": 100, "default": 10 },
+              "continuation": {
+                "type": "string",
+                "description": "Opaque continuation token from a previous page."
+              }
+            }
+          },
+          "annotations": { "readOnly": false, "destructive": false, "idempotent": false, "openWorld": false }
+        },
+        {
+          "name": "catalogue.describe",
+          "description": "Returns the exact argument contract for one catalogue operation, including parameter locations, required arguments, and file semantics.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "operationKey": {
+                "type": "string",
+                "description": "The operation identifier, e.g. 'GET /pets'."
+              }
+            },
+            "required": ["operationKey"]
+          },
+          "annotations": { "readOnly": false, "destructive": false, "idempotent": false, "openWorld": false }
+        },
+        {
+          "name": "catalogue.invoke",
+          "description": "Invokes a named catalogue operation with the supplied arguments. Unknown identifiers or invalid arguments produce a tool error and perform no upstream request.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "operationKey": {
+                "type": "string",
+                "description": "The operation identifier, e.g. 'GET /pets'."
+              },
+              "arguments": {
+                "type": "object",
+                "description": "Arguments for the operation; consult catalogue.describe for the exact contract."
+              }
+            },
+            "required": ["operationKey", "arguments"]
+          },
+          "annotations": { "readOnly": false, "destructive": false, "idempotent": false, "openWorld": false }
+        }
+      ]
+    },
+    "read-only": {
+      "tools": [
+        {
+          "name": "list-pets",
+          "description": "Lists pets in the inventory",
+          "inputSchema": {
+            "type": "object",
+            "properties": { "limit": { "type": "integer" } }
+          },
+          "operation": "list-pets",
+          "operationKey": "GET /pets",
+          "annotations": { "readOnly": true, "destructive": false, "idempotent": true, "openWorld": true }
+        },
+        {
+          "name": "get-pet",
+          "description": "Fetches one pet",
+          "inputSchema": {
+            "type": "object",
+            "required": ["petId"],
+            "properties": { "petId": { "type": "string" } }
+          },
+          "operation": "get-pet",
+          "operationKey": "GET /pets/{petId}",
+          "annotations": { "readOnly": true, "destructive": false, "idempotent": true, "openWorld": true }
+        }
+      ]
+    }
+  }
+}
