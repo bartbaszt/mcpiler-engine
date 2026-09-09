@@ -121,6 +121,45 @@
           "description": "ok"
         }
       }
+    },
+    {
+      "key": "POST /echo-ambiguous",
+      "method": "POST",
+      "path": "/echo-ambiguous",
+      "upstreamId": "echoAmbiguous",
+      "requestBody": {
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            },
+            "itemSchema": {},
+            "itemEncoding": {
+              "propertyName": ""
+            }
+          },
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                }
+              }
+            },
+            "itemSchema": {},
+            "itemEncoding": {
+              "propertyName": ""
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "200": {
+          "description": "ok"
+        }
+      }
     }
   ]
 }

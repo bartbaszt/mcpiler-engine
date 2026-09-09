@@ -27,6 +27,15 @@ public sealed class RequestCompilationGoldenTests
 {
     private static readonly Uri Api = new("https://api.example.com");
     private static readonly Uri ApiV2 = new("https://api.example.com/v2");
+
+    /// <summary>
+    /// The multipart case's arguments, including the reserved <c>partHeaders</c> member. The part
+    /// header value is stated here rather than passed to the serializer directly because arguments
+    /// are the only source the compiler reads, so a golden built from this asserts a request a real
+    /// caller can produce. The Platform suite states the identical literal.
+    /// </summary>
+    private const string MultipartArguments =
+        """{"body":{"meta":"abc","file":"","note":"remember"},"partHeaders":{"note":{"X-Note-Version":"2.1"}}}""";
     private static readonly Uri Shop = new("https://shop.example.com");
 
     // -- parameter location and style ---------------------------------------
@@ -199,6 +208,17 @@ public sealed class RequestCompilationGoldenTests
         Assert.Equal(GoldenCorpus.Case("params-object-cookie-inherited.txt"), actual);
     }
 
+    // A content-typed parameter declares a media type instead of a style, so nothing about the
+    // style vocabulary decides its bytes. The query parameter states its own name and the header
+    // one does not, which is the same asymmetry every other location already has.
+    [Fact]
+    public void Content_typed_parameters_encode_with_their_declared_media_type()
+    {
+        var actual = GoldenCorpus.CompileAndRender("params-object", "GET /content-param", Api,
+            JsonNode.Parse("""{"filter":{"color":"red"},"X-Note":"hi"}""")!.AsObject());
+        Assert.Equal(GoldenCorpus.Case("params-content-typed.txt"), actual);
+    }
+
     // -- body media types ----------------------------------------------------
 
     [Fact]
@@ -225,6 +245,34 @@ public sealed class RequestCompilationGoldenTests
         Assert.Equal(GoldenCorpus.Case("body-text.txt"), actual);
     }
 
+    // The operation declares text/plain first and application/json second, so the JSON tie-break is
+    // exercised rather than coinciding with declaration order. The recorded decision never reaches
+    // the wire, so a golden cannot assert it and the compiled value has to be inspected directly.
+    [Fact]
+    public void An_ambiguous_body_media_type_selects_json_and_records_the_ambiguity()
+    {
+        var arguments = JsonNode.Parse("""{"body":{"name":"x"}}""")!.AsObject();
+        var actual = GoldenCorpus.CompileAndRender("bodies-scalar", "POST /echo-ambiguous", Api, arguments);
+        Assert.Equal(GoldenCorpus.Case("body-ambiguous-media-type.txt"), actual);
+
+        var compiled = RequestCompiler.Compile(
+            GoldenCorpus.Operation("bodies-scalar", "POST /echo-ambiguous"), Api, arguments);
+        var decision = Assert.Single(compiled.Decisions, d => d.Location == "body");
+        Assert.Equal("media-type", decision.Style);
+        Assert.Equal("defaulted to application/json", decision.EncodedValue);
+    }
+
+    // The contrast that makes the assertion above mean something: an operation offering one media
+    // type has nothing to disambiguate, so it must record nothing.
+    [Fact]
+    public void An_unambiguous_body_media_type_records_no_ambiguity()
+    {
+        var compiled = RequestCompiler.Compile(
+            GoldenCorpus.Operation("bodies-scalar", "POST /echo"), Api,
+            JsonNode.Parse("""{"body":{"name":"pal","count":3}}""")!.AsObject());
+        Assert.DoesNotContain(compiled.Decisions, d => d.Location == "body");
+    }
+
     [Fact]
     public void Body_form_urlencoded_matches_golden()
     {
@@ -245,17 +293,67 @@ public sealed class RequestCompilationGoldenTests
         var files = new Dictionary<string, byte[]> { ["file"] = Encoding.ASCII.GetBytes("%PDF-1.7") };
         var fileNames = new Dictionary<string, string> { ["file"] = "doc.pdf" };
         var fileMediaTypes = new Dictionary<string, string> { ["file"] = "application/pdf" };
-        var partHeaderValues = new Dictionary<string, IReadOnlyDictionary<string, string>>
-        {
-            ["note"] = new Dictionary<string, string> { ["X-Note-Version"] = "2.1" },
-        };
 
+        // The X-Note-Version part header arrives through the reserved partHeaders argument member, the
+        // only source production reads. It used to be handed straight to the serializer, so the golden
+        // asserted a header no caller could cause the product to emit.
         var actual = GoldenCorpus.CompileAndRender("bodies-multipart-binary", "POST /multipart", Api,
-            JsonNode.Parse("""{"body":{"meta":"abc","file":"","note":"remember"}}""")!.AsObject(),
-            files, fileNames, fileMediaTypes, partHeaderValues,
+            JsonNode.Parse(MultipartArguments)!.AsObject(),
+            files, fileNames, fileMediaTypes,
             new FixedBoundaryProvider("TEST-BOUNDARY"));
 
         Assert.Equal(GoldenCorpus.Case("body-multipart-mixed.txt"), actual);
+    }
+
+    // -- part-header gate ----------------------------------------------------
+    //
+    // These values arrive from a model, so the projection from arguments to part headers is a gate
+    // rather than a copy. Everything below is refused before any byte is written: an unvalidated
+    // value would let one argument append arbitrary headers to a part, and inside a multipart body
+    // it would let that argument forge a delimiter and restructure the whole request.
+
+    private static Exception CompileMultipart(string arguments)
+        => Record.Exception(() => RequestCompiler.Compile(
+            GoldenCorpus.Operation("bodies-multipart-binary", "POST /multipart"), Api,
+            JsonNode.Parse(arguments)!.AsObject(),
+            new Dictionary<string, byte[]> { ["file"] = Encoding.ASCII.GetBytes("%PDF-1.7") },
+            new Dictionary<string, string> { ["file"] = "doc.pdf" },
+            new Dictionary<string, string> { ["file"] = "application/pdf" },
+            new FixedBoundaryProvider("TEST-BOUNDARY")))!;
+
+    [Theory]
+    // A header the encoding does not declare. Accepting it would make the contract advisory.
+    [InlineData("""{"body":{"note":"remember"},"partHeaders":{"note":{"X-Injected":"1"}}}""")]
+    // A part the media type declares no encoding for, so no header is declared for it either.
+    [InlineData("""{"body":{"note":"remember"},"partHeaders":{"meta":{"X-Note-Version":"1"}}}""")]
+    // A carriage return would close the header block and open attacker-chosen content.
+    [InlineData("""{"body":{"note":"remember"},"partHeaders":{"note":{"X-Note-Version":"1\r\nX-Evil: y"}}}""")]
+    // A bare line feed is the same escape; both terminators have to be refused, not just the pair.
+    [InlineData("""{"body":{"note":"remember"},"partHeaders":{"note":{"X-Note-Version":"1\nX-Evil: y"}}}""")]
+    // The member itself has to be an object keyed by part name.
+    [InlineData("""{"body":{"note":"remember"},"partHeaders":"X-Note-Version: 1"}""")]
+    // And each part's entry has to be an object keyed by header name.
+    [InlineData("""{"body":{"note":"remember"},"partHeaders":{"note":"1"}}""")]
+    public void A_part_header_that_is_not_declared_or_not_safe_is_refused(string arguments)
+    {
+        var error = CompileMultipart(arguments);
+        var validation = Assert.IsType<ArgumentValidationException>(error);
+        Assert.Equal(RequestCompiler.PartHeadersArgument, validation.ParameterName);
+    }
+
+    // The declared header is emitted only when a value is supplied. Absence is not an error, because
+    // an encoding declares which headers a part may carry rather than which it must.
+    [Fact]
+    public void A_declared_part_header_with_no_supplied_value_is_omitted()
+    {
+        var actual = GoldenCorpus.CompileAndRender("bodies-multipart-binary", "POST /multipart", Api,
+            JsonNode.Parse("""{"body":{"meta":"abc","file":"","note":"remember"}}""")!.AsObject(),
+            new Dictionary<string, byte[]> { ["file"] = Encoding.ASCII.GetBytes("%PDF-1.7") },
+            new Dictionary<string, string> { ["file"] = "doc.pdf" },
+            new Dictionary<string, string> { ["file"] = "application/pdf" },
+            new FixedBoundaryProvider("TEST-BOUNDARY"));
+
+        Assert.DoesNotContain(Convert.ToHexString(Encoding.UTF8.GetBytes("X-Note-Version")).ToLowerInvariant(), actual);
     }
 
     [Fact]
@@ -307,12 +405,12 @@ public sealed class RequestCompilationGoldenTests
         var files = new Dictionary<string, byte[]> { ["file"] = Encoding.ASCII.GetBytes("%PDF-1.7") };
         var fileNames = new Dictionary<string, string> { ["file"] = "doc.pdf" };
         var fileMediaTypes = new Dictionary<string, string> { ["file"] = "application/pdf" };
-        var arguments = JsonNode.Parse("""{"body":{"meta":"abc","file":"","note":"remember"}}""")!.AsObject();
+        var arguments = JsonNode.Parse(MultipartArguments)!.AsObject();
 
         var first = GoldenCorpus.CompileAndRender("bodies-multipart-binary", "POST /multipart", Api,
-            arguments, files, fileNames, fileMediaTypes, null, new FixedBoundaryProvider("ONE"));
+            arguments, files, fileNames, fileMediaTypes, new FixedBoundaryProvider("ONE"));
         var second = GoldenCorpus.CompileAndRender("bodies-multipart-binary", "POST /multipart", Api,
-            arguments, files, fileNames, fileMediaTypes, null, new FixedBoundaryProvider("TWO"));
+            arguments, files, fileNames, fileMediaTypes, new FixedBoundaryProvider("TWO"));
 
         Assert.NotEqual(first, second);
 
@@ -340,7 +438,6 @@ public sealed class RequestCompilationGoldenTests
             new Dictionary<string, byte[]> { ["file"] = Encoding.ASCII.GetBytes("%PDF-1.7") },
             new Dictionary<string, string> { ["file"] = "doc.pdf" },
             new Dictionary<string, string> { ["file"] = "application/pdf" },
-            null,
             new FixedBoundaryProvider("TEST-BOUNDARY"));
 
         Assert.Equal("multipart/form-data; boundary=TEST-BOUNDARY", compiled.BodyMediaType);

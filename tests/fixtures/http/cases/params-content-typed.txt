@@ -1,0 +1,3 @@
+METHOD GET
+URL https://api.example.com/content-param?filter=%7B%22color%22%3A%22red%22%7D
+H X-Note: hi

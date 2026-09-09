@@ -73,6 +73,59 @@
           "description": "ok"
         }
       }
+    },
+    {
+      "key": "GET /content-param",
+      "method": "GET",
+      "path": "/content-param",
+      "upstreamId": "getContentParam",
+      "parameters": [
+        {
+          "name": "filter",
+          "in": "query",
+          "schema": {},
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "color": {
+                    "type": "string"
+                  },
+                  "size": {
+                    "type": "string"
+                  }
+                }
+              },
+              "itemSchema": {},
+              "itemEncoding": {
+                "propertyName": ""
+              }
+            }
+          }
+        },
+        {
+          "name": "X-Note",
+          "in": "header",
+          "schema": {},
+          "content": {
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              },
+              "itemSchema": {},
+              "itemEncoding": {
+                "propertyName": ""
+              }
+            }
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "ok"
+        }
+      }
     }
   ]
 }

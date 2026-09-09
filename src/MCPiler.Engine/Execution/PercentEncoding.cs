@@ -12,6 +12,12 @@ namespace MCPiler.Engine.Execution;
 /// A character outside the unreserved set is encoded per UTF-8 byte, so a non-ASCII value expands to
 /// one triplet per byte rather than one per character. The hexadecimal digits are upper case and
 /// culture-invariant, because the output is compared byte-for-byte against a recorded request.
+///
+/// Iteration is over runes, not UTF-16 code units. A character above the basic multilingual plane is
+/// stored as a surrogate pair, and encoding each half on its own hands the UTF-8 encoder an unpaired
+/// surrogate, which it substitutes with U+FFFD. That silently replaced the caller's character with a
+/// replacement marker instead of encoding it, and the corruption was unrecoverable because it happened
+/// before the bytes were emitted.
 /// </remarks>
 public static class PercentEncoding
 {
@@ -38,19 +44,20 @@ public static class PercentEncoding
         }
 
         var sb = new StringBuilder(value.Length + 16);
+        Span<byte> utf8 = stackalloc byte[4];
 
-        foreach (var ch in value)
+        foreach (var rune in value.EnumerateRunes())
         {
-            if (ch < 128 && (IsUnreserved[ch] || (allowReserved && Reserved.Contains(ch, StringComparison.Ordinal))))
+            if (rune.IsAscii && (IsUnreserved[rune.Value] || (allowReserved && Reserved.Contains((char)rune.Value, StringComparison.Ordinal))))
             {
-                sb.Append(ch);
+                sb.Append((char)rune.Value);
+                continue;
             }
-            else
+
+            var written = rune.EncodeToUtf8(utf8);
+            for (var i = 0; i < written; i++)
             {
-                foreach (var b in Encoding.UTF8.GetBytes(ch.ToString()))
-                {
-                    sb.Append('%').Append(b.ToString("X2", CultureInfo.InvariantCulture));
-                }
+                sb.Append('%').Append(utf8[i].ToString("X2", CultureInfo.InvariantCulture));
             }
         }
 

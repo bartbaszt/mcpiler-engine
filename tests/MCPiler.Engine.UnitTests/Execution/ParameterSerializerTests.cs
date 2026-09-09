@@ -23,6 +23,46 @@ public sealed class ParameterSerializerTests
 
     private static JsonNode Json(string text) => JsonNode.Parse(text)!;
 
+    private static ManifestParameter ContentParam(string name, ParameterLocation location, params string[] mediaTypes)
+        => new(name, location, Content: mediaTypes.ToDictionary(
+            static m => m,
+            static m => new ManifestMediaType(m),
+            StringComparer.Ordinal));
+
+    // ---- content-typed parameters ------------------------------------------
+    //
+    // A content-typed parameter declares a media type instead of a style, so none of the style
+    // machinery below applies to it. The corpus covers the two supported families end to end; these
+    // cover the refusals, which a document cannot express because a refusal produces no request.
+
+    [Fact]
+    public void A_content_typed_parameter_serializes_its_value_with_the_declared_media_type()
+    {
+        var json = ParameterSerializer.QueryValue(
+            ContentParam("filter", ParameterLocation.Query, "application/json"), Json("""{"a":1}"""));
+        Assert.Equal("filter=%7B%22a%22%3A1%7D", json);
+
+        var text = ParameterSerializer.HeaderValue(
+            ContentParam("X-Note", ParameterLocation.Header, "text/plain"), Json("\"hi\""));
+        Assert.Equal("hi", text);
+    }
+
+    // OpenAPI allows exactly one entry under a parameter's content, so a second is a defect in the
+    // contract rather than a choice the runtime is entitled to make on the caller's behalf.
+    [Fact]
+    public void A_content_typed_parameter_declaring_two_media_types_is_refused()
+        => Assert.Throws<UnsupportedSerializationException>(() => ParameterSerializer.QueryValue(
+            ContentParam("filter", ParameterLocation.Query, "application/json", "text/plain"),
+            Json("""{"a":1}""")));
+
+    // Guessing an encoding would put bytes on the wire that no part of the contract describes, which
+    // is the same reason an unrecognized style is refused rather than defaulted.
+    [Fact]
+    public void A_content_typed_parameter_declaring_an_unsupported_media_type_is_refused()
+        => Assert.Throws<UnsupportedSerializationException>(() => ParameterSerializer.QueryValue(
+            ContentParam("blob", ParameterLocation.Query, "application/octet-stream"),
+            Json("""{"a":1}""")));
+
     // ---- default resolution ------------------------------------------------
 
     [Fact]
@@ -47,7 +87,10 @@ public sealed class ParameterSerializerTests
         var inherited = Param("meta", ParameterLocation.Cookie);
         var value = Json("""{"a":"x","b":"y"}""");
 
-        Assert.Equal("a=x&b=y", ParameterSerializer.CookieValue(inherited, value));
+        // The pairs are joined with "; " because RFC 6265 defines that as the cookie-pair separator.
+        // The OpenAPI style table shows "&", but it is describing a query string; reused inside a
+        // Cookie header it yields one cookie whose value swallows the remaining pairs.
+        Assert.Equal("a=x; b=y", ParameterSerializer.CookieValue(inherited, value));
         Assert.Equal(
             ParameterSerializer.CookieValue(declared, value),
             ParameterSerializer.CookieValue(inherited, value));

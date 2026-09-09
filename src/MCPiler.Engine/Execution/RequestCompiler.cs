@@ -35,7 +35,7 @@ public static class RequestCompiler
     /// <param name="files">Raw bytes for file-carrying body members.</param>
     /// <param name="fileNames">File names for file-carrying body members.</param>
     /// <param name="fileMediaTypes">Media types for file-carrying body members.</param>
-    /// <param name="partHeaderValues">Values for headers a multipart part declares.</param>
+
     /// <param name="boundaryProvider">
     /// Supplies the multipart delimiter. Left null when serving, so each request gets a fresh one.
     /// </param>
@@ -46,7 +46,6 @@ public static class RequestCompiler
         IReadOnlyDictionary<string, byte[]>? files = null,
         IReadOnlyDictionary<string, string>? fileNames = null,
         IReadOnlyDictionary<string, string>? fileMediaTypes = null,
-        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? partHeaderValues = null,
         IBoundaryProvider? boundaryProvider = null)
     {
         var decisions = new List<SerializationDecision>();
@@ -160,9 +159,14 @@ public static class RequestCompiler
         var operationPath = "/" + path.TrimStart('/');
         var url = authority + basePath + operationPath;
 
-        if (query.Count > 0)
+        // An exploded empty collection serializes to nothing. Joining that empty contribution with
+        // the others emits a separator for a parameter that contributed no pair, producing "a=1&&b=2"
+        // or a bare trailing "?", neither of which the contract describes. A parameter that produces
+        // no query text is dropped, which is already how an absent optional parameter behaves.
+        var segments = query.Where(static segment => !string.IsNullOrEmpty(segment)).ToList();
+        if (segments.Count > 0)
         {
-            url += "?" + string.Join("&", query);
+            url += "?" + string.Join("&", segments);
         }
 
         var uri = new Uri(url);
@@ -173,17 +177,18 @@ public static class RequestCompiler
         if (operation.RequestBody is { } requestBody && requestBody.Content.Count > 0)
         {
             var (selected, ambiguous) = BodySerializer.SelectMediaType(requestBody.Content, arguments["body"]);
+            var effective = requestBody.Content[selected];
 
             // The media type to send comes back from the writer, not from the selected key: writing a
             // multipart body decides the mandatory delimiter, and only the writer knows it.
             (body, bodyMediaType) = BodySerializer.Serialize(
                 selected,
-                requestBody.Content[selected],
+                effective,
                 arguments["body"],
                 files,
                 fileNames,
                 fileMediaTypes,
-                partHeaderValues,
+                PartHeaders(arguments, effective),
                 boundaryProvider);
 
             if (ambiguous)
@@ -227,6 +232,88 @@ public static class RequestCompiler
     // The recorded style and explode are the effective ones rather than the declared ones. A reader
     // of a compiled request wants to know what was applied; what the document happened to spell out
     // is visible in the document.
+    /// <summary>Reserved argument member carrying per-part header values for a multipart body.</summary>
+    public const string PartHeadersArgument = "partHeaders";
+
+    /// <summary>
+    /// Projects the reserved <c>partHeaders</c> argument into the per-part header map the multipart
+    /// writer consumes, refusing anything the encoding contract did not declare.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A contract declares a part header's shape and never its content, so the value has to come from
+    /// the caller. Routing it through a reserved argument member is what makes the capability
+    /// reachable: the writer has always emitted declared headers when handed values, and nothing ever
+    /// handed it any, so a declared part header was silently dropped from every request.
+    /// </para>
+    /// <para>
+    /// These values arrive from a model, so this is a gate rather than a copy. A part must be one the
+    /// media type declares an encoding for, a header must be one that encoding declares, and a value
+    /// must carry no carriage return or line feed. An unvalidated value written into the part
+    /// preamble would let one argument append arbitrary headers, and inside a multipart body it would
+    /// let that argument forge a delimiter and restructure the request.
+    /// </para>
+    /// </remarks>
+    private static IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? PartHeaders(
+        JsonObject arguments,
+        ManifestMediaType effective)
+    {
+        if (!arguments.TryGetPropertyValue(PartHeadersArgument, out var declared) || declared is null)
+        {
+            return null;
+        }
+
+        if (declared is not JsonObject parts)
+        {
+            throw new ArgumentValidationException(
+                PartHeadersArgument,
+                $"Argument '{PartHeadersArgument}' must be an object keyed by part name.");
+        }
+
+        var projected = new Dictionary<string, IReadOnlyDictionary<string, string>>(StringComparer.Ordinal);
+        foreach (var part in parts)
+        {
+            if (!effective.Encoding.TryGetValue(part.Key, out var encoding))
+            {
+                throw new ArgumentValidationException(
+                    PartHeadersArgument,
+                    $"Part '{part.Key}' declares no encoding, so it accepts no headers.");
+            }
+
+            if (part.Value is not JsonObject values)
+            {
+                throw new ArgumentValidationException(
+                    PartHeadersArgument,
+                    $"Headers for part '{part.Key}' must be an object keyed by header name.");
+            }
+
+            var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var header in values)
+            {
+                if (!encoding.Headers.ContainsKey(header.Key))
+                {
+                    throw new ArgumentValidationException(
+                        PartHeadersArgument,
+                        $"Part '{part.Key}' does not declare header '{header.Key}'.");
+                }
+
+                var text = ParameterSerializer.ScalarText(header.Value);
+                if (text.Contains('\r') || text.Contains('\n'))
+                {
+                    throw new ArgumentValidationException(
+                        PartHeadersArgument,
+                        $"Header '{header.Key}' of part '{part.Key}' contains a line break.");
+                }
+
+                headers[header.Key] = text;
+            }
+
+            projected[part.Key] = headers;
+        }
+
+        return projected;
+    }
+
     private static SerializationDecision Decision(ManifestParameter parameter, string encoded) => new()
     {
         ParameterName = parameter.Name,

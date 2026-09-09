@@ -31,6 +31,7 @@ public sealed class GoldenCorpusTests
     [
         "basepath-encoded-query.txt",
         "basepath-simple-primitive.txt",
+        "body-ambiguous-media-type.txt",
         "body-binary.txt",
         "body-form.txt",
         "body-json.txt",
@@ -39,6 +40,7 @@ public sealed class GoldenCorpusTests
         "body-vnd-json.txt",
         "compound-step-create.txt",
         "compound-step-fetch.txt",
+        "params-content-typed.txt",
         "params-deepobject.txt",
         "params-form-array-explode.txt",
         "params-form-array-nonexplode.txt",

@@ -25,7 +25,13 @@ public static class ParameterSerializer
 {
     /// <summary>Serializes a path parameter into the replacement text for its <c>{name}</c> placeholder.</summary>
     public static string PathValue(ManifestParameter p, JsonNode? value)
-        => p.EffectiveStyle switch
+    {
+        if (IsContentTyped(p))
+        {
+            return ContentValue(p, value);
+        }
+
+        return p.EffectiveStyle switch
         {
             ParameterStyle.Simple => Encode(ScalarText(value), p.AllowReserved),
             ParameterStyle.Matrix => Matrix(p.Name, value, p.EffectiveExplode, p.AllowReserved),
@@ -34,10 +40,16 @@ public static class ParameterSerializer
                 $"Path parameter '{p.Name}' declares unsupported style '{Vocabulary.Write(p.EffectiveStyle)}'.",
                 p.Name),
         };
+    }
 
     /// <summary>Serializes a query parameter into its full query contribution, name included.</summary>
     public static string QueryValue(ManifestParameter p, JsonNode? value)
     {
+        if (IsContentTyped(p))
+        {
+            return $"{Encode(p.Name, p.AllowReserved)}={ContentValue(p, value)}";
+        }
+
         var enc = p.AllowReserved;
         var explode = p.EffectiveExplode;
 
@@ -75,6 +87,11 @@ public static class ParameterSerializer
     /// <summary>Serializes a header parameter into its header value.</summary>
     public static string HeaderValue(ManifestParameter p, JsonNode? value)
     {
+        if (IsContentTyped(p))
+        {
+            return ContentValue(p, value);
+        }
+
         if (p.EffectiveStyle != ParameterStyle.Simple)
         {
             throw new UnsupportedSerializationException(
@@ -88,6 +105,11 @@ public static class ParameterSerializer
     /// <summary>Serializes a cookie parameter into its <c>name=value</c> contribution.</summary>
     public static string CookieValue(ManifestParameter p, JsonNode? value)
     {
+        if (IsContentTyped(p))
+        {
+            return $"{Encode(p.Name, p.AllowReserved)}={ContentValue(p, value)}";
+        }
+
         if (p.EffectiveStyle != ParameterStyle.Form)
         {
             throw new UnsupportedSerializationException(
@@ -95,7 +117,63 @@ public static class ParameterSerializer
                 p.Name);
         }
 
-        return FormValue(p.Name, value, p.EffectiveExplode, p.AllowReserved);
+        return CookieFormValue(p.Name, value, p.EffectiveExplode, p.AllowReserved);
+    }
+
+    // -- content-typed parameters --------------------------------------------
+
+    /// <summary>True when the effective contract describes this parameter by media type rather than by style.</summary>
+    private static bool IsContentTyped(ManifestParameter p) => p.Content is { Count: > 0 };
+
+    /// <summary>
+    /// Serializes a parameter whose effective contract declares <c>content</c> instead of a style,
+    /// writing the value in the declared media type before percent-encoding it for its location.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A style says how a value is spread across a URI construct; a media type says how the value is
+    /// written before it gets there. The two are alternatives, so a content-typed parameter has no
+    /// style to dispatch on and every entry point has to ask before it reaches its style switch.
+    /// Until this existed the declaration was read into the model and then ignored, so the parameter
+    /// contributed nothing to the request and nothing reported that.
+    /// </para>
+    /// <para>
+    /// Exactly one media type is allowed, so a second is a defect in the contract rather than a
+    /// choice to resolve here. A media type with no defined parameter encoding fails compilation for
+    /// the same reason an unsupported style does: guessing would put bytes on the wire the contract
+    /// never described.
+    /// </para>
+    /// </remarks>
+    private static string ContentValue(ManifestParameter p, JsonNode? value)
+    {
+        if (p.Content!.Count > 1)
+        {
+            throw new UnsupportedSerializationException(
+                $"Parameter '{p.Name}' declares {p.Content.Count} content media types; exactly one is allowed.",
+                p.Name);
+        }
+
+        return Encode(ContentText(p.Name, p.Content.Keys.First(), value), p.AllowReserved);
+    }
+
+    /// <summary>Writes the value in the declared media type, without any location-specific encoding.</summary>
+    private static string ContentText(string parameterName, string mediaType, JsonNode? value)
+    {
+        var normalized = mediaType.Split(';')[0].Trim().ToLowerInvariant();
+        if (normalized == "application/json" || normalized.EndsWith("+json", StringComparison.Ordinal))
+        {
+            return value?.ToJsonString() ?? "null";
+        }
+
+        if (normalized.StartsWith("text/", StringComparison.Ordinal))
+        {
+            return ScalarText(value);
+        }
+
+        throw new UnsupportedSerializationException(
+            $"Parameter '{parameterName}' declares content media type '{mediaType}', which has no defined "
+            + "parameter encoding.",
+            parameterName);
     }
 
     // -- value-form builders -------------------------------------------------
@@ -111,7 +189,17 @@ public static class ParameterSerializer
             _ => Encode(ScalarText(value), enc),
         };
 
-    private static string FormValue(string parameterName, JsonNode? value, bool explode, bool enc)
+    /// <summary>Serializes a cookie parameter into the pairs it contributes to the <c>Cookie</c> header.</summary>
+    /// <remarks>
+    /// An exploded value contributes several pairs, and they are separated with <c>"; "</c> because
+    /// RFC 6265 defines that as the cookie-pair separator. The style table shows <c>&amp;</c> for
+    /// form-style explosion, but that table describes a query string; reusing its separator inside a
+    /// <c>Cookie</c> header produces one cookie whose value happens to contain the remaining pairs, so
+    /// the receiver never sees the later ones. The declared style still decides the shape — whether the
+    /// value explodes into pairs or collapses into one comma-joined value — and only the separator
+    /// between those pairs follows the header's own grammar.
+    /// </remarks>
+    private static string CookieFormValue(string parameterName, JsonNode? value, bool explode, bool enc)
     {
         var name = Encode(parameterName, enc);
 
@@ -119,12 +207,12 @@ public static class ParameterSerializer
         {
             case JsonArray arr:
                 return explode
-                    ? string.Join("&", arr.Select(v => $"{name}={Encode(ScalarText(v), enc)}"))
+                    ? string.Join("; ", arr.Select(v => $"{name}={Encode(ScalarText(v), enc)}"))
                     : $"{name}={string.Join(",", arr.Select(v => Encode(ScalarText(v), enc)))}";
 
             case JsonObject obj:
                 return explode
-                    ? string.Join("&", obj.Select(kv => $"{Encode(kv.Key, enc)}={Encode(ScalarText(kv.Value), enc)}"))
+                    ? string.Join("; ", obj.Select(kv => $"{Encode(kv.Key, enc)}={Encode(ScalarText(kv.Value), enc)}"))
                     : $"{name}={string.Join(",", obj.SelectMany(kv => new[] { Encode(kv.Key, enc), Encode(ScalarText(kv.Value), enc) }))}";
 
             default:

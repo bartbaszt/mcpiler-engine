@@ -80,27 +80,24 @@ public sealed class PercentEncodingTests
     }
 
     [Fact]
-    public void A_surrogate_pair_is_replaced_rather_than_encoded()
+    public void A_character_above_the_basic_multilingual_plane_encodes_its_own_utf8_bytes()
     {
-        // CHARACTERIZATION OF A DEFECT, not a statement of intent.
-        //
         // U+1F600 GRINNING FACE is one code point carried by the surrogate pair D83D DE00, and its
-        // UTF-8 form is F0 9F 98 80, so the correct output is "%F0%9F%98%80". The encoder iterates
-        // UTF-16 code units and encodes each one on its own, so each half of the pair is handed to
-        // the UTF-8 encoder as an unpaired surrogate and is substituted with U+FFFD. Every code point
-        // above the basic multilingual plane - emoji, the CJK extensions, musical and historic
-        // scripts - is therefore corrupted irreversibly on the wire.
+        // UTF-8 form is F0 9F 98 80.
         //
-        // The behaviour is recorded rather than corrected because the correction changes outbound
-        // request bytes and needs its own requirement and goldens. Both implementations carry it
-        // identically, so parity is unaffected.
-        Assert.Equal("%EF%BF%BD%EF%BF%BD", PercentEncoding.Encode("\U0001F600", allowReserved: false));
+        // This encoder used to iterate UTF-16 code units and encode each one alone, so each half of
+        // the pair reached the UTF-8 encoder as an unpaired surrogate and came back as U+FFFD. Every
+        // code point above the basic multilingual plane - emoji, the CJK extensions, musical and
+        // historic scripts - was corrupted irreversibly, and unrecoverably, because the substitution
+        // happened before the bytes were emitted. Iterating runes is what makes the pair one unit.
+        Assert.Equal("%F0%9F%98%80", PercentEncoding.Encode("\U0001F600", allowReserved: false));
     }
 
     [Fact]
-    public void A_basic_multilingual_plane_character_is_unaffected_by_that_defect()
+    public void A_basic_multilingual_plane_character_encodes_the_same_way()
     {
-        // The boundary of the defect: anything reachable by a single UTF-16 code unit is correct.
+        // The old defect's boundary sat exactly here: anything reachable by a single UTF-16 code unit
+        // was already correct. Kept so a regression that only handles the astral range is still caught.
         Assert.Equal("%EF%AC%80", PercentEncoding.Encode("\uFB00", allowReserved: false));
     }
 }

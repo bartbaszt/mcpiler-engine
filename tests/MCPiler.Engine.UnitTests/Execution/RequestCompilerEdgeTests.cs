@@ -26,17 +26,12 @@ public sealed class RequestCompilerEdgeTests
     private static readonly Uri Base = new("https://api.example.com");
 
     [Fact]
-    public void An_exploded_empty_collection_leaves_an_empty_query_segment()
+    public void An_exploded_empty_collection_contributes_no_query_segment()
     {
-        // CHARACTERIZATION of a defect, not a statement of intent.
-        //
-        // An exploded empty array contributes the empty string, and the compiler joins every
-        // contribution with "&" without discarding the empty ones. The result carries a stray
-        // separator: "?a=1&&b=2". A server is entitled to read that as a third, nameless parameter.
-        //
-        // The behaviour is recorded rather than corrected because the correction changes outbound
-        // request bytes and needs its own requirement and goldens. Both implementations carry it
-        // identically, so parity is unaffected.
+        // An exploded empty array serializes to nothing. The compiler used to join every contribution
+        // with "&" including the empty ones, producing "?a=1&&b=2", which a server is entitled to read
+        // as a third nameless parameter. Empty contributions are now dropped before the join, which is
+        // the behaviour an absent optional argument already had.
         var operation = Operation(
             "/items",
             Query("a"),
@@ -48,25 +43,27 @@ public sealed class RequestCompilerEdgeTests
             Base,
             Args("""{"a":"1","ids":[],"b":"2"}"""));
 
-        Assert.Equal("https://api.example.com/items?a=1&&b=2", compiled.ExactUrl);
+        Assert.Equal("https://api.example.com/items?a=1&b=2", compiled.ExactUrl);
     }
 
     [Fact]
-    public void A_single_empty_contribution_leaves_a_bare_question_mark()
+    public void A_single_empty_contribution_leaves_no_question_mark()
     {
+        // When the only parameter contributes nothing there is no query at all, so the delimiter is
+        // omitted too. This used to compile to a bare trailing "?".
         var operation = Operation("/items", Query("ids", ParameterStyle.Form, explode: true));
 
         var compiled = RequestCompiler.Compile(operation, Base, Args("""{"ids":[]}"""));
 
-        Assert.Equal("https://api.example.com/items?", compiled.ExactUrl);
+        Assert.Equal("https://api.example.com/items", compiled.ExactUrl);
     }
 
     [Fact]
     public void An_absent_optional_parameter_contributes_no_segment_at_all()
     {
-        // The contrast that makes the two cases above a defect rather than a convention: an argument
-        // the caller omitted is dropped cleanly, so an argument the caller supplied as empty should be
-        // too.
+        // The contrast that made the two cases above defects rather than conventions, and the shape
+        // they now match: an argument the caller omitted and an argument the caller supplied as empty
+        // both disappear.
         var operation = Operation("/items", Query("a"), Query("ids", ParameterStyle.Form, explode: true));
 
         var compiled = RequestCompiler.Compile(operation, Base, Args("""{"a":"1"}"""));

@@ -96,7 +96,6 @@ internal static class GoldenCorpus
         IReadOnlyDictionary<string, byte[]>? files = null,
         IReadOnlyDictionary<string, string>? fileNames = null,
         IReadOnlyDictionary<string, string>? fileMediaTypes = null,
-        IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? partHeaderValues = null,
         IBoundaryProvider? boundaryProvider = null)
     {
         var compiled = RequestCompiler.Compile(
@@ -106,7 +105,6 @@ internal static class GoldenCorpus
             files,
             fileNames,
             fileMediaTypes,
-            partHeaderValues,
             boundaryProvider);
 
         return Render(compiled).TrimEnd('\n');
