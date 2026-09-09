@@ -1,5 +1,5 @@
 {
-  "formatVersion": 1,
+  "formatVersion": 2,
   "groups": [{ "name": "widgets", "priority": 5 }],
   "operations": [
     {

@@ -1,5 +1,5 @@
 {
-  "manifestFormatVersion": "0.1",
+  "manifestFormatVersion": "0.2",
   "sections": {
     "server": {
       "path": "sections/server.json",
@@ -18,7 +18,7 @@
     },
     "agentSurface": {
       "path": "sections/agentSurface.json",
-      "sha256": "c1d52f2d5682657ccd53964f4be2a1f3f594f63c4c5c1fde1f5e6a11acd80e2f",
+      "sha256": "6a7aa9a57ca3fd42f09c42a97b6bba1810f83e4002a5957ef574173cc141ec78",
       "bytes": 1385
     }
   },

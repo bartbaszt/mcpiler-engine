@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:mcpiler:manifest:0.1:tools",
+  "$id": "urn:mcpiler:manifest:0.2:tools",
   "title": "MCPiler Manifest tools section",
   "description": "Optional. Omit it and Engine derives the advertised tool set from server, agentSurface and operations. When present it must agree with that derivation.",
   "type": "object",
@@ -37,8 +37,8 @@
           "pattern": "^[A-Za-z0-9_.-]+$"
         },
         "description": { "type": "string" },
-        "inputSchema": { "$ref": "urn:mcpiler:manifest:0.1:schema" },
-        "outputSchema": { "$ref": "urn:mcpiler:manifest:0.1:schema" },
+        "inputSchema": { "$ref": "urn:mcpiler:manifest:0.2:schema" },
+        "outputSchema": { "$ref": "urn:mcpiler:manifest:0.2:schema" },
         "operation": {
           "description": "An agentSurface slug. A tool without one is legal only when its name starts with 'catalogue.'.",
           "type": ["string", "null"]

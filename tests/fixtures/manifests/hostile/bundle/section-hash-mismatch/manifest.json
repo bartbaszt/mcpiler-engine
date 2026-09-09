@@ -1,5 +1,5 @@
 {
-  "manifestFormatVersion": "0.1",
+  "manifestFormatVersion": "0.2",
   "sections": {
     "server": { "inline": { "name": "Hostile Fixture" } },
     "policy": { "inline": { "baseUrl": "https://api.example.com" } },

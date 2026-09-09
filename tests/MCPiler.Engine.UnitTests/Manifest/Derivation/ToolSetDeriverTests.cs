@@ -509,7 +509,7 @@ public sealed class ToolSetDeriverTests
 
     private const string FileSlotBehindAReference = """
     {
-      "manifestFormatVersion": "0.1",
+      "manifestFormatVersion": "0.2",
       "sections": {
         "server": { "inline": { "name": "Files" } },
         "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -529,7 +529,7 @@ public sealed class ToolSetDeriverTests
 
     private static string Compound(bool stepsAreIdempotent) => $$"""
     {
-      "manifestFormatVersion": "0.1",
+      "manifestFormatVersion": "0.2",
       "sections": {
         "server": { "inline": { "name": "Workflow" } },
         "policy": { "inline": { "baseUrl": "https://api.example.com" } },

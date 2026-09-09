@@ -1,0 +1,183 @@
+{
+  "manifestFormatVersion": "0.2",
+  "sections": {
+    "server": {
+      "inline": {
+        "formatVersion": 1,
+        "name": "Styles",
+        "surfaces": [
+          {
+            "slug": "default",
+            "isDefault": true,
+            "operations": [
+              {
+                "operation": "search"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "policy": {
+      "inline": {
+        "formatVersion": 1,
+        "baseUrl": "https://styles.example.test/",
+        "allowedOrigins": [
+          "https://styles.example.test"
+        ]
+      }
+    },
+    "credentials": {
+      "inline": {
+        "formatVersion": 2,
+        "credentials": [
+          {
+            "id": "x-api-key",
+            "scheme": "apiKey",
+            "slot": "X-Api-Key",
+            "location": "header",
+            "value": {
+              "fromEnv": "MCPILER_X_API_KEY"
+            }
+          },
+          {
+            "id": "authorization",
+            "scheme": "bearer",
+            "slot": "Authorization",
+            "value": {
+              "fromEnv": "MCPILER_AUTHORIZATION"
+            }
+          }
+        ]
+      }
+    },
+    "operations": {
+      "inline": {
+        "formatVersion": 1,
+        "operations": [
+          {
+            "key": "GET /search",
+            "method": "GET",
+            "path": "/search",
+            "parameters": [
+              {
+                "name": "region",
+                "in": "query",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              {
+                "name": "trace",
+                "in": "header",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              {
+                "name": "session",
+                "in": "cookie",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              {
+                "name": "filter",
+                "in": "query",
+                "style": "deepObject",
+                "explode": true,
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "colour": {
+                      "type": "string"
+                    },
+                    "size": {
+                      "type": "string",
+                      "maxLength": 4
+                    }
+                  }
+                }
+              },
+              {
+                "name": "tags",
+                "in": "query",
+                "style": "pipeDelimited",
+                "allowReserved": true,
+                "schema": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            ],
+            "responses": {
+              "200": {
+                "content": {
+                  "application/json": {
+                    "schema": {
+                      "type": "object"
+                    }
+                  }
+                },
+                "description": "Results"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "formatVersion": 2,
+        "operations": [
+          {
+            "slug": "search",
+            "name": "search",
+            "inputSchema": {
+              "type": "object"
+            },
+            "annotations": {
+              "readOnly": true,
+              "destructive": false,
+              "idempotent": false,
+              "openWorld": true
+            },
+            "binding": {
+              "type": "http",
+              "operation": "GET /search",
+              "credentialRef": [
+                "x-api-key",
+                "authorization"
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+  "completeness": {
+    "algorithm": "sha256",
+    "value": "8b027d0fe6cf205be57827b2d17dba60179fa5906e424635e773eadbabe4b268"
+  },
+  "provenance": {
+    "connectorId": "7a1c0000000040008000000000000001",
+    "connectorRevisionId": "7a1c0000000040008000000000000002",
+    "sourceSpecRevisionId": "7a1c0000000040008000000000000003",
+    "effectiveDocumentHash": "0123456789abcdef",
+    "surfaces": {
+      "default": {
+        "publishedSurfaceId": "7a1c0000000040008000000000000004"
+      }
+    },
+    "operations": {
+      "search": {
+        "agentOperationId": "72616573686300000000000000000000",
+        "bindingId": "search"
+      }
+    }
+  }
+}

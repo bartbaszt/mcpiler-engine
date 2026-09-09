@@ -147,7 +147,7 @@ public sealed class SealingTests
     {
         var document = """
         {
-          "manifestFormatVersion": "0.1",
+          "manifestFormatVersion": "0.2",
           "sections": {
             "server": { "inline": { "name": "Example" }, "sha256": "00" }
           }

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:mcpiler:manifest:0.1:server",
+  "$id": "urn:mcpiler:manifest:0.2:server",
   "title": "MCPiler Manifest server section",
   "description": "Routing identity plus the surfaces. A surface's operation list is the single runtime exposure authority.",
   "type": "object",

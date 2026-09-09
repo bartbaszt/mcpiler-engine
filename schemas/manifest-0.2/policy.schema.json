@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:mcpiler:manifest:0.1:policy",
+  "$id": "urn:mcpiler:manifest:0.2:policy",
   "title": "MCPiler Manifest policy section",
   "description": "The outbound perimeter and the evaluation bounds. Local Engine configuration may narrow any of these and may never widen one.",
   "type": "object",

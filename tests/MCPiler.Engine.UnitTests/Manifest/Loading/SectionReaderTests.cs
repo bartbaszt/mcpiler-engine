@@ -378,13 +378,14 @@ public sealed class SectionReaderTests
             Json(
                 """
                 {
+                  "formatVersion": 2,
                   "credentials": [
-                    { "scheme": "bearer", "slot": "Authorization", "value": { "fromEnv": "TOKEN" } },
-                    { "scheme": "apiKey", "slot": "X-Api-Key", "location": "header", "value": { "fromEnv": "KEY" } },
-                    { "scheme": "apiKey", "slot": "token", "location": "query", "value": { "fromEnv": "QKEY" } },
-                    { "scheme": "header", "slot": "X-Tenant", "value": { "fromEnv": "TENANT" } },
-                    { "scheme": "basic", "slot": "username", "value": { "fromEnv": "USER" } },
-                    { "scheme": "basic", "slot": "password", "value": { "fromEnv": "PASS" } }
+                    { "id": "bearer", "scheme": "bearer", "slot": "Authorization", "value": { "fromEnv": "TOKEN" } },
+                    { "id": "x-api-key", "scheme": "apiKey", "slot": "X-Api-Key", "location": "header", "value": { "fromEnv": "KEY" } },
+                    { "id": "query-token", "scheme": "apiKey", "slot": "token", "location": "query", "value": { "fromEnv": "QKEY" } },
+                    { "id": "x-tenant", "scheme": "header", "slot": "X-Tenant", "value": { "fromEnv": "TENANT" } },
+                    { "id": "basic-username", "scheme": "basic", "slot": "username", "value": { "fromEnv": "USER" } },
+                    { "id": "basic-password", "scheme": "basic", "slot": "password", "value": { "fromEnv": "PASS" } }
                   ]
                 }
                 """),
@@ -393,16 +394,128 @@ public sealed class SectionReaderTests
         AssertNoErrors();
         Assert.NotNull(section);
         Assert.Equal(6, section.Credentials.Count);
+        Assert.Equal("bearer", section.Credentials[0].Id);
         Assert.Equal(CredentialLocation.Header, section.Credentials[0].EffectiveLocation);
         Assert.True(section.Credentials[0].IsRedirectSensitiveHeader);
         Assert.False(section.Credentials[2].IsRedirectSensitiveHeader);
+    }
+
+    /// <summary>
+    /// A credential with no identifier cannot be referenced, so it is refused.
+    /// </summary>
+    /// <remarks>
+    /// An unidentified credential would be unreachable from any binding, which under the
+    /// fail-safe default means it could never be applied at all.
+    /// </remarks>
+    [Fact]
+    public void Credentials_require_an_id()
+    {
+        var section = SectionReader.ReadCredentials(
+            Json("""{ "credentials": [ { "scheme": "bearer", "slot": "Authorization", "value": { "fromEnv": "E" } } ] }"""),
+            _diagnostics);
+
+        ManifestDiagnostic diagnostic = Assert.Single(_diagnostics);
+
+        Assert.Equal(ManifestDiagnosticCodes.MemberRequired, diagnostic.Code);
+        Assert.Equal("/credentials/0/id", diagnostic.Pointer);
+        Assert.Empty(section!.Credentials);
+    }
+
+    [Theory]
+    [InlineData("Token")]
+    [InlineData("my token")]
+    [InlineData("-token")]
+    [InlineData("token_")]
+    [InlineData("bearer.token")]
+    public void Credentials_refuse_an_id_outside_the_documented_charset(string id)
+    {
+        var section = SectionReader.ReadCredentials(
+            Json($$"""{ "credentials": [ { "id": "{{id}}", "scheme": "bearer", "slot": "Authorization", "value": { "fromEnv": "E" } } ] }"""),
+            _diagnostics);
+
+        ManifestDiagnostic diagnostic = Assert.Single(_diagnostics);
+
+        Assert.Equal(ManifestDiagnosticCodes.CredentialIdInvalid, diagnostic.Code);
+        Assert.Equal("/credentials/0/id", diagnostic.Pointer);
+        Assert.Empty(section!.Credentials);
+    }
+
+    [Fact]
+    public void Credentials_refuse_an_id_longer_than_the_limit()
+    {
+        string id = new('a', ManifestCredential.MaxIdLength + 1);
+
+        SectionReader.ReadCredentials(
+            Json($$"""{ "credentials": [ { "id": "{{id}}", "scheme": "bearer", "slot": "Authorization", "value": { "fromEnv": "E" } } ] }"""),
+            _diagnostics);
+
+        Assert.Contains(ManifestDiagnosticCodes.CredentialIdInvalid, ErrorCodes, StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// A hostile identifier is truncated before it reaches a message.
+    /// </summary>
+    /// <remarks>
+    /// The same echo rule that bounds a malformed format version bounds this, so a manifest
+    /// cannot use a diagnostic as an amplifier.
+    /// </remarks>
+    [Fact]
+    public void Credentials_truncate_a_hostile_id_in_the_refusal()
+    {
+        string id = new('A', 4096);
+
+        SectionReader.ReadCredentials(
+            Json($$"""{ "credentials": [ { "id": "{{id}}", "scheme": "bearer", "slot": "Authorization", "value": { "fromEnv": "E" } } ] }"""),
+            _diagnostics);
+
+        ManifestDiagnostic diagnostic = Assert.Single(_diagnostics);
+
+        Assert.Equal(ManifestDiagnosticCodes.CredentialIdInvalid, diagnostic.Code);
+        Assert.DoesNotContain(new string('A', 33), diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An escaped identifier is the identifier it unescapes to.
+    /// </summary>
+    /// <remarks>
+    /// JSON unescaping happens before the charset check, so no escaping trick can smuggle a
+    /// character past it or hide a duplicate from the validator.
+    /// </remarks>
+    [Fact]
+    public void Credentials_read_an_escaped_id_as_the_unescaped_one()
+    {
+        var section = SectionReader.ReadCredentials(
+            Json("""{ "credentials": [ { "id": "to\u006ben", "scheme": "bearer", "slot": "Authorization", "value": { "fromEnv": "E" } } ] }"""),
+            _diagnostics);
+
+        AssertNoErrors();
+        Assert.Equal("token", Assert.Single(section!.Credentials).Id);
+    }
+
+    /// <summary>
+    /// Member order inside a credential entry carries no meaning.
+    /// </summary>
+    [Fact]
+    public void Credentials_read_an_entry_whose_members_are_in_any_order()
+    {
+        var section = SectionReader.ReadCredentials(
+            Json("""{ "credentials": [ { "value": { "fromEnv": "E" }, "slot": "Authorization", "scheme": "bearer", "id": "bearer" } ] }"""),
+            _diagnostics);
+
+        AssertNoErrors();
+
+        var credential = Assert.Single(section!.Credentials);
+
+        Assert.Equal("bearer", credential.Id);
+        Assert.Equal(CredentialScheme.Bearer, credential.Scheme);
+        Assert.Equal("Authorization", credential.Slot);
     }
 
     [Fact]
     public void Credentials_refuses_the_none_scheme_that_no_applier_branch_matches()
     {
         SectionReader.ReadCredentials(
-            Json("""{ "credentials": [ { "scheme": "none", "slot": "x", "value": { "fromEnv": "E" } } ] }"""),
+            Json("""{ "credentials": [ { "id": "x", "scheme": "none", "slot": "x", "value": { "fromEnv": "E" } } ] }"""),
             _diagnostics);
 
         Assert.Contains(ManifestDiagnosticCodes.CredentialSchemeUnknown, ErrorCodes, StringComparer.Ordinal);
@@ -412,7 +525,7 @@ public sealed class SectionReaderTests
     public void Credentials_refuses_a_basic_slot_that_is_neither_username_nor_password()
     {
         SectionReader.ReadCredentials(
-            Json("""{ "credentials": [ { "scheme": "basic", "slot": "token", "value": { "fromEnv": "E" } } ] }"""),
+            Json("""{ "credentials": [ { "id": "basic-token", "scheme": "basic", "slot": "token", "value": { "fromEnv": "E" } } ] }"""),
             _diagnostics);
 
         Assert.Contains(ManifestDiagnosticCodes.CredentialSlotInvalid, ErrorCodes, StringComparer.Ordinal);
@@ -422,7 +535,7 @@ public sealed class SectionReaderTests
     public void Credentials_refuses_a_location_on_a_scheme_that_has_none()
     {
         SectionReader.ReadCredentials(
-            Json("""{ "credentials": [ { "scheme": "bearer", "slot": "Authorization", "location": "query", "value": { "fromEnv": "E" } } ] }"""),
+            Json("""{ "credentials": [ { "id": "bearer", "scheme": "bearer", "slot": "Authorization", "location": "query", "value": { "fromEnv": "E" } } ] }"""),
             _diagnostics);
 
         Assert.Contains(ManifestDiagnosticCodes.CredentialLocationInvalid, ErrorCodes, StringComparer.Ordinal);
@@ -435,7 +548,7 @@ public sealed class SectionReaderTests
     public void Credentials_requires_exactly_one_value_source(string value)
     {
         SectionReader.ReadCredentials(
-            Json($$"""{ "credentials": [ { "scheme": "bearer", "slot": "Authorization", "value": {{value}} } ] }"""),
+            Json($$"""{ "credentials": [ { "id": "bearer", "scheme": "bearer", "slot": "Authorization", "value": {{value}} } ] }"""),
             _diagnostics);
 
         Assert.Contains(ManifestDiagnosticCodes.CredentialReferenceAmbiguous, ErrorCodes, StringComparer.Ordinal);
@@ -445,7 +558,7 @@ public sealed class SectionReaderTests
     public void Credentials_refuses_a_relative_secret_file_path()
     {
         SectionReader.ReadCredentials(
-            Json("""{ "credentials": [ { "scheme": "bearer", "slot": "Authorization", "value": { "fromFile": "secrets/token" } } ] }"""),
+            Json("""{ "credentials": [ { "id": "bearer", "scheme": "bearer", "slot": "Authorization", "value": { "fromFile": "secrets/token" } } ] }"""),
             _diagnostics);
 
         Assert.Contains(ManifestDiagnosticCodes.CredentialReferenceUnresolved, ErrorCodes, StringComparer.Ordinal);
@@ -457,7 +570,7 @@ public sealed class SectionReaderTests
         const string Secret = "sk-live-canary-must-not-appear";
 
         var section = SectionReader.ReadCredentials(
-            Json($$"""{ "credentials": [ { "scheme": "bearer", "slot": "Authorization", "value": { "inline": "{{Secret}}" } } ] }"""),
+            Json($$"""{ "credentials": [ { "id": "bearer", "scheme": "bearer", "slot": "Authorization", "value": { "inline": "{{Secret}}" } } ] }"""),
             _diagnostics);
 
         Assert.Contains(ManifestDiagnosticCodes.CredentialInlineNotPermitted, ErrorCodes, StringComparer.Ordinal);
@@ -475,7 +588,7 @@ public sealed class SectionReaderTests
         const string Secret = "sk-live-canary-must-not-appear";
 
         var section = SectionReader.ReadCredentials(
-            Json($$"""{ "credentials": [ { "scheme": "bearer", "slot": "Authorization", "value": { "inline": "{{Secret}}" } } ] }"""),
+            Json($$"""{ "credentials": [ { "id": "bearer", "scheme": "bearer", "slot": "Authorization", "value": { "inline": "{{Secret}}" } } ] }"""),
             _diagnostics,
             allowInlineSecrets: true);
 
@@ -494,19 +607,20 @@ public sealed class SectionReaderTests
     }
 
     [Fact]
-    public void Credentials_leaves_destination_uniqueness_to_the_validator()
+    public void Credentials_leaves_both_uniqueness_invariants_to_the_validator()
     {
-        // Each of these credentials is well formed on its own; they conflict only because they
-        // address the same header. Deciding that here would need a scheme-scoped identity, which
-        // would miss a bearer and a basic credential both writing Authorization and would report
-        // a different code than the cross-scheme case. ManifestValidator owns the invariant.
+        // Each of these credentials is well formed on its own. They collide only as a pair,
+        // and one of the two collisions is not even decidable here: destination contention
+        // now depends on which binding references them, which lives in another section. A
+        // reader that refused the section would also stop the validator from reporting
+        // everything else wrong with it.
         var section = SectionReader.ReadCredentials(
             Json(
                 """
                 {
                   "credentials": [
-                    { "scheme": "basic", "slot": "username", "value": { "fromEnv": "A" } },
-                    { "scheme": "basic", "slot": "username", "value": { "fromEnv": "B" } }
+                    { "id": "one", "scheme": "basic", "slot": "username", "value": { "fromEnv": "A" } },
+                    { "id": "one", "scheme": "basic", "slot": "username", "value": { "fromEnv": "B" } }
                   ]
                 }
                 """),
@@ -527,7 +641,7 @@ public sealed class SectionReaderTests
                 """
                 {
                   "credentials": [
-                    { "scheme": "bearer", "slot": "Authorization", "value": { "fromFile": "/run/secrets/token" } }
+                    { "id": "bearer", "scheme": "bearer", "slot": "Authorization", "value": { "fromFile": "/run/secrets/token" } }
                   ]
                 }
                 """),
@@ -546,13 +660,23 @@ public sealed class SectionReaderTests
                 """
                 {
                   "credentials": [
-                    { "scheme": "bearer", "slot": "Authorization", "value": { "fromFile": "secrets/token" } }
+                    { "id": "bearer", "scheme": "bearer", "slot": "Authorization", "value": { "fromFile": "secrets/token" } }
                   ]
                 }
                 """),
             _diagnostics);
 
         Assert.Contains(ManifestDiagnosticCodes.CredentialReferenceUnresolved, ErrorCodes, StringComparer.Ordinal);
+    }
+
+    [Fact]
+    public void Credentials_refuse_a_section_format_version_of_one()
+    {
+        SectionReader.ReadCredentials(
+            Json("""{ "formatVersion": 1, "credentials": [] }"""),
+            _diagnostics);
+
+        Assert.Contains(ManifestDiagnosticCodes.SectionFormatVersionUnsupported, ErrorCodes, StringComparer.Ordinal);
     }
 
     // ---- operations ---------------------------------------------------------------------
@@ -948,6 +1072,130 @@ public sealed class SectionReaderTests
         Assert.Equal("POST /pets", binding.Base.Operation);
         Assert.Equal(1, binding.InputProgram!["transformVersion"]!.GetValue<int>());
         Assert.Equal("empty", binding.OutputProgram!["base"]!.GetValue<string>());
+    }
+
+    // ---- credential scope on a binding --------------------------------------------------
+
+    [Fact]
+    public void AgentSurface_reads_a_credential_scope_on_an_http_binding()
+    {
+        var section = SectionReader.ReadAgentSurface(
+            Json(
+                """
+                {
+                  "formatVersion": 2,
+                  "operations": [
+                    {
+                      "slug": "a", "name": "A",
+                      "binding": { "type": "http", "operation": "GET /pets", "credentialRef": ["bearer", "x-tenant"] }
+                    }
+                  ]
+                }
+                """),
+            _diagnostics);
+
+        AssertNoErrors();
+
+        var binding = Assert.IsType<HttpBinding>(section!.Operations[0].Binding);
+
+        Assert.Equal(["bearer", "x-tenant"], binding.CredentialRef);
+    }
+
+    /// <summary>
+    /// A transformed binding carries its scope where the executed request is described.
+    /// </summary>
+    /// <remarks>
+    /// The base is the operation that actually runs, so the credential scope belongs to it
+    /// rather than to the wrapper that reshapes its arguments.
+    /// </remarks>
+    [Fact]
+    public void AgentSurface_reads_a_credential_scope_on_a_transformed_base()
+    {
+        var section = SectionReader.ReadAgentSurface(
+            Json(
+                """
+                {
+                  "operations": [
+                    {
+                      "slug": "a", "name": "A",
+                      "binding": {
+                        "type": "transformedHttp",
+                        "base": { "operation": "POST /pets", "credentialRef": ["bearer"] }
+                      }
+                    }
+                  ]
+                }
+                """),
+            _diagnostics);
+
+        AssertNoErrors();
+
+        var binding = Assert.IsType<TransformedHttpBinding>(section!.Operations[0].Binding);
+
+        Assert.Equal(["bearer"], binding.Base.CredentialRef);
+    }
+
+    [Fact]
+    public void AgentSurface_reads_an_absent_credential_scope_as_an_empty_one()
+    {
+        var section = SectionReader.ReadAgentSurface(
+            Json("""{ "operations": [ { "slug": "a", "name": "A", "binding": { "type": "http", "operation": "GET /pets" } } ] }"""),
+            _diagnostics);
+
+        AssertNoErrors();
+        Assert.Empty(Assert.IsType<HttpBinding>(section!.Operations[0].Binding).CredentialRef);
+    }
+
+    [Theory]
+    [InlineData(""" "x" """)]
+    [InlineData(""" 1 """)]
+    [InlineData(""" { "id": "x" } """)]
+    public void AgentSurface_refuses_a_credential_scope_that_is_not_an_array(string value)
+    {
+        SectionReader.ReadAgentSurface(
+            Json($$"""{ "operations": [ { "slug": "a", "name": "A", "binding": { "type": "http", "operation": "GET /pets", "credentialRef": {{value}} } } ] }"""),
+            _diagnostics);
+
+        Assert.Contains(ManifestDiagnosticCodes.MemberTypeInvalid, ErrorCodes, StringComparer.Ordinal);
+    }
+
+    [Fact]
+    public void AgentSurface_refuses_a_credential_scope_entry_that_is_not_a_string()
+    {
+        SectionReader.ReadAgentSurface(
+            Json("""{ "operations": [ { "slug": "a", "name": "A", "binding": { "type": "http", "operation": "GET /pets", "credentialRef": [1] } } ] }"""),
+            _diagnostics);
+
+        Assert.Contains(ManifestDiagnosticCodes.MemberTypeInvalid, ErrorCodes, StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// A misplaced credential scope is refused rather than ignored.
+    /// </summary>
+    /// <remarks>
+    /// Silently ignoring it would produce a manifest that looks authorized and is not, which
+    /// is the failure the fail-safe default is meant to make loud.
+    /// </remarks>
+    [Theory]
+    [InlineData("""{ "type": "transformedHttp", "base": { "operation": "POST /pets" }, "credentialRef": ["bearer"] }""")]
+    [InlineData("""{ "type": "compound", "steps": [ { "id": "one", "operation": "a" } ], "credentialRef": ["bearer"] }""")]
+    public void AgentSurface_refuses_a_credential_scope_outside_an_http_binding(string binding)
+    {
+        SectionReader.ReadAgentSurface(
+            Json($$"""{ "operations": [ { "slug": "a", "name": "A", "binding": {{binding}} } ] }"""),
+            _diagnostics);
+
+        Assert.Contains(ManifestDiagnosticCodes.UnknownMember, ErrorCodes, StringComparer.Ordinal);
+    }
+
+    [Fact]
+    public void AgentSurface_refuses_a_section_format_version_of_one()
+    {
+        SectionReader.ReadAgentSurface(
+            Json("""{ "formatVersion": 1, "operations": [] }"""),
+            _diagnostics);
+
+        Assert.Contains(ManifestDiagnosticCodes.SectionFormatVersionUnsupported, ErrorCodes, StringComparer.Ordinal);
     }
 
     [Fact]

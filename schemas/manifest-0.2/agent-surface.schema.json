@@ -1,13 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:mcpiler:manifest:0.1:agent-surface",
+  "$id": "urn:mcpiler:manifest:0.2:agent-surface",
   "title": "MCPiler Manifest agentSurface section",
   "description": "The agent-facing operations. The slug is the manifest-local identity; Studio GUIDs live in provenance and are never required at runtime.",
   "type": "object",
   "required": ["operations"],
   "additionalProperties": false,
   "properties": {
-    "formatVersion": { "const": 1 },
+    "formatVersion": { "const": 2 },
     "groups": {
       "type": "array",
       "items": { "$ref": "#/$defs/group" }
@@ -53,8 +53,8 @@
           "type": "array",
           "items": { "type": "string" }
         },
-        "inputSchema": { "$ref": "urn:mcpiler:manifest:0.1:schema" },
-        "outputSchema": { "$ref": "urn:mcpiler:manifest:0.1:schema" },
+        "inputSchema": { "$ref": "urn:mcpiler:manifest:0.2:schema" },
+        "outputSchema": { "$ref": "urn:mcpiler:manifest:0.2:schema" },
         "outputSchemaPolicy": {
           "type": "object",
           "additionalProperties": false,
@@ -112,8 +112,15 @@
         "serverUrl": {
           "description": "Overrides policy.baseUrl for this operation and stays fully subject to policy.allowedOrigins.",
           "type": ["string", "null"]
-        }
+        },
+        "credentialRef": { "$ref": "#/$defs/credentialRef" }
       }
+    },
+    "credentialRef": {
+      "$comment": "Absent and empty are one representation. The default fails safe: an operation with no stated scope sends no credential rather than every declared one.",
+      "description": "The credentials-section ids that apply to this operation.",
+      "type": "array",
+      "items": { "type": "string" }
     },
     "transformedBinding": {
       "type": "object",
@@ -126,9 +133,11 @@
           "type": "object",
           "required": ["operation"],
           "additionalProperties": false,
+          "$comment": "credentialRef lives on 'base', never on the wrapper: a transformation rewrites arguments and never changes which upstream identity executes.",
           "properties": {
             "operation": { "type": "string" },
-            "serverUrl": { "type": ["string", "null"] }
+            "serverUrl": { "type": ["string", "null"] },
+            "credentialRef": { "$ref": "#/$defs/credentialRef" }
           }
         },
         "inputProgram": { "type": ["object", "null"] },

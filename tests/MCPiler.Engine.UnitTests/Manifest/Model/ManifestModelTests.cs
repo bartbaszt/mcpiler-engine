@@ -187,6 +187,7 @@ public sealed class ManifestModelTests
         bool expected)
     {
         var credential = new ManifestCredential(
+            "x-api-key",
             scheme,
             "X-Api-Key",
             CredentialReference.Env("EXAMPLE"),
@@ -199,11 +200,56 @@ public sealed class ManifestModelTests
     public void An_api_key_defaults_to_a_header()
     {
         var credential = new ManifestCredential(
+            "x-api-key",
             CredentialScheme.ApiKey,
             "X-Api-Key",
             CredentialReference.Env("EXAMPLE"));
 
         Assert.Equal(CredentialLocation.Header, credential.EffectiveLocation);
+    }
+
+    [Theory]
+    [InlineData("token", true)]
+    [InlineData("x-api-key", true)]
+    [InlineData("0", true)]
+    [InlineData("a1-b2-c3", true)]
+    [InlineData("Token", false)]
+    [InlineData("my token", false)]
+    [InlineData("-token", false)]
+    [InlineData("token_", false)]
+    [InlineData("token-", true)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void A_credential_id_accepts_only_the_documented_charset(string? id, bool expected)
+        => Assert.Equal(expected, ManifestCredential.IsValidId(id));
+
+    /// <summary>
+    /// Upper case is refused rather than folded.
+    /// </summary>
+    /// <remarks>
+    /// Folding would let two declarations that differ only by case become one id, which is
+    /// exactly the ambiguity the identifier exists to remove.
+    /// </remarks>
+    [Fact]
+    public void A_credential_id_longer_than_the_limit_is_refused()
+    {
+        Assert.True(ManifestCredential.IsValidId(new string('a', ManifestCredential.MaxIdLength)));
+        Assert.False(ManifestCredential.IsValidId(new string('a', ManifestCredential.MaxIdLength + 1)));
+    }
+
+    /// <summary>
+    /// An absent credential scope and an empty one are one representation.
+    /// </summary>
+    /// <remarks>
+    /// The default has to be "apply nothing" rather than "apply everything", so that a
+    /// binding can never acquire a credential by omission.
+    /// </remarks>
+    [Fact]
+    public void An_absent_credential_scope_reads_as_an_empty_one()
+    {
+        Assert.Empty(new HttpBinding("GET /pets").CredentialRef);
+        Assert.Empty(new HttpBinding("GET /pets", CredentialRef: []).CredentialRef);
+        Assert.Equal(["bearer"], new HttpBinding("GET /pets", CredentialRef: ["bearer"]).CredentialRef);
     }
 
     [Fact]

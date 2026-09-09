@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:mcpiler:manifest:0.1:operations",
+  "$id": "urn:mcpiler:manifest:0.2:operations",
   "title": "MCPiler Manifest operations section",
   "description": "The effective HTTP operation model. This is what actually goes on the wire.",
   "type": "object",
@@ -98,7 +98,7 @@
         "allowReserved": { "type": "boolean" },
         "allowEmptyValue": { "type": "boolean" },
         "deprecated": { "type": "boolean" },
-        "schema": { "$ref": "urn:mcpiler:manifest:0.1:schema" },
+        "schema": { "$ref": "urn:mcpiler:manifest:0.2:schema" },
         "content": {
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/mediaType" }
@@ -132,8 +132,8 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "schema": { "$ref": "urn:mcpiler:manifest:0.1:schema" },
-        "itemSchema": { "$ref": "urn:mcpiler:manifest:0.1:schema" },
+        "schema": { "$ref": "urn:mcpiler:manifest:0.2:schema" },
+        "itemSchema": { "$ref": "urn:mcpiler:manifest:0.2:schema" },
         "encoding": {
           "type": "object",
           "additionalProperties": { "$ref": "#/$defs/encoding" }
@@ -156,7 +156,7 @@
         "contentType": { "type": "string" },
         "headers": {
           "type": "object",
-          "additionalProperties": { "$ref": "urn:mcpiler:manifest:0.1:schema" }
+          "additionalProperties": { "$ref": "urn:mcpiler:manifest:0.2:schema" }
         },
         "style": { "$ref": "#/$defs/style" },
         "explode": { "type": "boolean" },

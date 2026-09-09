@@ -1,5 +1,5 @@
 {
-  "manifestFormatVersion": "0.1",
+  "manifestFormatVersion": "0.2",
   "sections": {
     "server": { "inline": { "name": "Hostile Fixture" } },
     "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -15,7 +15,7 @@
     },
     "credentials": {
       "path": "sections/credentials.json",
-      "sha256": "fec19afcfacdcfc3de2759c91c3001b813c0f2b6c90d630558272a3bbf669cb9",
+      "sha256": "48321256a68155f1656f66f68abf30cf7ce2c570c8a3a8f773c4763f9fc7b035",
       "bytes": 1048576
     }
   }

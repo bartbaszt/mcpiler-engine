@@ -14,7 +14,7 @@ using ModelVocabulary = MCPiler.Engine.Manifest.Model.Vocabulary;
 namespace MCPiler.Engine.UnitTests.Manifest;
 
 /// <summary>
-/// The published schemas under <c>schemas/manifest-0.1/</c> describe the format for editors
+/// The published schemas under <c>schemas/manifest-0.2/</c> describe the format for editors
 /// and third-party tooling. The readers remain the runtime authority, so the schemas are a
 /// second statement of the same rules and would drift silently if nobody watched them.
 /// These tests are the watch: they compare the schemas against the corpus in both directions
@@ -22,18 +22,18 @@ namespace MCPiler.Engine.UnitTests.Manifest;
 /// </summary>
 public sealed class PublishedSchemaTests
 {
-    private const string SchemaDirectory = "schemas/manifest-0.1";
+    private const string SchemaDirectory = "schemas/manifest-0.2";
 
     private static readonly IReadOnlyDictionary<string, string> SectionSchemaIds =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            [ManifestSectionName.Server] = "urn:mcpiler:manifest:0.1:server",
-            [ManifestSectionName.Policy] = "urn:mcpiler:manifest:0.1:policy",
-            [ManifestSectionName.Credentials] = "urn:mcpiler:manifest:0.1:credentials",
-            [ManifestSectionName.Operations] = "urn:mcpiler:manifest:0.1:operations",
-            [ManifestSectionName.AgentSurface] = "urn:mcpiler:manifest:0.1:agent-surface",
-            [ManifestSectionName.Tools] = "urn:mcpiler:manifest:0.1:tools",
-            [ManifestSectionName.Search] = "urn:mcpiler:manifest:0.1:search",
+            [ManifestSectionName.Server] = "urn:mcpiler:manifest:0.2:server",
+            [ManifestSectionName.Policy] = "urn:mcpiler:manifest:0.2:policy",
+            [ManifestSectionName.Credentials] = "urn:mcpiler:manifest:0.2:credentials",
+            [ManifestSectionName.Operations] = "urn:mcpiler:manifest:0.2:operations",
+            [ManifestSectionName.AgentSurface] = "urn:mcpiler:manifest:0.2:agent-surface",
+            [ManifestSectionName.Tools] = "urn:mcpiler:manifest:0.2:tools",
+            [ManifestSectionName.Search] = "urn:mcpiler:manifest:0.2:search",
         };
 
     private static string CorpusRoot => ManifestCorpus.Root;
@@ -125,7 +125,7 @@ public sealed class PublishedSchemaTests
         // A URN rather than an https identifier: Engine has no published schema host yet,
         // and an identifier that does not resolve is worse than one that never promised to.
         Assert.StartsWith(
-            "urn:mcpiler:manifest:0.1:",
+            "urn:mcpiler:manifest:0.2:",
             document["$id"]!.GetValue<string>(),
             StringComparison.Ordinal);
     }
@@ -298,7 +298,7 @@ public sealed class PublishedSchemaTests
         // the form to write. An editor flagging "Direct" is the intended behaviour.
         const string document = """
         {
-          "manifestFormatVersion": "0.1",
+          "manifestFormatVersion": "0.2",
           "sections": {
             "server": { "inline": { "name": "Casing", "surfaces": [ { "slug": "default", "isDefault": true,
               "operations": [ { "operation": "ping", "exposure": "Direct" } ] } ] } },
@@ -323,7 +323,7 @@ public sealed class PublishedSchemaTests
         { "type": "object", "x-vendor-hint": { "anything": [1, 2] }, "minimum": 1.50 }
         """);
 
-        var results = Evaluate("urn:mcpiler:manifest:0.1:schema", value);
+        var results = Evaluate("urn:mcpiler:manifest:0.2:schema", value);
 
         Assert.True(results.IsValid, Explain("schema.schema.json", results));
     }
@@ -333,7 +333,7 @@ public sealed class PublishedSchemaTests
     {
         var value = JsonNode.Parse("""{ "$ref": "https://example.com/Pet" }""");
 
-        var results = Evaluate("urn:mcpiler:manifest:0.1:schema", value);
+        var results = Evaluate("urn:mcpiler:manifest:0.2:schema", value);
 
         Assert.False(results.IsValid);
     }
@@ -426,7 +426,7 @@ public sealed class PublishedSchemaTests
     private static IReadOnlyList<string> ValidateRoot(string documentText)
     {
         var document = JsonNode.Parse(documentText);
-        var results = Evaluate("urn:mcpiler:manifest:0.1:root", document);
+        var results = Evaluate("urn:mcpiler:manifest:0.2:root", document);
 
         return results.IsValid ? [] : [Explain("root", results)];
     }

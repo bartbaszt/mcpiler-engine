@@ -13,9 +13,9 @@ Manifests are ordinary JSON. A person can write one by hand, a script can
 generate one, and MCPiler Studio can export one. None of those three is
 privileged: the format is the contract, not the producer.
 
-- Current format version: **0.1**
-- Supported by this Engine: **0.1**
-- JSON Schemas: [`schemas/manifest-0.1/`](../schemas/manifest-0.1/)
+- Current format version: **0.2**
+- Supported by this Engine: **0.2**
+- JSON Schemas: [`schemas/manifest-0.2/`](../schemas/manifest-0.2/)
 - Worked examples: [`tests/fixtures/manifests/`](../tests/fixtures/manifests/)
 
 ## Contents
@@ -38,7 +38,7 @@ specific to the API being served. This is a complete, servable manifest:
 
 ```json
 {
-  "manifestFormatVersion": "0.1",
+  "manifestFormatVersion": "0.2",
   "sections": {
     "server": { "inline": { "name": "Example API" } },
     "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -250,9 +250,16 @@ incorrect belief about the deployed perimeter.
 
 Credentials by reference. A manifest never carries secret material.
 
-Each entry is `{scheme, slot, location?, value}`. Schemes are `basic`, `bearer`,
-`apiKey` and `header`. `location` applies to `apiKey` only and is `header`
-(default), `query` or `cookie`.
+Each entry is `{id, scheme, slot, location?, value}`. Schemes are `basic`,
+`bearer`, `apiKey` and `header`. `location` applies to `apiKey` only and is
+`header` (default), `query` or `cookie`.
+
+`id` is how a binding names this credential. It matches `^[a-z0-9][a-z0-9-]*$`,
+is at most 64 characters, and must be unique within the section. Upper case is
+refused rather than folded, so two ids can never differ only by case. An id
+selects nothing on its own, implies no scheme, and is never a secret — a produced
+manifest derives it from credential metadata, so the same metadata yields the
+same id no matter which secret is behind it.
 
 `value` is one of:
 
@@ -262,9 +269,18 @@ Each entry is `{scheme, slot, location?, value}`. Schemes are `basic`, `bearer`,
   warned about.
 
 `basic` uses slots `username` and `password`, which compose one `Authorization`
-header; both halves must be present. No two credentials may address the same
-destination, so a `bearer` credential and a `basic` pair both writing
-`Authorization` is refused.
+header; both halves must be declared in the section.
+
+**Declaring a credential grants nothing.** A credential is applied only where a
+binding names it, so the section may hold two credentials that address the same
+destination — a `bearer` token for one upstream and another for a second — as
+long as no single binding references both. Contention is a property of one
+executed request, not of the document. A binding that does reference two
+credentials writing the same destination is refused, because the request it
+describes has no defined outcome.
+
+A credential no binding references is a warning, not a refusal: the document is
+servable, but the deployment is being asked for a secret nothing will use.
 
 An unresolvable reference is an authentication fault with its own diagnostic
 code, never a network error. No diagnostic ever echoes a credential value, a
@@ -315,9 +331,10 @@ the join is by name, ordinal and case-sensitive.
 
 Bindings:
 
-- `{"type": "http", "operation": "<execution key>", "serverUrl": "..."}` — a
-  direct call. `serverUrl` overrides `policy.baseUrl` for this operation and
-  remains fully subject to `allowedOrigins`.
+- `{"type": "http", "operation": "<execution key>", "serverUrl": "...",
+  "credentialRef": ["..."]}` — a direct call. `serverUrl` overrides
+  `policy.baseUrl` for this operation and remains fully subject to
+  `allowedOrigins`. `credentialRef` names the credentials this request carries.
 - `{"type": "transformedHttp", "base": {...}, "inputProgram": {...},
   "outputProgram": {...}}` — a call with a bounded argument or response
   transformation. Input pointers address `/path`, `/query`, `/headers`,
@@ -326,6 +343,24 @@ Bindings:
 - `{"type": "compound", "steps": [...], "outputSelection": {...}}` — a workflow
   over other operations in this manifest. A step names another operation's slug.
   Nesting is refused. A step may read a previous step's response, never its own.
+
+**`credentialRef` lives on the request, not on the manifest.** It appears on an
+`http` binding and inside a `transformedHttp` binding's `base`, and nowhere else:
+on a transformed wrapper or on a compound binding it is an unknown member and the
+section is refused. A compound binding has no credentials of its own — each step
+carries whatever its own operation's binding names.
+
+Absent and empty mean the same thing, and both mean **no credential**. A binding
+that names none sends no credential material, so a manifest that forgets to grant
+one fails as unauthorised rather than reaching an upstream with a token it was
+never scoped to receive. An id listed twice is accepted; the resolved scope is a
+set. Order is not significant — resolution is by id.
+
+Every id a binding names must be declared in `credentials`. A reference to an
+undeclared id is refused rather than ignored, because ignoring it would turn an
+authoring mistake into a silently unauthenticated request. Referencing exactly
+one half of a `basic` pair is refused for the same reason: half an
+`Authorization` header is not a weaker credential, it is a malformed one.
 
 `annotations` carries the four MCP hints (`readOnly`, `destructive`,
 `idempotent`, `openWorld`). When absent they are derived from `risk`, and when
@@ -412,8 +447,12 @@ format release, and a format release does not require an Engine release to be
 described.
 
 **Engine declares an explicit supported range.** This Engine supports manifest
-format `0.1` and section format `1`. A refusal always names the version observed
-and the range supported. Hostile input echoed for context is truncated.
+format `0.2`. Section versions are not uniform, because they move
+independently: `credentials` and `agentSurface` are at `2`, while `server`,
+`policy`, `operations`, `tools` and `search` are still at `1`. A section that
+omits `formatVersion` is accepted at whatever version this Engine supports for
+it. A refusal always names the version observed and the range supported. Hostile
+input echoed for context is truncated.
 
 **While MAJOR is 0 there is no compatibility promise.** The remedy for an old
 manifest is to produce it again, not to migrate it. There is no alpha migrator,
@@ -450,8 +489,9 @@ contents of an environment variable.
 
 The following codes are always warnings; every other code is an error:
 `manifest/unsealed`, `operations/no-responses-declared`, `surface/no-operations`,
-`credential/inline-discouraged`, `vectors/unreadable`,
-`vectors/dimension-mismatch`, `search/builder-version-unsupported`.
+`credential/inline-discouraged`, `credential/unreferenced`,
+`vectors/unreadable`, `vectors/dimension-mismatch`,
+`search/builder-version-unsupported`.
 
 ### `manifest` — document and packaging
 
@@ -521,6 +561,8 @@ The following codes are always warnings; every other code is an error:
 | `binding/type-unknown` | A binding type outside the vocabulary. |
 | `binding/transform-invalid` | A transformation program is not a valid program. |
 | `binding/pointer-root-not-allowed` | A pointer addresses a root not allowed in that position. |
+| `binding/credential-ref-unknown` | A `credentialRef` names a credential `credentials` does not declare. |
+| `binding/credential-basic-incomplete` | A binding references one half of a `basic` pair. |
 
 ### `surface` — routing
 
@@ -554,7 +596,10 @@ The following codes are always warnings; every other code is an error:
 | `credential/inline-not-permitted` | An inline secret without `--allow-inline-secrets`. |
 | `credential/inline-discouraged` | An inline secret was permitted. |
 | `credential/reference-ambiguous` | Two credentials claim the same reference name. |
-| `credential/slot-duplicate` | Two credentials address the same destination. |
+| `credential/id-invalid` | An `id` outside `^[a-z0-9][a-z0-9-]*$`, or longer than 64 characters. |
+| `credential/duplicate-id` | Two credentials declare the same `id`. |
+| `credential/slot-duplicate` | One binding references two credentials that address the same destination. |
+| `credential/unreferenced` | A declared credential no binding references. |
 
 ### `tools` — the advertised tool set
 

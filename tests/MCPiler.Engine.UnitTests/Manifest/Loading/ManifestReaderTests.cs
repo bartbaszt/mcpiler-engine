@@ -14,7 +14,7 @@ public sealed class ManifestReaderTests
     private const string MinimalManifest =
         """
         {
-          "manifestFormatVersion": "0.1",
+          "manifestFormatVersion": "0.2",
           "sections": {
             "server":       { "inline": { "name": "Example API" } },
             "policy":       { "inline": { "baseUrl": "https://api.example.com" } },
@@ -105,7 +105,7 @@ public sealed class ManifestReaderTests
         ManifestReadResult result = Read(
             """
             {
-              "manifestFormatVersion": "0.1",
+              "manifestFormatVersion": "0.2",
               "sections": {
                 "server": { "inline": { "name": "Example API", "surfaces": [
                     { "slug": "only", "isDefault": true, "operations": [
@@ -194,7 +194,7 @@ public sealed class ManifestReaderTests
         ManifestReadResult result = Read(
             """
             {
-              "manifestFormatVersion": "0.1",
+              "manifestFormatVersion": "0.2",
               "sections": {
                 "server": { "inline": { "name": "Example API", "surfaces": [
                     { "slug": "a", "isDefault": true, "operations": [] },
@@ -223,7 +223,7 @@ public sealed class ManifestReaderTests
     public void A_format_version_problem_stops_before_any_section_is_read()
     {
         ManifestReadResult result = Read(
-            MinimalManifest.Replace("\"0.1\"", "\"9.0\"", StringComparison.Ordinal));
+            MinimalManifest.Replace("\"0.2\"", "\"9.0\"", StringComparison.Ordinal));
 
         Assert.Equal([ManifestDiagnosticCodes.FormatVersionUnsupported], ErrorCodes(result));
         Assert.Null(result.Manifest);
@@ -272,7 +272,7 @@ public sealed class ManifestReaderTests
         const string Root =
             """
             {
-              "manifestFormatVersion": "0.1",
+              "manifestFormatVersion": "0.2",
               "sections": {
                 "server": { "inline": { "name": "Example API" } },
                 "policy": { "inline": { "baseUrl": "https://api.example.com",
@@ -339,7 +339,7 @@ public sealed class ManifestReaderTests
         ManifestReadResult result = Read(
             """
             {
-              "manifestFormatVersion": "0.1",
+              "manifestFormatVersion": "0.2",
               "sections": {
                 "server": { "inline": { "name": "Example API", "surfaces": [
                     { "slug": "live", "isDefault": true, "operations": [

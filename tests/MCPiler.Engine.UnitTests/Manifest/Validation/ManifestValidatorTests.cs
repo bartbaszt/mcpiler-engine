@@ -10,10 +10,13 @@ namespace MCPiler.Engine.UnitTests.Manifest.Validation;
 
 public sealed class ManifestValidatorTests
 {
-    private static readonly ManifestFormatVersion Version = new(0, 1);
+    private static readonly ManifestFormatVersion Version = new(0, 2);
 
     private static ManifestOperation ListPets()
         => new(Key: "GET /pets", Method: "GET", Path: "/pets");
+
+    private static ManifestOperation ListShops()
+        => new(Key: "GET /shops", Method: "GET", Path: "/shops");
 
     private static AgentOperationEntry Agent(string slug, ManifestBinding binding)
         => new(Slug: slug, Name: slug, Binding: binding);
@@ -42,6 +45,12 @@ public sealed class ManifestValidatorTests
 
     private static IReadOnlyList<string> Codes(ManifestDocument manifest)
         => [.. ManifestValidator.Validate(manifest).Select(static d => d.Code)];
+
+    /// <summary>
+    /// Refusals only, so an advisory finding cannot change what a refusal test asserts.
+    /// </summary>
+    private static IReadOnlyList<string> ErrorCodes(ManifestDocument manifest)
+        => [.. ManifestValidator.Validate(manifest).Where(static d => d.IsError).Select(static d => d.Code)];
 
     [Fact]
     public void A_consistent_manifest_produces_no_diagnostics()
@@ -276,19 +285,120 @@ public sealed class ManifestValidatorTests
         Assert.Equal([ManifestDiagnosticCodes.DestinationNotAllowed], Codes(manifest));
     }
 
-    // ---- credential slots ---------------------------------------------------------------
+    // ---- credential identity and scope --------------------------------------------------
+
+    private static ManifestCredential Credential(
+        string id,
+        CredentialScheme scheme,
+        string slot,
+        string variable = "TOKEN",
+        CredentialLocation? location = null)
+        => new(id, scheme, slot, CredentialReference.Env(variable), location);
+
+    /// <summary>
+    /// One operation whose binding references the given credential ids.
+    /// </summary>
+    private static ManifestDocument Scoped(
+        IReadOnlyList<ManifestCredential> credentials,
+        params string[] refs)
+        => Build(
+            agentSurface: new AgentSurfaceSection(
+            [
+                Agent("list-pets", new HttpBinding("GET /pets", CredentialRef: refs)),
+            ]),
+            credentials: new CredentialsSection(credentials));
 
     [Fact]
-    public void Two_credentials_targeting_the_same_header_are_refused()
+    public void Two_credentials_sharing_one_id_are_refused()
+    {
+        ManifestDocument manifest = Scoped(
+            [
+                Credential("token", CredentialScheme.Bearer, "Authorization", "A"),
+                Credential("token", CredentialScheme.Header, "X-Token", "B"),
+            ],
+            "token");
+
+        ManifestDiagnostic diagnostic = Assert.Single(
+            ManifestValidator.Validate(manifest),
+            d => d.Code == ManifestDiagnosticCodes.DuplicateCredentialId);
+
+        Assert.Equal("/credentials/1/id", diagnostic.Pointer);
+        Assert.Contains("token", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("0", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A reference is resolved, never assumed.
+    /// </summary>
+    /// <remarks>
+    /// A dangling reference is the failure mode that silently applies nothing, so it is
+    /// refused rather than tolerated as an empty scope.
+    /// </remarks>
+    [Fact]
+    public void A_reference_to_an_undeclared_credential_is_refused()
+    {
+        ManifestDocument manifest = Scoped(
+            [Credential("bearer", CredentialScheme.Bearer, "Authorization")],
+            "bearer",
+            "ghost");
+
+        ManifestDiagnostic diagnostic = Assert.Single(
+            ManifestValidator.Validate(manifest),
+            d => d.Code == ManifestDiagnosticCodes.BindingCredentialRefUnknown);
+
+        Assert.Equal(ManifestSectionName.AgentSurface, diagnostic.Section);
+        Assert.Equal("/operations/0/binding/credentialRef/1", diagnostic.Pointer);
+        Assert.Contains("ghost", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("list-pets", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Contention is a property of one binding, not of the section.
+    /// </summary>
+    [Fact]
+    public void One_binding_referencing_two_credentials_on_one_destination_is_refused()
+    {
+        ManifestDocument manifest = Scoped(
+            [
+                Credential("primary", CredentialScheme.Bearer, "Authorization", "A"),
+                Credential("secondary", CredentialScheme.Header, "Authorization", "B"),
+            ],
+            "primary",
+            "secondary");
+
+        ManifestDiagnostic diagnostic = Assert.Single(
+            ManifestValidator.Validate(manifest),
+            d => d.Code == ManifestDiagnosticCodes.DuplicateCredentialSlot);
+
+        Assert.Equal(ManifestSectionName.AgentSurface, diagnostic.Section);
+        Assert.Contains("primary", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("secondary", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The same two credentials on two different bindings are the point of the change.
+    /// </summary>
+    /// <remarks>
+    /// Two upstream origins each needing their own bearer token is the configuration the
+    /// section-wide rule refused while permitting the leaky single-token alternative.
+    /// </remarks>
+    [Fact]
+    public void Two_bindings_each_referencing_its_own_credential_are_accepted()
     {
         ManifestDocument manifest = Build(
+            operations: new OperationsSection([ListPets(), ListShops()]),
+            agentSurface: new AgentSurfaceSection(
+            [
+                Agent("list-pets", new HttpBinding("GET /pets", CredentialRef: ["primary"])),
+                Agent("list-shops", new HttpBinding("GET /shops", CredentialRef: ["secondary"])),
+            ]),
             credentials: new CredentialsSection(
             [
-                new ManifestCredential(CredentialScheme.Bearer, "Authorization", CredentialReference.Env("A")),
-                new ManifestCredential(CredentialScheme.Header, "Authorization", CredentialReference.Env("B")),
+                Credential("primary", CredentialScheme.Bearer, "Authorization", "A"),
+                Credential("secondary", CredentialScheme.Bearer, "Authorization", "B"),
             ]));
 
-        Assert.Equal([ManifestDiagnosticCodes.DuplicateCredentialSlot], Codes(manifest));
+        Assert.Empty(ManifestValidator.Validate(manifest));
     }
 
     /// <summary>
@@ -301,39 +411,132 @@ public sealed class ManifestValidatorTests
     [Fact]
     public void The_same_name_in_a_header_and_in_a_query_is_not_a_collision()
     {
-        ManifestDocument manifest = Build(
-            credentials: new CredentialsSection(
+        ManifestDocument manifest = Scoped(
             [
-                new ManifestCredential(CredentialScheme.ApiKey, "token", CredentialReference.Env("A"), CredentialLocation.Header),
-                new ManifestCredential(CredentialScheme.ApiKey, "token", CredentialReference.Env("B"), CredentialLocation.Query),
-            ]));
+                Credential("header-token", CredentialScheme.ApiKey, "token", "A", CredentialLocation.Header),
+                Credential("query-token", CredentialScheme.ApiKey, "token", "B", CredentialLocation.Query),
+            ],
+            "header-token",
+            "query-token");
 
         Assert.Empty(ManifestValidator.Validate(manifest));
     }
 
+    /// <summary>
+    /// A declared basic pair still needs both halves.
+    /// </summary>
+    /// <remarks>
+    /// This is a declaration defect rather than a scope defect, so it stays on the section
+    /// and fires whether or not any binding references the credential.
+    /// </remarks>
     [Fact]
     public void A_basic_credential_needs_both_halves()
     {
         ManifestDocument manifest = Build(
             credentials: new CredentialsSection(
             [
-                new ManifestCredential(CredentialScheme.Basic, ManifestCredential.BasicUsernameSlot, CredentialReference.Env("USER")),
+                Credential("basic-username", CredentialScheme.Basic, ManifestCredential.BasicUsernameSlot, "USER"),
             ]));
 
-        Assert.Equal([ManifestDiagnosticCodes.CredentialSlotInvalid], Codes(manifest));
+        Assert.Equal([ManifestDiagnosticCodes.CredentialSlotInvalid], ErrorCodes(manifest));
     }
 
     [Fact]
-    public void A_complete_basic_credential_is_accepted()
+    public void A_complete_basic_credential_referenced_in_full_is_accepted()
     {
-        ManifestDocument manifest = Build(
-            credentials: new CredentialsSection(
+        ManifestDocument manifest = Scoped(
             [
-                new ManifestCredential(CredentialScheme.Basic, ManifestCredential.BasicUsernameSlot, CredentialReference.Env("USER")),
-                new ManifestCredential(CredentialScheme.Basic, ManifestCredential.BasicPasswordSlot, CredentialReference.Env("PASS")),
-            ]));
+                Credential("basic-username", CredentialScheme.Basic, ManifestCredential.BasicUsernameSlot, "USER"),
+                Credential("basic-password", CredentialScheme.Basic, ManifestCredential.BasicPasswordSlot, "PASS"),
+            ],
+            "basic-username",
+            "basic-password");
 
         Assert.Empty(ManifestValidator.Validate(manifest));
+    }
+
+    /// <summary>
+    /// Half a basic pair is not half an authorization.
+    /// </summary>
+    /// <remarks>
+    /// Basic authentication composes one header from two slots, so a binding that reaches
+    /// only one of them would send a credential no upstream service can accept.
+    /// </remarks>
+    [Fact]
+    public void A_binding_referencing_one_half_of_a_basic_pair_is_refused()
+    {
+        ManifestDocument manifest = Scoped(
+            [
+                Credential("basic-username", CredentialScheme.Basic, ManifestCredential.BasicUsernameSlot, "USER"),
+                Credential("basic-password", CredentialScheme.Basic, ManifestCredential.BasicPasswordSlot, "PASS"),
+            ],
+            "basic-username");
+
+        ManifestDiagnostic diagnostic = Assert.Single(
+            ManifestValidator.Validate(manifest),
+            d => d.Code == ManifestDiagnosticCodes.BindingCredentialBasicIncomplete);
+
+        Assert.Equal("/operations/0/binding/credentialRef", diagnostic.Pointer);
+        Assert.Contains(ManifestCredential.BasicPasswordSlot, diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("list-pets", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A credential nothing references is reported without refusing the manifest.
+    /// </summary>
+    /// <remarks>
+    /// It is almost always an authoring slip, but a manifest that refuses to load over a
+    /// surplus declaration would be worse than one that serves and says so.
+    /// </remarks>
+    [Fact]
+    public void A_credential_no_binding_references_is_a_warning()
+    {
+        ManifestDocument manifest = Scoped(
+            [
+                Credential("used", CredentialScheme.Bearer, "Authorization", "A"),
+                Credential("spare", CredentialScheme.Header, "X-Spare", "B"),
+            ],
+            "used");
+
+        var diagnostics = ManifestValidator.Validate(manifest);
+
+        ManifestDiagnostic warning = Assert.Single(diagnostics);
+
+        Assert.Equal(ManifestDiagnosticCodes.CredentialUnreferenced, warning.Code);
+        Assert.False(warning.IsError);
+        Assert.Equal(ManifestSectionName.Credentials, warning.Section);
+        Assert.Equal("/credentials/1/id", warning.Pointer);
+        Assert.Contains("spare", warning.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The resolved scope is a set, so a repeated reference is not contention with itself.
+    /// </summary>
+    [Fact]
+    public void A_reference_listed_twice_is_accepted()
+    {
+        ManifestDocument manifest = Scoped(
+            [Credential("bearer", CredentialScheme.Bearer, "Authorization")],
+            "bearer",
+            "bearer");
+
+        Assert.Empty(ManifestValidator.Validate(manifest));
+    }
+
+    /// <summary>
+    /// Reference order is not part of the scope.
+    /// </summary>
+    [Fact]
+    public void Reference_order_does_not_change_the_outcome()
+    {
+        ManifestCredential[] credentials =
+        [
+            Credential("header-token", CredentialScheme.ApiKey, "token", "A", CredentialLocation.Header),
+            Credential("query-token", CredentialScheme.ApiKey, "token", "B", CredentialLocation.Query),
+        ];
+
+        Assert.Empty(ManifestValidator.Validate(Scoped(credentials, "header-token", "query-token")));
+        Assert.Empty(ManifestValidator.Validate(Scoped(credentials, "query-token", "header-token")));
     }
 
     [Fact]
@@ -348,12 +551,13 @@ public sealed class ManifestValidatorTests
     {
         const string Canary = "swordfish-do-not-log";
 
-        ManifestDocument manifest = Build(
-            credentials: new CredentialsSection(
+        ManifestDocument manifest = Scoped(
             [
-                new ManifestCredential(CredentialScheme.Bearer, "Authorization", CredentialReference.Literal(Canary)),
-                new ManifestCredential(CredentialScheme.Header, "Authorization", CredentialReference.Literal(Canary)),
-            ]));
+                new ManifestCredential("primary", CredentialScheme.Bearer, "Authorization", CredentialReference.Literal(Canary)),
+                new ManifestCredential("secondary", CredentialScheme.Header, "Authorization", CredentialReference.Literal(Canary)),
+            ],
+            "primary",
+            "secondary");
 
         var messages = ManifestValidator.Validate(manifest).Select(static d => d.Message).ToList();
 
@@ -578,11 +782,14 @@ public sealed class ManifestValidatorTests
             policy: new PolicySection(
                 BaseUrl: new Uri("https://api.example.com/v1"),
                 AllowedOrigins: ["https://other.example.com"]),
-            agentSurface: new AgentSurfaceSection([Agent("list-pets", new HttpBinding("GET /ghost"))]),
+            agentSurface: new AgentSurfaceSection(
+            [
+                Agent("list-pets", new HttpBinding("GET /ghost", CredentialRef: ["primary", "secondary"])),
+            ]),
             credentials: new CredentialsSection(
             [
-                new ManifestCredential(CredentialScheme.Bearer, "Authorization", CredentialReference.Env("A")),
-                new ManifestCredential(CredentialScheme.Bearer, "Authorization", CredentialReference.Env("B")),
+                Credential("primary", CredentialScheme.Bearer, "Authorization", "A"),
+                Credential("secondary", CredentialScheme.Bearer, "Authorization", "B"),
             ]));
 
         var diagnostics = ManifestValidator.Validate(manifest);
@@ -613,8 +820,16 @@ public sealed class ManifestValidatorTests
         Assert.All(diagnostics, d => Assert.Contains(d.Code, ManifestDiagnosticCodes.All));
     }
 
+    /// <summary>
+    /// A structural cross-section defect is always a refusal.
+    /// </summary>
+    /// <remarks>
+    /// A dangling reference between sections leaves the runtime without an answer, so it
+    /// cannot be advisory. The one advisory cross-section finding is credential
+    /// reachability, which reports a surplus declaration rather than a missing answer.
+    /// </remarks>
     [Fact]
-    public void Every_diagnostic_is_an_error_because_no_cross_section_defect_is_tolerable()
+    public void A_structural_cross_section_defect_is_an_error()
     {
         ManifestDocument manifest = Build(
             server: new ServerSection(

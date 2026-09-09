@@ -46,10 +46,15 @@ public sealed record ManifestFormatEvaluation(
 public static class ManifestFormatSupport
 {
     /// <summary>Oldest manifest format version this Engine build accepts.</summary>
-    public static ManifestFormatVersion Minimum { get; } = new(0, 1);
+    /// <remarks>
+    /// The range is a single version. While the major version is 0 a minor bump may be
+    /// breaking, so a 0.1 manifest is refused rather than migrated: it is expected to be
+    /// re-exported.
+    /// </remarks>
+    public static ManifestFormatVersion Minimum { get; } = new(0, 2);
 
     /// <summary>Newest manifest format version this Engine build accepts.</summary>
-    public static ManifestFormatVersion Maximum { get; } = new(0, 1);
+    public static ManifestFormatVersion Maximum { get; } = new(0, 2);
 
     /// <summary>Human-readable description of the supported range, for diagnostics.</summary>
     public static string SupportedRange { get; } =

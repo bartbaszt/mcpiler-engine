@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:mcpiler:manifest:0.1:root",
+  "$id": "urn:mcpiler:manifest:0.2:root",
   "title": "MCPiler Manifest root document",
   "description": "The section index. Sections are inline or external; exactly one of the two per entry.",
   "type": "object",

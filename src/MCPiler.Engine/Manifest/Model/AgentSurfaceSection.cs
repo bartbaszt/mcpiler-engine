@@ -15,7 +15,12 @@ public sealed record AgentSurfaceSection(
     JsonObject? Components = null)
 {
     /// <summary>The section format version this model represents.</summary>
-    public const int FormatVersion = 1;
+    /// <remarks>
+    /// Version 2 added the credential scope an <c>http</c> binding authorizes. The section
+    /// version moved rather than only the root version because the change is confined to this
+    /// section's payload.
+    /// </remarks>
+    public const int FormatVersion = 2;
 
     /// <summary>The declared operations, never null.</summary>
     public IReadOnlyList<AgentOperationEntry> Operations { get; init; } = Operations ?? [];

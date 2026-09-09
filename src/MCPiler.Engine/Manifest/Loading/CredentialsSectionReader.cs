@@ -16,7 +16,7 @@ internal static class CredentialsSectionReader
 {
     internal static readonly string[] SectionMembers = ["formatVersion", "credentials"];
 
-    internal static readonly string[] CredentialMembers = ["scheme", "slot", "location", "value"];
+    internal static readonly string[] CredentialMembers = ["id", "scheme", "slot", "location", "value"];
 
     internal static readonly string[] ValueMembers = ["fromEnv", "fromFile", "inline"];
 
@@ -39,6 +39,22 @@ internal static class CredentialsSectionReader
         foreach (var (element, pointer) in elements)
         {
             context.RejectUnknownMembers(element, CredentialMembers, pointer);
+
+            var id = context.RequiredText(element, "id", pointer);
+
+            if (id is null)
+            {
+                continue;
+            }
+
+            if (!ManifestCredential.IsValidId(id))
+            {
+                context.Error(
+                    ManifestDiagnosticCodes.CredentialIdInvalid,
+                    $"'{DiagnosticText.Echo(id)}' is not a credential id. An id starts with a lower-case ASCII letter or digit, continues with those or '-', and is at most {ManifestCredential.MaxIdLength} characters.",
+                    SectionReadContext.Child(pointer, "id"));
+                continue;
+            }
 
             var declaredScheme = context.RequiredText(element, "scheme", pointer);
 
@@ -82,14 +98,15 @@ internal static class CredentialsSectionReader
                 continue;
             }
 
-            // Uniqueness is deliberately NOT checked here. Two credentials collide when they
-            // address the same destination, and that is a property of scheme plus slot plus
-            // location together: a bearer credential and a basic credential both write
-            // Authorization while declaring different schemes. Checking a scheme-scoped identity
-            // here would shadow the destination check with a narrower rule and a different code,
-            // so the operator would see a different refusal depending on whether the two
-            // credentials happened to share a scheme. ManifestValidator owns the invariant.
-            credentials.Add(new ManifestCredential(scheme, slot, reference, location?.Value));
+            // Uniqueness is deliberately NOT checked here, for either identity. Destination
+            // contention is a property of scheme plus slot plus location together — a bearer
+            // credential and a basic credential both write Authorization while declaring
+            // different schemes — and it is now also a property of which binding references
+            // both, which this reader cannot see. Id uniqueness is withheld for the narrower
+            // reason that a reader reporting it would refuse the section before the validator
+            // could report every other finding in it. This reader owns id syntax; the validator
+            // owns both uniqueness invariants.
+            credentials.Add(new ManifestCredential(id, scheme, slot, reference, location?.Value));
         }
 
         return new CredentialsSection(credentials);

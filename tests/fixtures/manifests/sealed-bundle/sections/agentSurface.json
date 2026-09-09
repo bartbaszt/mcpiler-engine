@@ -1,5 +1,5 @@
 {
-  "formatVersion": 1,
+  "formatVersion": 2,
   "groups": [{ "name": "widgets", "priority": 5 }],
   "operations": [
     {
@@ -16,7 +16,7 @@
       "annotations": { "readOnly": true, "destructive": false, "idempotent": true, "openWorld": true },
       "risk": "readOnly",
       "search": { "aliases": ["widgets"], "keywords": ["catalogue"], "exampleIntents": ["list the widgets"] },
-      "binding": { "type": "http", "operation": "GET /widgets" }
+      "binding": { "type": "http", "operation": "GET /widgets", "credentialRef": ["x-api-key"] }
     },
     {
       "slug": "create-widget",
@@ -35,7 +35,7 @@
       },
       "annotations": { "readOnly": false, "destructive": false, "idempotent": false, "openWorld": true },
       "risk": "mutating",
-      "binding": { "type": "http", "operation": "POST /widgets" }
+      "binding": { "type": "http", "operation": "POST /widgets", "credentialRef": ["x-api-key"] }
     }
   ]
 }

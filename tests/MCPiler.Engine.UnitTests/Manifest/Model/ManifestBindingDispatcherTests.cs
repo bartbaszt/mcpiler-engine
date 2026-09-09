@@ -47,6 +47,25 @@ public sealed class ManifestBindingDispatcherTests
         Assert.Null(ManifestBindingDispatcher.TryResolveOperationKey(binding: null));
         Assert.Null(ManifestBindingDispatcher.TryResolveServerUrl(binding: null));
         Assert.Null(ManifestBindingDispatcher.TryResolveCompoundSteps(binding: null));
+        Assert.Empty(ManifestBindingDispatcher.CredentialRefsOf(binding: null));
+    }
+
+    /// <summary>
+    /// Credential scope resolves through the same seam that resolves the executed operation.
+    /// </summary>
+    /// <remarks>
+    /// A separate resolution path for credentials is how a gate and an execution end up
+    /// disagreeing about which binding actually runs.
+    /// </remarks>
+    [Fact]
+    public void Credential_scope_resolves_through_the_seam()
+    {
+        HttpBinding scoped = new("GET /pets", CredentialRef: ["bearer", "x-tenant"]);
+
+        Assert.Equal(["bearer", "x-tenant"], ManifestBindingDispatcher.CredentialRefsOf(scoped));
+        Assert.Equal(["bearer", "x-tenant"], ManifestBindingDispatcher.CredentialRefsOf(new TransformedHttpBinding(scoped)));
+        Assert.Empty(ManifestBindingDispatcher.CredentialRefsOf(Http));
+        Assert.Empty(ManifestBindingDispatcher.CredentialRefsOf(new CompoundBinding([new CompoundStepEntry("one", "x")])));
     }
 
     [Fact]

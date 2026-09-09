@@ -1,8 +1,14 @@
 {
   "note": "Every value the MCPiler Manifest format treats as the meaning of an ABSENT member. Duplicated byte-identically into the Engine repository at engine/tests/fixtures/manifests/defaults.json. Each side asserts its own constants against its own copy, so a default changed on one side of the boundary fails that side's test, and a fixture changed on one side fails the byte-equality test. Keys are dotted paths through the wire format, not code identifiers.",
   "defaults": {
-    "manifestFormatVersion": "0.1",
-    "sectionFormatVersion": 1,
+    "manifestFormatVersion": "0.2",
+    "server.formatVersion": 1,
+    "policy.formatVersion": 1,
+    "operations.formatVersion": 1,
+    "agentSurface.formatVersion": 2,
+    "credentials.formatVersion": 2,
+    "tools.formatVersion": 1,
+    "search.formatVersion": 1,
 
     "server.surface.isDefault": false,
     "server.surface.enabled": true,

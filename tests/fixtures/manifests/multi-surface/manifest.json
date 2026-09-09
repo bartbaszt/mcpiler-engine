@@ -1,5 +1,5 @@
 {
-  "manifestFormatVersion": "0.1",
+  "manifestFormatVersion": "0.2",
   "generator": { "name": "hand-authored", "version": "0.0.0" },
   "sections": {
     "server": {
@@ -122,7 +122,7 @@
     },
     "agentSurface": {
       "inline": {
-        "formatVersion": 1,
+        "formatVersion": 2,
         "groups": [
           { "name": "pets", "priority": 10 },
           { "name": "admin", "priority": 1 }
@@ -144,7 +144,7 @@
             "annotations": { "readOnly": true, "destructive": false, "idempotent": true, "openWorld": true },
             "risk": "readOnly",
             "search": { "aliases": ["pets"], "keywords": ["inventory"], "exampleIntents": ["show me the pets"] },
-            "binding": { "type": "http", "operation": "GET /pets" }
+            "binding": { "type": "http", "operation": "GET /pets", "credentialRef": ["bearer-token"] }
           },
           {
             "slug": "get-pet",
@@ -156,7 +156,7 @@
               "required": ["petId"],
               "properties": { "petId": { "type": "string" } }
             },
-            "binding": { "type": "http", "operation": "GET /pets/{petId}" }
+            "binding": { "type": "http", "operation": "GET /pets/{petId}", "credentialRef": ["bearer-token"] }
           },
           {
             "slug": "delete-pet",
@@ -172,7 +172,8 @@
             "binding": {
               "type": "http",
               "operation": "DELETE /pets/{petId}",
-              "serverUrl": "https://eu.example.com/v1"
+              "serverUrl": "https://eu.example.com/v1",
+              "credentialRef": ["bearer-token"]
             }
           }
         ]
@@ -180,9 +181,14 @@
     },
     "credentials": {
       "inline": {
-        "formatVersion": 1,
+        "formatVersion": 2,
         "credentials": [
-          { "scheme": "bearer", "slot": "Authorization", "value": { "fromEnv": "EXAMPLE_TOKEN" } }
+          {
+            "id": "bearer-token",
+            "scheme": "bearer",
+            "slot": "Authorization",
+            "value": { "fromEnv": "EXAMPLE_TOKEN" }
+          }
         ]
       }
     }

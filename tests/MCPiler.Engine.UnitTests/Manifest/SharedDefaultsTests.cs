@@ -35,23 +35,28 @@ public sealed class SharedDefaultsTests
         Assert.Equal(Text("manifestFormatVersion"), EngineManifest.ManifestFormatSupport.Maximum.ToString());
     }
 
+    /// <summary>
+    /// Each section version is asserted on its own.
+    /// </summary>
+    /// <remarks>
+    /// A section version governs only its own payload, so the seven do not move together.
+    /// One shared expectation would have made the first divergence look like a defect.
+    /// </remarks>
     [Fact]
-    public void Every_section_carries_the_shared_section_format_version()
+    public void Every_section_carries_its_own_declared_format_version()
     {
-        var expected = Number("sectionFormatVersion");
-
-        var declared = new[]
+        var declared = new Dictionary<string, int>(StringComparer.Ordinal)
         {
-            ServerSection.FormatVersion,
-            PolicySection.FormatVersion,
-            CredentialsSection.FormatVersion,
-            OperationsSection.FormatVersion,
-            AgentSurfaceSection.FormatVersion,
-            ToolsSection.FormatVersion,
-            SearchSection.FormatVersion,
+            ["server.formatVersion"] = ServerSection.FormatVersion,
+            ["policy.formatVersion"] = PolicySection.FormatVersion,
+            ["operations.formatVersion"] = OperationsSection.FormatVersion,
+            ["agentSurface.formatVersion"] = AgentSurfaceSection.FormatVersion,
+            ["credentials.formatVersion"] = CredentialsSection.FormatVersion,
+            ["tools.formatVersion"] = ToolsSection.FormatVersion,
+            ["search.formatVersion"] = SearchSection.FormatVersion,
         };
 
-        Assert.All(declared, version => Assert.Equal(expected, version));
+        Assert.All(declared, entry => Assert.Equal(Number(entry.Key), entry.Value));
     }
 
     [Fact]
@@ -151,7 +156,7 @@ public sealed class SharedDefaultsTests
             JsonNode.Parse("""
             {
               "credentials": [
-                { "scheme": "apiKey", "slot": "X-Api-Key", "value": { "fromEnv": "KEY" } }
+                { "id": "x-api-key", "scheme": "apiKey", "slot": "X-Api-Key", "value": { "fromEnv": "KEY" } }
               ]
             }
             """),
@@ -311,7 +316,13 @@ public sealed class SharedDefaultsTests
     private static readonly string[] AssertedKeys =
     [
         "manifestFormatVersion",
-        "sectionFormatVersion",
+        "server.formatVersion",
+        "policy.formatVersion",
+        "operations.formatVersion",
+        "agentSurface.formatVersion",
+        "credentials.formatVersion",
+        "tools.formatVersion",
+        "search.formatVersion",
         "server.surface.isDefault",
         "server.surface.enabled",
         "server.surface.outputSchemas",

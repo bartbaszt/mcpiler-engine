@@ -170,6 +170,22 @@ public static class ManifestDiagnosticCodes
     /// <summary>A mapping pointer does not start at a permitted scope root.</summary>
     public const string PointerRootNotAllowed = "binding/pointer-root-not-allowed";
 
+    /// <summary>A binding references a credential id the credentials section does not declare.</summary>
+    /// <remarks>
+    /// Reported at load rather than at invocation because the operation can never execute as
+    /// authored: it either sends nothing where a secret was intended, or it would have to guess
+    /// which credential the author meant.
+    /// </remarks>
+    public const string BindingCredentialRefUnknown = "binding/credential-ref-unknown";
+
+    /// <summary>A binding references one half of a basic credential pair without the other.</summary>
+    /// <remarks>
+    /// A user name without a password cannot produce a basic authorization header, so the
+    /// reference is incomplete rather than merely unusual. The pair is checked per binding, not
+    /// per section, because only the binding decides which halves travel together.
+    /// </remarks>
+    public const string BindingCredentialBasicIncomplete = "binding/credential-basic-incomplete";
+
     // ---- surfaces -------------------------------------------------------------------
 
     /// <summary>Two surfaces declare the same slug.</summary>
@@ -244,11 +260,45 @@ public static class ManifestDiagnosticCodes
     /// <summary>A credential value declares more than one source, or none.</summary>
     public const string CredentialReferenceAmbiguous = "credential/reference-ambiguous";
 
-    /// <summary>Two credentials target the same destination slot.</summary>
+    /// <summary>A credential id is absent or not well formed.</summary>
+    public const string CredentialIdInvalid = "credential/id-invalid";
+
+    /// <summary>Two credentials declare the same id.</summary>
     /// <remarks>
-    /// Credentials are applied in order, so a duplicate slot means the value that reaches the
-    /// upstream service depends on declaration order rather than on anything the author
+    /// A duplicate id makes every reference to it ambiguous, and resolving it by position would
+    /// let declaration order decide which secret an operation sends.
+    /// </remarks>
+    public const string DuplicateCredentialId = "credential/duplicate-id";
+
+    /// <summary>Warning: a declared credential is referenced by no binding.</summary>
+    /// <remarks>
+    /// Not an error, because a manifest may legitimately declare a credential ahead of the
+    /// operation that will use it. It is worth reporting because the far more likely cause is
+    /// an operation that was meant to be authenticated and is not: the fail-safe default means
+    /// that mistake is silent at the wire.
+    /// </remarks>
+    public const string CredentialUnreferenced = "credential/unreferenced";
+
+    /// <summary>
+    /// One binding references two credentials that target the same destination slot.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Credentials are applied in order, so contention on one slot means the value that reaches
+    /// the upstream service depends on reference order rather than on anything the author
     /// stated. For a header slot the outcome is worse than ambiguous: two values may be sent.
+    /// </para>
+    /// <para>
+    /// The invariant is per binding. Two credentials may share a destination slot across the
+    /// section — that is exactly how one manifest addresses two upstreams that both expect an
+    /// <c>Authorization</c> header — and the contention only becomes real when a single
+    /// executing binding authorizes both.
+    /// </para>
+    /// <para>
+    /// This code previously described the section-wide condition. Redefining it is permitted
+    /// while the format's major version is 0 and no release exists; the format's versioning
+    /// policy freezes a code's meaning from the first release onward.
+    /// </para>
     /// </remarks>
     public const string DuplicateCredentialSlot = "credential/slot-duplicate";
 
@@ -371,6 +421,8 @@ public static class ManifestDiagnosticCodes
         BindingTypeUnknown,
         TransformInvalid,
         PointerRootNotAllowed,
+        BindingCredentialRefUnknown,
+        BindingCredentialBasicIncomplete,
         DuplicateSurfaceSlug,
         MultipleDefaultSurfaces,
         NoDefaultSurface,
@@ -389,6 +441,9 @@ public static class ManifestDiagnosticCodes
         CredentialInlineNotPermitted,
         CredentialInlineDiscouraged,
         CredentialReferenceAmbiguous,
+        CredentialIdInvalid,
+        DuplicateCredentialId,
+        CredentialUnreferenced,
         DuplicateCredentialSlot,
         ToolDerivationMismatch,
         NavigatorNameRequired,
@@ -421,6 +476,7 @@ public static class ManifestDiagnosticCodes
         NoResponsesDeclared,
         SurfaceHasNoOperations,
         CredentialInlineDiscouraged,
+        CredentialUnreferenced,
         SearchBuilderVersionUnsupported,
         VectorsUnreadable,
         VectorsDimensionMismatch,

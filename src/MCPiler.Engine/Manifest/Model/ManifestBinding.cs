@@ -36,10 +36,33 @@ public abstract record ManifestBinding
 /// Overrides the policy base URL for this one operation. It remains fully subject to the
 /// policy origin allow-list and can therefore never widen the perimeter.
 /// </param>
-public sealed record HttpBinding(string Operation, string? ServerUrl = null) : ManifestBinding
+/// <param name="CredentialRef">
+/// The ids of the <c>credentials</c>-section entries that apply to this operation.
+/// </param>
+/// <remarks>
+/// <para>
+/// <b>Absent means none.</b> An omitted member and an empty list are one representation and
+/// both mean that no credential is applied. The default fails safe: a manifest that forgets to
+/// state a scope sends an unauthenticated request rather than sending every declared secret to
+/// whichever origin this operation happens to address.
+/// </para>
+/// <para>
+/// A transformed binding reaches this member through its base, because a transformation
+/// rewrites arguments and never changes which upstream identity executes. A compound binding
+/// has no scope of its own: each step resolves its own binding, so a credential authorized for
+/// one step is not thereby authorized for another.
+/// </para>
+/// </remarks>
+public sealed record HttpBinding(
+    string Operation,
+    string? ServerUrl = null,
+    IReadOnlyList<string> CredentialRef = null!) : ManifestBinding
 {
     /// <summary>The wire discriminator.</summary>
     public const string TypeName = "http";
+
+    /// <summary>The referenced credential ids, never null.</summary>
+    public IReadOnlyList<string> CredentialRef { get; init; } = CredentialRef ?? [];
 }
 
 /// <summary>An HTTP operation wrapped in input and output transformation programs.</summary>

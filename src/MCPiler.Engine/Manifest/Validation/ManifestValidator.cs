@@ -35,7 +35,9 @@ public static class ManifestValidator
         ValidateSurfaceOperations(manifest, diagnostics);
         ValidateBindingOperationKeys(manifest, diagnostics);
         ValidateDestinations(manifest, diagnostics);
-        ValidateCredentialSlots(manifest, diagnostics);
+        ValidateCredentialIdentity(manifest, diagnostics);
+        ValidateBindingCredentialScope(manifest, diagnostics);
+        ValidateCredentialReachability(manifest, diagnostics);
         ValidateSchemaReferences(manifest, diagnostics);
         ValidateDeclaredTools(manifest, diagnostics);
 
@@ -245,40 +247,241 @@ public static class ManifestValidator
     }
 
     /// <summary>
-    /// Credentials must address distinct slots, and a basic credential needs both halves.
+    /// Credential ids must be unique, and a basic credential needs both halves declared.
     /// </summary>
     /// <remarks>
-    /// Both checks exist because the applier iterates the declared credentials in order. A
-    /// duplicate slot makes the value that reaches the upstream service depend on declaration
-    /// order, and a basic credential missing one half produces a syntactically valid header
-    /// carrying an empty user or an empty password — a silently wrong credential rather than a
-    /// refusal.
+    /// <para>
+    /// Identity is a section property and is checked here. Destination contention is not: two
+    /// credentials may legitimately target one slot when no single binding authorizes both,
+    /// which is how one manifest addresses two upstreams that each expect an
+    /// <c>Authorization</c> header. That check therefore moved to
+    /// <see cref="ValidateBindingCredentialScope"/>, where the executing binding is known.
+    /// </para>
+    /// <para>
+    /// The basic-halves check stays at section level because a half-declared pair is unusable
+    /// by every binding, not just by one: sending one half produces a syntactically valid
+    /// header carrying an empty user or an empty password, a silently wrong credential rather
+    /// than a refusal.
+    /// </para>
     /// </remarks>
-    private static void ValidateCredentialSlots(ManifestDocument manifest, List<ManifestDiagnostic> diagnostics)
+    private static void ValidateCredentialIdentity(ManifestDocument manifest, List<ManifestDiagnostic> diagnostics)
     {
         IReadOnlyList<ManifestCredential> credentials = manifest.EffectiveCredentials.Credentials;
-        Dictionary<string, int> seen = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, int> seen = new(StringComparer.Ordinal);
 
         for (int index = 0; index < credentials.Count; index++)
         {
             ManifestCredential credential = credentials[index];
-            string destination = DestinationOf(credential);
 
-            if (seen.TryGetValue(destination, out int first))
+            if (seen.TryGetValue(credential.Id, out int first))
             {
                 diagnostics.Add(ManifestDiagnostic.Error(
-                    ManifestDiagnosticCodes.DuplicateCredentialSlot,
-                    $"Credentials {first} and {index} both target '{DiagnosticText.Echo(destination)}'. " +
-                    "Which value reaches the upstream service would depend on declaration order.",
+                    ManifestDiagnosticCodes.DuplicateCredentialId,
+                    $"Credentials {first} and {index} both declare the id " +
+                    $"'{DiagnosticText.Echo(credential.Id)}'. Every reference to it would be " +
+                    "ambiguous, and resolving it by position would let declaration order decide " +
+                    "which secret an operation sends.",
                     section: ManifestSectionName.Credentials,
-                    pointer: JsonPointer.Build("credentials", Segment(index), "slot")));
+                    pointer: JsonPointer.Build("credentials", Segment(index), "id")));
                 continue;
             }
 
-            seen[destination] = index;
+            seen[credential.Id] = index;
         }
 
         ValidateBasicCredentialHalves(credentials, diagnostics);
+    }
+
+    /// <summary>
+    /// Every credential an operation references must exist, must not contend with another
+    /// reference of the same operation, and must carry both halves of a basic pair.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Scope is resolved through <see cref="ManifestBindingDispatcher.CredentialRefsOf"/> and
+    /// never by a local type test, so the set inspected here is exactly the set an invocation
+    /// would apply. A gate that resolved a different binding than execution is the defect that
+    /// rule exists to prevent.
+    /// </para>
+    /// <para>
+    /// A reference list is treated as a set: naming one id twice is harmless because the
+    /// resolved credential is the same one, so it is accepted rather than reported.
+    /// </para>
+    /// </remarks>
+    private static void ValidateBindingCredentialScope(
+        ManifestDocument manifest,
+        List<ManifestDiagnostic> diagnostics)
+    {
+        IReadOnlyList<ManifestCredential> credentials = manifest.EffectiveCredentials.Credentials;
+        IReadOnlyList<AgentOperationEntry> operations = manifest.AgentSurface.Operations;
+        Dictionary<string, ManifestCredential> byId = new(StringComparer.Ordinal);
+
+        foreach (ManifestCredential credential in credentials)
+        {
+            byId.TryAdd(credential.Id, credential);
+        }
+
+        for (int index = 0; index < operations.Count; index++)
+        {
+            AgentOperationEntry operation = operations[index];
+            IReadOnlyList<string> refs = ManifestBindingDispatcher.CredentialRefsOf(operation.Binding);
+
+            if (refs.Count == 0)
+            {
+                continue;
+            }
+
+            Dictionary<string, string> destinations = new(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> resolved = new(StringComparer.Ordinal);
+
+            for (int refIndex = 0; refIndex < refs.Count; refIndex++)
+            {
+                string reference = refs[refIndex];
+
+                if (!byId.TryGetValue(reference, out ManifestCredential? credential))
+                {
+                    diagnostics.Add(ManifestDiagnostic.Error(
+                        ManifestDiagnosticCodes.BindingCredentialRefUnknown,
+                        $"Operation '{DiagnosticText.Echo(operation.Slug)}' references credential " +
+                        $"'{DiagnosticText.Echo(reference)}', which the credentials section does not " +
+                        "declare. The operation would send nothing where a secret was intended.",
+                        section: ManifestSectionName.AgentSurface,
+                        pointer: JsonPointer.Build(
+                            "operations",
+                            Segment(index),
+                            "binding",
+                            "credentialRef",
+                            Segment(refIndex))));
+                    continue;
+                }
+
+                if (!resolved.Add(reference))
+                {
+                    continue;
+                }
+
+                string destination = DestinationOf(credential);
+
+                if (destinations.TryGetValue(destination, out string? first))
+                {
+                    diagnostics.Add(ManifestDiagnostic.Error(
+                        ManifestDiagnosticCodes.DuplicateCredentialSlot,
+                        $"Operation '{DiagnosticText.Echo(operation.Slug)}' references credentials " +
+                        $"'{DiagnosticText.Echo(first)}' and '{DiagnosticText.Echo(reference)}', which " +
+                        $"both target '{DiagnosticText.Echo(destination)}'. Which value reaches the " +
+                        "upstream service would depend on reference order.",
+                        section: ManifestSectionName.AgentSurface,
+                        pointer: JsonPointer.Build(
+                            "operations",
+                            Segment(index),
+                            "binding",
+                            "credentialRef",
+                            Segment(refIndex))));
+                    continue;
+                }
+
+                destinations[destination] = reference;
+            }
+
+            ValidateBasicPairIsComplete(operation, index, resolved, byId, diagnostics);
+        }
+    }
+
+    /// <summary>
+    /// An operation that references one half of a basic pair must reference the other.
+    /// </summary>
+    private static void ValidateBasicPairIsComplete(
+        AgentOperationEntry operation,
+        int index,
+        HashSet<string> resolved,
+        Dictionary<string, ManifestCredential> byId,
+        List<ManifestDiagnostic> diagnostics)
+    {
+        bool hasUsername = false;
+        bool hasPassword = false;
+
+        foreach (string reference in resolved)
+        {
+            ManifestCredential credential = byId[reference];
+
+            if (credential.Scheme is not CredentialScheme.Basic)
+            {
+                continue;
+            }
+
+            hasUsername |= string.Equals(
+                credential.Slot,
+                ManifestCredential.BasicUsernameSlot,
+                StringComparison.Ordinal);
+            hasPassword |= string.Equals(
+                credential.Slot,
+                ManifestCredential.BasicPasswordSlot,
+                StringComparison.Ordinal);
+        }
+
+        if (hasUsername == hasPassword)
+        {
+            return;
+        }
+
+        string missing = hasUsername
+            ? ManifestCredential.BasicPasswordSlot
+            : ManifestCredential.BasicUsernameSlot;
+
+        diagnostics.Add(ManifestDiagnostic.Error(
+            ManifestDiagnosticCodes.BindingCredentialBasicIncomplete,
+            $"Operation '{DiagnosticText.Echo(operation.Slug)}' references one half of a basic " +
+            $"credential pair but not the '{missing}' half. Sending one half would produce a " +
+            "well-formed header carrying an empty value rather than failing.",
+            section: ManifestSectionName.AgentSurface,
+            pointer: JsonPointer.Build("operations", Segment(index), "binding", "credentialRef")));
+    }
+
+    /// <summary>
+    /// Reports a declared credential that no operation references.
+    /// </summary>
+    /// <remarks>
+    /// A warning rather than a refusal: declaring a credential ahead of the operation that will
+    /// use it is legitimate. It is worth reporting because the likelier cause is an operation
+    /// that was meant to be authenticated and is not, and the fail-safe default makes that
+    /// mistake silent at the wire.
+    /// </remarks>
+    private static void ValidateCredentialReachability(
+        ManifestDocument manifest,
+        List<ManifestDiagnostic> diagnostics)
+    {
+        IReadOnlyList<ManifestCredential> credentials = manifest.EffectiveCredentials.Credentials;
+
+        if (credentials.Count == 0)
+        {
+            return;
+        }
+
+        HashSet<string> referenced = new(StringComparer.Ordinal);
+
+        foreach (AgentOperationEntry operation in manifest.AgentSurface.Operations)
+        {
+            foreach (string reference in ManifestBindingDispatcher.CredentialRefsOf(operation.Binding))
+            {
+                referenced.Add(reference);
+            }
+        }
+
+        for (int index = 0; index < credentials.Count; index++)
+        {
+            if (referenced.Contains(credentials[index].Id))
+            {
+                continue;
+            }
+
+            diagnostics.Add(ManifestDiagnostic.Warning(
+                ManifestDiagnosticCodes.CredentialUnreferenced,
+                $"Credential '{DiagnosticText.Echo(credentials[index].Id)}' is referenced by no " +
+                "operation, so it is never applied. An operation that was meant to be " +
+                "authenticated sends an unauthenticated request.",
+                section: ManifestSectionName.Credentials,
+                pointer: JsonPointer.Build("credentials", Segment(index), "id")));
+        }
     }
 
     private static void ValidateBasicCredentialHalves(

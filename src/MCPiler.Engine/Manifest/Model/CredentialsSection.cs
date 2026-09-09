@@ -13,7 +13,7 @@ namespace MCPiler.Engine.Manifest.Model;
 public sealed record CredentialsSection(IReadOnlyList<ManifestCredential> Credentials = null!)
 {
     /// <summary>The section format version this model represents.</summary>
-    public const int FormatVersion = 1;
+    public const int FormatVersion = 2;
 
     /// <summary>The declared credentials, never null.</summary>
     public IReadOnlyList<ManifestCredential> Credentials { get; init; } = Credentials ?? [];
@@ -23,6 +23,10 @@ public sealed record CredentialsSection(IReadOnlyList<ManifestCredential> Creden
 }
 
 /// <summary>One credential slot.</summary>
+/// <param name="Id">
+/// Identifies this credential so an execution binding can reference it. The id carries no
+/// other runtime meaning: it selects nothing, implies no scheme, and is never a secret.
+/// </param>
 /// <param name="Scheme">How the value is applied to the request.</param>
 /// <param name="Slot">
 /// The slot name. For <see cref="CredentialScheme.Basic"/> this is
@@ -36,11 +40,15 @@ public sealed record CredentialsSection(IReadOnlyList<ManifestCredential> Creden
 /// Where an API key is placed. Meaningful only for <see cref="CredentialScheme.ApiKey"/>.
 /// </param>
 public sealed record ManifestCredential(
+    string Id,
     CredentialScheme Scheme,
     string Slot,
     CredentialReference Value,
     CredentialLocation? Location = null)
 {
+    /// <summary>The longest permitted credential id.</summary>
+    public const int MaxIdLength = 64;
+
     /// <summary>The basic-scheme user name slot.</summary>
     public const string BasicUsernameSlot = "username";
 
@@ -55,6 +63,48 @@ public sealed record ManifestCredential(
 
     /// <summary>The effective API key placement.</summary>
     public CredentialLocation EffectiveLocation => Location ?? CredentialLocation.Header;
+
+    /// <summary>
+    /// True when <paramref name="id"/> is a well-formed credential id: lower-case ASCII
+    /// letters and digits plus the hyphen, starting with a letter or digit, at most
+    /// <see cref="MaxIdLength"/> characters.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Upper case is refused rather than folded. If the charset admitted it, two authored ids
+    /// could differ only by case, and every comparison site would then have to agree on a
+    /// folding rule forever. Refusing the input once is cheaper and cannot drift.
+    /// </para>
+    /// <para>
+    /// The test is written character by character rather than as a pattern so the accepted set
+    /// is visible at the point of decision, matching how secret file paths are checked.
+    /// </para>
+    /// </remarks>
+    public static bool IsValidId(string? id)
+    {
+        if (string.IsNullOrEmpty(id) || id.Length > MaxIdLength)
+        {
+            return false;
+        }
+
+        if (!IsIdStart(id[0]))
+        {
+            return false;
+        }
+
+        for (int index = 1; index < id.Length; index++)
+        {
+            if (!IsIdStart(id[index]) && id[index] != '-')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsIdStart(char candidate)
+        => candidate is >= 'a' and <= 'z' || candidate is >= '0' and <= '9';
 
     /// <summary>
     /// True when this credential contributes a request header whose value must be treated as

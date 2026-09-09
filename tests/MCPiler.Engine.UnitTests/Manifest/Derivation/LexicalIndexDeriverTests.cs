@@ -596,7 +596,7 @@ public sealed class LexicalIndexDeriverTests
 
     private static string Single(string operationBody) => $$"""
     {
-      "manifestFormatVersion": "0.1",
+      "manifestFormatVersion": "0.2",
       "sections": {
         "server": { "inline": { "name": "Single" } },
         "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -669,7 +669,7 @@ public sealed class LexicalIndexDeriverTests
 
     private static string SchemaFixtureWithComponent { get; } = $$"""
     {
-      "manifestFormatVersion": "0.1",
+      "manifestFormatVersion": "0.2",
       "sections": {
         "server": { "inline": { "name": "Single" } },
         "policy": { "inline": { "baseUrl": "https://api.example.com" } },

@@ -1,5 +1,5 @@
 {
-  "manifestFormatVersion": "0.1",
+  "manifestFormatVersion": "0.2",
   "generator": {
     "name": "mcpiler-studio",
     "version": "0.6.0",
@@ -18,8 +18,8 @@
     },
     "credentials": {
       "path": "sections/credentials.json",
-      "sha256": "c41dbdc1e23240152d277e71b354460b53ae7ba81f252ae7b3def0214c98c277",
-      "bytes": 190
+      "sha256": "8d0bec27f9887b8201bf72f4fc21d1737f724805136ac5fcaeb77c1a0a717674",
+      "bytes": 215
     },
     "operations": {
       "path": "sections/operations.json",
@@ -28,13 +28,13 @@
     },
     "agentSurface": {
       "path": "sections/agentSurface.json",
-      "sha256": "c1d52f2d5682657ccd53964f4be2a1f3f594f63c4c5c1fde1f5e6a11acd80e2f",
-      "bytes": 1385
+      "sha256": "9a0209a871a27abe3225c0ef16c2d8a8790780c990312dd75f7771873145516e",
+      "bytes": 1449
     }
   },
   "completeness": {
     "algorithm": "sha256",
-    "value": "d30da132e220e3bbadbb1a83fa7e951495717482252810abc2c807881c8a7143"
+    "value": "3724b29391860b4384b5bdb2c24143f2de14018f4964d361debea03c27662daa"
   },
   "provenance": {
     "connectorId": "0f3f7f6a5c8b4a2d9e1c7b5a3d2f4e60",

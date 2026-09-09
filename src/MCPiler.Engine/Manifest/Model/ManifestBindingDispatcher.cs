@@ -55,6 +55,26 @@ public static class ManifestBindingDispatcher
         => TryResolveHttp(binding)?.ServerUrl;
 
     /// <summary>
+    /// Returns the credential ids authorized for <paramref name="binding"/>, empty when it
+    /// authorizes none.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Credential scope resolves here for the same reason the execution key does. A credential
+    /// decision made against a different binding than the one that executes is the defect this
+    /// seam exists to make impossible: a transformation wrapping an operation must authorize
+    /// exactly what its base sends, and no caller may re-derive that with a local type test.
+    /// </para>
+    /// <para>
+    /// A compound binding returns empty rather than null. It authorizes nothing itself; each
+    /// step is a separate operation whose own binding is asked separately, so a credential
+    /// granted to one step is never inherited by another.
+    /// </para>
+    /// </remarks>
+    public static IReadOnlyList<string> CredentialRefsOf(ManifestBinding? binding)
+        => TryResolveHttp(binding)?.CredentialRef ?? [];
+
+    /// <summary>
     /// Returns the workflow steps <paramref name="binding"/> runs, or <c>null</c> when it is
     /// not a compound binding.
     /// </summary>

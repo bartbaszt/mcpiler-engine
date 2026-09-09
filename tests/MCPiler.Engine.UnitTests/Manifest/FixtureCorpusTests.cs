@@ -63,8 +63,8 @@ public sealed class FixtureCorpusTests
     {
         var expected = new[]
         {
-            "compound", "credentials", "files", "minimal", "multi-surface", "refs", "sealed-bundle", "search",
-            "transformed",
+            "compiled", "compound", "credentials", "files", "minimal", "multi-surface", "refs", "sealed-bundle",
+            "search", "transformed", "two-origins",
         };
 
         Assert.Equal(expected, ValidFixtureNames());
@@ -238,6 +238,92 @@ public sealed class FixtureCorpusTests
         Assert.Contains(
             credentials,
             credential => credential.Scheme == CredentialScheme.ApiKey && credential.EffectiveLocation == CredentialLocation.Query);
+        Assert.Equal(
+            ["basic-username", "basic-password", "x-api-key", "query-access-token", "cookie-session", "x-tenant"],
+            credentials.Select(credential => credential.Id).ToList());
+    }
+
+    /// <summary>
+    /// Two upstream origins, each with its own bearer token, in one manifest.
+    /// </summary>
+    /// <remarks>
+    /// This exact document was refused before credential scope existed: two credentials
+    /// writing one header were a section-wide collision, so the only configuration the
+    /// format accepted was a single token sent to both origins. It is the change's headline
+    /// behavior, which is why it is a fixture rather than only a unit test.
+    /// </remarks>
+    [Fact]
+    public void TwoOriginsFixtureScopesOneTokenToEachOrigin()
+    {
+        var result = ReadFixture("two-origins");
+
+        Assert.Empty(result.Errors.Select(diagnostic => diagnostic.ToString()).ToList());
+
+        var manifest = result.Manifest;
+
+        Assert.NotNull(manifest);
+        Assert.Equal(
+            ["pets-token", "shops-token"],
+            manifest!.EffectiveCredentials.Credentials.Select(credential => credential.Id).ToList());
+        Assert.All(
+            manifest.EffectiveCredentials.Credentials,
+            credential => Assert.Equal(ManifestCredential.AuthorizationHeader, credential.Slot));
+
+        var pets = manifest.AgentSurface.Operation("list-pets");
+        var shops = manifest.AgentSurface.Operation("list-shops");
+
+        Assert.NotNull(pets);
+        Assert.NotNull(shops);
+        Assert.Equal(["pets-token"], ManifestBindingDispatcher.CredentialRefsOf(pets!.Binding));
+        Assert.Equal(["shops-token"], ManifestBindingDispatcher.CredentialRefsOf(shops!.Binding));
+        Assert.Null(ManifestBindingDispatcher.TryResolveServerUrl(pets.Binding));
+        Assert.Equal("https://eu.example.com/v1", ManifestBindingDispatcher.TryResolveServerUrl(shops.Binding));
+        Assert.Empty(ManifestValidator.Validate(manifest));
+    }
+
+    /// <summary>
+    /// The compiled fixture is a producer's output rather than a hand-written document, and
+    /// this asserts that credential scope survives the crossing intact.
+    /// </summary>
+    /// <remarks>
+    /// The bytes are produced by the Studio compiler and committed to both repositories, so
+    /// this side asserts behavior while the producing side owns the bytes. Every credential
+    /// the compiler declares is referenced by every operation it emits, which is what makes
+    /// all four scope diagnostics unreachable for a well-formed compilation. A regression in
+    /// either implementation shows up here as a specific code rather than as a byte mismatch
+    /// with no explanation.
+    /// </remarks>
+    [Fact]
+    public void CompiledFixtureCarriesAScopeEngineAccepts()
+    {
+        var result = ReadFixture("compiled");
+        var manifest = result.Manifest;
+
+        Assert.NotNull(manifest);
+
+        var declared = manifest!.EffectiveCredentials.Credentials.Select(credential => credential.Id).ToList();
+
+        Assert.NotEmpty(declared);
+        Assert.All(declared, id => Assert.True(ManifestCredential.IsValidId(id), id));
+
+        var operations = manifest.AgentSurface.Operations;
+
+        Assert.NotEmpty(operations);
+        Assert.All(
+            operations,
+            operation => Assert.Equal(
+                declared,
+                ManifestBindingDispatcher.CredentialRefsOf(operation.Binding)));
+
+        var codes = ManifestValidator.Validate(manifest)
+            .Select(diagnostic => diagnostic.Code)
+            .ToList();
+
+        Assert.DoesNotContain(ManifestDiagnosticCodes.CredentialUnreferenced, codes);
+        Assert.DoesNotContain(ManifestDiagnosticCodes.BindingCredentialRefUnknown, codes);
+        Assert.DoesNotContain(ManifestDiagnosticCodes.DuplicateCredentialSlot, codes);
+        Assert.DoesNotContain(ManifestDiagnosticCodes.BindingCredentialBasicIncomplete, codes);
+        Assert.Empty(codes);
     }
 
     [Theory]
@@ -395,7 +481,7 @@ public sealed class FixtureCorpusTests
 
         return """
             {
-              "manifestFormatVersion": "0.1",
+              "manifestFormatVersion": "0.2",
               "sections": {
                 "server": { "inline": { "name": "Bomb" } },
                 "policy": { "inline": { "baseUrl": "https://api.example.com", "schemaBounds": __BOUNDS__ } },

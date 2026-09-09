@@ -1,4 +1,4 @@
-# MCPiler Manifest 0.1 — published JSON Schemas
+# MCPiler Manifest 0.2 — published JSON Schemas
 
 These documents describe the MCPiler Manifest format for editors, generators and
 third-party tooling. They are JSON Schema 2020-12.
@@ -24,11 +24,13 @@ That is a real risk, so it is tested rather than trusted. `PublishedSchemaTests`
 
 JSON Schema describes shape and vocabulary. It cannot express uniqueness across array
 entries, a cross-reference from one section to another, or agreement between two members
-computed from each other. So duplicate slugs and keys, an exposure entry naming an unknown
-operation, a binding naming an unknown execution key, a destination outside the perimeter,
-and a `key` disagreeing with `method` and `path` are all reader-only refusals. The hostile
-corpus marks them `"schemaRefuses": false` and the tests assert that this is exactly the
-set the schemas let through.
+computed from each other. So duplicate slugs and keys, a duplicate credential id, an exposure
+entry naming an unknown operation, a binding naming an unknown execution key, a binding
+referencing an undeclared credential id, a binding referencing one half of a basic credential
+pair, two credentials referenced by one binding that contend for the same destination slot, a
+destination outside the perimeter, and a `key` disagreeing with `method` and `path` are all
+reader-only refusals. The hostile corpus marks them `"schemaRefuses": false` and the tests
+assert that this is exactly the set the schemas let through.
 
 ## One deliberate divergence
 
@@ -40,7 +42,7 @@ pins the divergence so it stays deliberate.
 
 ## Identifiers
 
-`$id` uses `urn:mcpiler:manifest:0.1:<name>`. A URN, not an https URL, because Engine has no
+`$id` uses `urn:mcpiler:manifest:0.2:<name>`. A URN, not an https URL, because Engine has no
 published schema host yet and a URL that does not resolve is a worse identifier than one that
 never promised to. A hosted alias can be added at publication.
 
@@ -51,15 +53,15 @@ stated in `../../docs/manifest.md`. It is not the Engine assembly version.
 
 | file | `$id` | section |
 | --- | --- | --- |
-| `root.schema.json` | `urn:mcpiler:manifest:0.1:root` | the section index |
-| `server.schema.json` | `urn:mcpiler:manifest:0.1:server` | `server` |
-| `policy.schema.json` | `urn:mcpiler:manifest:0.1:policy` | `policy` |
-| `credentials.schema.json` | `urn:mcpiler:manifest:0.1:credentials` | `credentials` |
-| `operations.schema.json` | `urn:mcpiler:manifest:0.1:operations` | `operations` |
-| `agent-surface.schema.json` | `urn:mcpiler:manifest:0.1:agent-surface` | `agentSurface` |
-| `tools.schema.json` | `urn:mcpiler:manifest:0.1:tools` | `tools` |
-| `search.schema.json` | `urn:mcpiler:manifest:0.1:search` | `search` |
-| `schema.schema.json` | `urn:mcpiler:manifest:0.1:schema` | a schema value, shared |
+| `root.schema.json` | `urn:mcpiler:manifest:0.2:root` | the section index |
+| `server.schema.json` | `urn:mcpiler:manifest:0.2:server` | `server` |
+| `policy.schema.json` | `urn:mcpiler:manifest:0.2:policy` | `policy` |
+| `credentials.schema.json` | `urn:mcpiler:manifest:0.2:credentials` | `credentials` |
+| `operations.schema.json` | `urn:mcpiler:manifest:0.2:operations` | `operations` |
+| `agent-surface.schema.json` | `urn:mcpiler:manifest:0.2:agent-surface` | `agentSurface` |
+| `tools.schema.json` | `urn:mcpiler:manifest:0.2:tools` | `tools` |
+| `search.schema.json` | `urn:mcpiler:manifest:0.2:search` | `search` |
+| `schema.schema.json` | `urn:mcpiler:manifest:0.2:schema` | a schema value, shared |
 
 There is no schema for `vectors`: its payload is binary, and its index entry is described in
 `root.schema.json`.
