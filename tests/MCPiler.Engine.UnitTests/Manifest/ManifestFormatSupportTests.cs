@@ -237,6 +237,10 @@ public sealed class SectionFormatVersionMatrixTests
     [InlineData("agentSurface", 1, false)]
     [InlineData("credentials", 2, true)]
     [InlineData("credentials", 1, false)]
+    [InlineData("tools", 1, true)]
+    [InlineData("tools", 2, false)]
+    [InlineData("search", 1, true)]
+    [InlineData("search", 2, false)]
     public void Each_section_accepts_only_its_own_version(string section, int declared, bool accepted)
     {
         Read(section, $"\"formatVersion\": {declared}, ");
@@ -270,6 +274,8 @@ public sealed class SectionFormatVersionMatrixTests
     [InlineData("operations")]
     [InlineData("agentSurface")]
     [InlineData("credentials")]
+    [InlineData("tools")]
+    [InlineData("search")]
     public void An_absent_section_version_is_accepted(string section)
     {
         Read(section, string.Empty);
@@ -298,6 +304,12 @@ public sealed class SectionFormatVersionMatrixTests
                 break;
             case "credentials":
                 SectionReader.ReadCredentials(Json($"{{ {version}\"credentials\": [] }}"), _diagnostics);
+                break;
+            case "tools":
+                SectionReader.ReadTools(Json($"{{ {version}\"surfaces\": {{}} }}"), _diagnostics);
+                break;
+            case "search":
+                SectionReader.ReadSearch(Json($"{{ {version}\"operations\": [] }}"), _diagnostics);
                 break;
             default:
                 throw new ArgumentOutOfRangeException(nameof(section), section, "Unknown section.");
