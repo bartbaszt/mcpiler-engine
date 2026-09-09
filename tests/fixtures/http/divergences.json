@@ -1,0 +1,4 @@
+{
+  "note": "Cases where the Engine request compiler is known and intended to differ from the Platform one. A case listed here is exempt from byte parity and must instead be asserted directly by the Engine suite. A case may be a parity case or a divergence, never both. An empty list is the correct state while the two implementations are meant to agree exactly; the file exists so that the first deliberate improvement in Engine has somewhere to be declared, rather than arriving as a red parity test that someone is tempted to silence.",
+  "cases": []
+}

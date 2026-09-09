@@ -1,0 +1,2 @@
+METHOD GET
+URL https://api.example.com/pets/42?tags=x,y

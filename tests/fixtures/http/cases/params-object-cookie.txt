@@ -1,0 +1,3 @@
+METHOD GET
+URL https://api.example.com/object-param
+H Cookie: meta=a,x,b,y

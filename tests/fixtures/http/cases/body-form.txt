@@ -1,0 +1,4 @@
+METHOD POST
+URL https://api.example.com/echo-form
+H Content-Type: application/x-www-form-urlencoded
+BODY 757365723d616c696365266163746976653d74727565

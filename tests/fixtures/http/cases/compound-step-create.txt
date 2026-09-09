@@ -1,0 +1,4 @@
+METHOD POST
+URL https://shop.example.com/orders
+H Content-Type: application/json
+BODY 7b22637573746f6d65724964223a22632d3432227d

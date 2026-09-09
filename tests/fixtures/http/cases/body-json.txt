@@ -1,0 +1,4 @@
+METHOD POST
+URL https://api.example.com/echo
+H Content-Type: application/json
+BODY 7b226e616d65223a2270616c222c22636f756e74223a337d

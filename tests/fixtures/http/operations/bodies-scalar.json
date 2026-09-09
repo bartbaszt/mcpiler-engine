@@ -1,0 +1,126 @@
+{
+  "formatVersion": 1,
+  "operations": [
+    {
+      "key": "POST /echo",
+      "method": "POST",
+      "path": "/echo",
+      "upstreamId": "echoJson",
+      "requestBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "integer"
+                }
+              }
+            },
+            "itemSchema": {},
+            "itemEncoding": {
+              "propertyName": ""
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "200": {
+          "description": "ok"
+        }
+      }
+    },
+    {
+      "key": "POST /echo-vnd",
+      "method": "POST",
+      "path": "/echo-vnd",
+      "upstreamId": "echoVnd",
+      "requestBody": {
+        "content": {
+          "application/vnd.acme.order\u002Bjson": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "sku": {
+                  "type": "string"
+                }
+              }
+            },
+            "itemSchema": {},
+            "itemEncoding": {
+              "propertyName": ""
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "200": {
+          "description": "ok"
+        }
+      }
+    },
+    {
+      "key": "POST /echo-text",
+      "method": "POST",
+      "path": "/echo-text",
+      "upstreamId": "echoText",
+      "requestBody": {
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            },
+            "itemSchema": {},
+            "itemEncoding": {
+              "propertyName": ""
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "200": {
+          "description": "ok"
+        }
+      }
+    },
+    {
+      "key": "POST /echo-form",
+      "method": "POST",
+      "path": "/echo-form",
+      "upstreamId": "echoForm",
+      "requestBody": {
+        "content": {
+          "application/x-www-form-urlencoded": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "user": {
+                  "type": "string"
+                },
+                "active": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "itemSchema": {},
+            "itemEncoding": {
+              "propertyName": ""
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "200": {
+          "description": "ok"
+        }
+      }
+    }
+  ]
+}

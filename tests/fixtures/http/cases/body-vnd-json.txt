@@ -1,0 +1,4 @@
+METHOD POST
+URL https://api.example.com/echo-vnd
+H Content-Type: application/vnd.acme.order+json
+BODY 7b22736b75223a2241227d

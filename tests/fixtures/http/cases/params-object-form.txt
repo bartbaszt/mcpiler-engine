@@ -1,0 +1,2 @@
+METHOD GET
+URL https://api.example.com/object-param?filter=color,red,size,m

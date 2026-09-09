@@ -1,0 +1,78 @@
+{
+  "formatVersion": 1,
+  "operations": [
+    {
+      "key": "GET /object-param",
+      "method": "GET",
+      "path": "/object-param",
+      "upstreamId": "getObjectParam",
+      "parameters": [
+        {
+          "name": "filter",
+          "in": "query",
+          "explode": false,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "color": {
+                "type": "string"
+              },
+              "size": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "name": "meta",
+          "in": "cookie",
+          "explode": false,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "string"
+              },
+              "b": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "ok"
+        }
+      }
+    },
+    {
+      "key": "GET /object-param-inherited",
+      "method": "GET",
+      "path": "/object-param-inherited",
+      "upstreamId": "getObjectParamInherited",
+      "parameters": [
+        {
+          "name": "meta",
+          "in": "cookie",
+          "schema": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "string"
+              },
+              "b": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "ok"
+        }
+      }
+    }
+  ]
+}

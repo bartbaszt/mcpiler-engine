@@ -1,0 +1,4 @@
+METHOD POST
+URL https://api.example.com/binary-upload
+H Content-Type: application/octet-stream
+BODY 00ff10aa

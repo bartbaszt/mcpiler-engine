@@ -1,0 +1,2 @@
+METHOD GET
+URL https://api.example.com/v2/pets/a%2Fb%20c?fields=a%20b&fields=c%2Fd

@@ -1,0 +1,99 @@
+{
+  "formatVersion": 1,
+  "operations": [
+    {
+      "key": "POST /orders",
+      "method": "POST",
+      "path": "/orders",
+      "upstreamId": "createOrder",
+      "summary": "Creates an order.",
+      "requestBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "customerId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "customerId"
+              ]
+            },
+            "itemSchema": {},
+            "itemEncoding": {
+              "propertyName": ""
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "201": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "total": {
+                    "type": "number"
+                  }
+                }
+              },
+              "itemSchema": {},
+              "itemEncoding": {
+                "propertyName": ""
+              }
+            }
+          },
+          "description": "Created"
+        }
+      }
+    },
+    {
+      "key": "GET /orders/{orderId}",
+      "method": "GET",
+      "path": "/orders/{orderId}",
+      "upstreamId": "getOrder",
+      "summary": "Fetches one order.",
+      "parameters": [
+        {
+          "name": "orderId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string"
+                  }
+                }
+              },
+              "itemSchema": {},
+              "itemEncoding": {
+                "propertyName": ""
+              }
+            }
+          },
+          "description": "Ok"
+        }
+      }
+    }
+  ]
+}

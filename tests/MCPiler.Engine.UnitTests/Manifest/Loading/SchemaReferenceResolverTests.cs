@@ -381,7 +381,7 @@ public sealed class SchemaReferenceResolverTests
     /// <remarks>
     /// <para>
     /// This is the structural half of the guarantee. The textual half lives in
-    /// <c>ManifestBoundaryTests</c>, which forbids every manifest component outside three named
+    /// <c>RuntimeBoundaryTests</c>, which forbids every production component outside three named
     /// filesystem components from naming an I/O or network type at all. Together they mean a
     /// hostile <c>$ref</c> cannot become an outbound request: the resolver refuses a non-local
     /// reference by rule, and could not act on one anyway.

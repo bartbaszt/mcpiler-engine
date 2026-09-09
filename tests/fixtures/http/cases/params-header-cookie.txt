@@ -1,0 +1,4 @@
+METHOD GET
+URL https://api.example.com/pets/42
+H Cookie: session=s1
+H X-Trace: t-1

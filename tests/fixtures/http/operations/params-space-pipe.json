@@ -1,0 +1,40 @@
+{
+  "formatVersion": 1,
+  "operations": [
+    {
+      "key": "GET /list",
+      "method": "GET",
+      "path": "/list",
+      "upstreamId": "getList",
+      "parameters": [
+        {
+          "name": "ids",
+          "in": "query",
+          "style": "spaceDelimited",
+          "schema": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          }
+        },
+        {
+          "name": "names",
+          "in": "query",
+          "style": "pipeDelimited",
+          "schema": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "ok"
+        }
+      }
+    }
+  ]
+}

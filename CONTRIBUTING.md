@@ -90,6 +90,43 @@ Warnings are errors. Behavior changes require tests. Changes to request compilat
 serialization, credential application or manifest parsing require golden or
 characterization tests, not only unit assertions.
 
+## The golden corpus
+
+`tests/fixtures/http/` holds the request-shape contract. `operations/*.json` are manifest
+`operations` sections; `cases/*.txt` are the exact requests those sections must produce, one
+line per property, with the body as lower-case hex so a single differing byte is visible
+rather than inferred.
+
+The sections are generated, not authored. Do not hand-edit a file under `operations/`: it is
+projected from an upstream API description, and an edit that makes a test pass locally is
+silently reverted the next time the corpus is regenerated. Change the behavior or change the
+case.
+
+Three rules govern the corpus.
+
+**A behavior change updates the corpus in the same commit.** A commit that changes emitted
+bytes and leaves the cases untouched is incomplete, even when the suite happens to be green,
+because the corpus is the specification and not a snapshot of it.
+
+**Regenerating a case to make a test pass is not a fix.** A red case is a claim that the
+request changed. Answer the claim: either the change was intended, in which case say so
+where the next rule describes, or it was not, in which case the code is wrong. Overwriting
+the expectation converts a detected regression into an undetected one, and there is no way
+to tell the two commits apart afterwards.
+
+**A deliberate difference is declared, not absorbed.** `tests/fixtures/http/divergences.json`
+lists cases that are intentionally exempt from byte equality. An entry names the case, states
+the behavior, and gives the reason. A case is a parity case or a divergence and never both,
+and the guards refuse an entry that names a case which does not exist, or one whose reason is
+a placeholder. This file exists so that improving Engine does not require weakening the gate:
+without it the only way to land a deliberate improvement would be to silence a failing test,
+and that pressure eventually wins.
+
+**A request-shape expectation is produced by the compiler.** Do not assemble an expected
+request by calling a serializer directly and writing the surrounding lines by hand. Such a
+test asserts what the author believed the compiler does. If a case cannot be produced through
+the compiler, the compiler is missing a seam — add the seam.
+
 ## Reporting security issues
 
 Do not open a public issue for a security problem. Contact the maintainer privately.

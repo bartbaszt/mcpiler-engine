@@ -1,0 +1,80 @@
+{
+  "formatVersion": 1,
+  "operations": [
+    {
+      "key": "POST /multipart",
+      "method": "POST",
+      "path": "/multipart",
+      "upstreamId": "uploadMixed",
+      "requestBody": {
+        "content": {
+          "multipart/form-data": {
+            "schema": {
+              "type": "object",
+              "properties": {
+                "meta": {
+                  "type": "string"
+                },
+                "file": {
+                  "type": "string",
+                  "format": "binary"
+                },
+                "note": {
+                  "type": "string"
+                }
+              }
+            },
+            "itemSchema": {},
+            "encoding": {
+              "file": {
+                "contentType": "application/pdf"
+              },
+              "note": {
+                "headers": {
+                  "X-Note-Version": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "itemEncoding": {
+              "propertyName": ""
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "200": {
+          "description": "ok"
+        }
+      }
+    },
+    {
+      "key": "POST /binary-upload",
+      "method": "POST",
+      "path": "/binary-upload",
+      "upstreamId": "uploadBinary",
+      "requestBody": {
+        "content": {
+          "application/octet-stream": {
+            "schema": {
+              "type": "string",
+              "format": "binary"
+            },
+            "itemSchema": {},
+            "itemEncoding": {
+              "propertyName": ""
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "200": {
+          "description": "ok"
+        }
+      }
+    }
+  ]
+}

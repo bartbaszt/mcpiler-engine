@@ -1,0 +1,97 @@
+{
+  "formatVersion": 1,
+  "operations": [
+    {
+      "key": "GET /pets/{petId}",
+      "method": "GET",
+      "path": "/pets/{petId}",
+      "upstreamId": "getPetById",
+      "parameters": [
+        {
+          "name": "petId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        },
+        {
+          "name": "fields",
+          "in": "query",
+          "schema": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "name": "X-Trace",
+          "in": "header",
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "session",
+          "in": "cookie",
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "tags",
+          "in": "query",
+          "explode": false,
+          "schema": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "name": "filter",
+          "in": "query",
+          "style": "deepObject",
+          "explode": true,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "color": {
+                "type": "string"
+              },
+              "size": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "name": "limit",
+          "in": "query",
+          "allowReserved": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "itemSchema": {},
+              "itemEncoding": {
+                "propertyName": ""
+              }
+            }
+          },
+          "description": "ok"
+        }
+      }
+    }
+  ]
+}

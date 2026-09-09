@@ -5,10 +5,10 @@ using Xunit;
 namespace MCPiler.Engine.ArchitectureTests;
 
 /// <summary>
-/// Guards the properties that make a manifest safe to load from an untrusted bundle:
-/// the host is reachable from a named handful of components, provenance is carried
-/// without being read, and a reference is resolved in exactly one place that has no
-/// way to fetch anything.
+/// Guards the properties that make a manifest safe to load from an untrusted bundle and safe
+/// to act on: the host is reachable from a named handful of components, provenance is carried
+/// without being read, and a reference is resolved in exactly one place that has no way to
+/// fetch anything.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -17,10 +17,22 @@ namespace MCPiler.Engine.ArchitectureTests;
 /// socket; only a guard over the whole source tree can show that no future component quietly
 /// adds one.
 /// </para>
+/// <para>
+/// The scan covers every production source file, not one namespace. That distinction is the
+/// whole point: a guard scoped to the namespace it was written for stops guarding the moment
+/// somebody adds a second one, and it stops silently, because a passing guard and an absent
+/// guard are indistinguishable from the test report. Request compilation is the first component
+/// to arrive outside <c>Manifest/</c>, and it is deliberately granted no exemption below - a
+/// compiler turns an operation and an argument object into bytes, which needs neither a socket
+/// nor a file nor an environment variable.
+/// </para>
 /// </remarks>
-public sealed class ManifestBoundaryTests
+public sealed class RuntimeBoundaryTests
 {
-    private const string ManifestSourceRoot = "src/MCPiler.Engine/Manifest";
+    /// <summary>Everything the guards read. Widening this constant is how a new namespace gets covered.</summary>
+    private const string EngineSourceRoot = "src/MCPiler.Engine";
+
+    private const string ManifestSourceRoot = EngineSourceRoot + "/Manifest";
 
     private const string Resolver = ManifestSourceRoot + "/Loading/SchemaReferenceResolver.cs";
 
@@ -32,11 +44,14 @@ public sealed class ManifestBoundaryTests
     /// </summary>
     /// <remarks>
     /// Everything else - the readers, the validator, the reference resolver, both derivers,
-    /// the ranker and the canonical writer - operates on bytes it was handed. Keeping the set
-    /// this small is what makes "loading a manifest cannot reach the machine" checkable rather
-    /// than merely intended. Credential resolution will eventually read an environment variable
-    /// or a secret file; when it does, it must be added here deliberately and reviewed as a
-    /// component that touches the host, not arrive unnoticed inside an unrelated change.
+    /// the ranker, the canonical writer and the request compiler - operates on bytes it was
+    /// handed. Keeping the set this small is what makes "loading a manifest cannot reach the
+    /// machine" checkable rather than merely intended. Credential resolution will eventually
+    /// read an environment variable or a secret file, and sending a compiled request will
+    /// eventually open a socket; when they do, they must be added here deliberately and
+    /// reviewed as components that touch the host, not arrive unnoticed inside an unrelated
+    /// change. A failure of the guard below is a finding about the code, never a reason to add
+    /// an entry here.
     /// </remarks>
     private static readonly string[] HostAccessPermitted =
     [
@@ -66,11 +81,11 @@ public sealed class ManifestBoundaryTests
     ];
 
     [Fact]
-    public void Manifest_code_reaches_the_host_only_where_that_is_the_component_s_purpose()
+    public void Runtime_code_reaches_the_host_only_where_that_is_the_component_s_purpose()
     {
         var offenders = new List<string>();
 
-        foreach (var file in ManifestSources())
+        foreach (var file in RuntimeSources())
         {
             var relative = EngineRepository.Relative(file);
 
@@ -92,6 +107,38 @@ public sealed class ManifestBoundaryTests
             "Loading, validating and deriving from a manifest must not reach the host. "
                 + "A component that needs to may be added to HostAccessPermitted with a stated reason. "
                 + $"Unexpected host access: {string.Join("; ", offenders)}");
+    }
+
+    /// <summary>
+    /// The scan reaches every production file, so narrowing it back to one namespace fails
+    /// here instead of quietly reducing what the guards above prove.
+    /// </summary>
+    /// <remarks>
+    /// A guard that scans nothing passes. That is the failure mode this test exists for: the
+    /// host-access and provenance guards were originally scoped to <c>Manifest/</c>, and when
+    /// request compilation arrived beside it they kept passing while covering none of it.
+    /// Asserting the scan is complete, and that it genuinely reaches outside the namespace it
+    /// was born in, is what makes the other assertions worth reading.
+    /// </remarks>
+    [Fact]
+    public void The_scan_covers_every_production_source_file()
+    {
+        var scanned = RuntimeSources().Select(EngineRepository.Relative).ToList();
+        var produced = EngineRepository.ProductionSources().Select(EngineRepository.Relative).ToList();
+
+        Assert.Equal(produced, scanned);
+
+        var outsideManifest = scanned
+            .Where(path => !path.StartsWith(ManifestSourceRoot + "/", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.True(
+            outsideManifest.Count > 0,
+            "The boundary guards are meant to cover the whole library, not the namespace they were "
+                + "written for. Nothing outside "
+                + ManifestSourceRoot
+                + " was scanned, so either the source tree collapsed back to one namespace or the "
+                + "scan root was narrowed and these guards stopped proving what they claim.");
     }
 
     /// <summary>
@@ -130,7 +177,7 @@ public sealed class ManifestBoundaryTests
 
         var offenders = new List<string>();
 
-        foreach (var file in ManifestSources())
+        foreach (var file in RuntimeSources())
         {
             offenders.AddRange(
                 pattern
@@ -212,10 +259,18 @@ public sealed class ManifestBoundaryTests
                 + $"fragment-only pointer inside one section document. Conflicting entries: {string.Join(", ", widened)}");
     }
 
-    private static IEnumerable<string> ManifestSources()
+    /// <summary>
+    /// Every production source file of the Engine library.
+    /// </summary>
+    /// <remarks>
+    /// The prefix filter is redundant while <c>src/</c> holds one project, and it is kept
+    /// anyway so that adding a second project is a decision about what these guards cover
+    /// rather than an accident that silently extends them.
+    /// </remarks>
+    private static IEnumerable<string> RuntimeSources()
         => EngineRepository
             .ProductionSources()
             .Where(path => EngineRepository
                 .Relative(path)
-                .StartsWith(ManifestSourceRoot + "/", StringComparison.Ordinal));
+                .StartsWith(EngineSourceRoot + "/", StringComparison.Ordinal));
 }

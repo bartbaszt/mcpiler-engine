@@ -305,13 +305,24 @@ public static class Vocabulary
     };
 
     /// <summary>
-    /// The explode flag applied when a parameter declares none.
+    /// The explode flag applied when a parameter declares none. The form style explodes by default and
+    /// every other style does not, whatever the location.
     /// </summary>
-    public static bool DefaultExplode(ParameterLocation location, ParameterStyle style) => location switch
-    {
-        ParameterLocation.Query => style == ParameterStyle.Form,
-        _ => false,
-    };
+    /// <remarks>
+    /// The location is accepted but never inspected, because it does not enter the rule. It stays in the
+    /// signature so a caller reads the default the same way it reads
+    /// <see cref="DefaultStyle(ParameterLocation)"/>, and because the style a caller passes is normally
+    /// the location's own default.
+    ///
+    /// Only a query and a cookie parameter default to the form style, so those are the only two
+    /// locations where an absent explode resolves to true. An earlier revision restricted that to the
+    /// query location, which made a cookie parameter carrying an object serialize as one joined value
+    /// while a runtime applying the documented default serialized it as separate pairs. The two forms
+    /// are not interchangeable on the wire, and the manifest cannot express the difference, because a
+    /// writer omits an explode that equals the default.
+    /// </remarks>
+    public static bool DefaultExplode(ParameterLocation location, ParameterStyle style)
+        => style == ParameterStyle.Form;
 
     private static bool TryRead<T>((T Value, string Wire)[] table, string? wire, out T value)
         where T : struct, Enum

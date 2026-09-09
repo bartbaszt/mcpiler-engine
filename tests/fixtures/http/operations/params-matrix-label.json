@@ -1,0 +1,39 @@
+{
+  "formatVersion": 1,
+  "operations": [
+    {
+      "key": "GET /matrix/{id}{coords}",
+      "method": "GET",
+      "path": "/matrix/{id}{coords}",
+      "upstreamId": "getMatrix",
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "style": "matrix",
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "coords",
+          "in": "path",
+          "style": "label",
+          "explode": true,
+          "schema": {
+            "type": "array",
+            "items": {
+              "type": "integer"
+            }
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "ok"
+        }
+      }
+    }
+  ]
+}

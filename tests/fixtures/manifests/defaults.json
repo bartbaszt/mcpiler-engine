@@ -52,7 +52,7 @@
     "operations.parameter.explode.queryOther": false,
     "operations.parameter.explode.path": false,
     "operations.parameter.explode.header": false,
-    "operations.parameter.explode.cookie": false,
+    "operations.parameter.explode.cookie": true,
     "operations.requestBody.required": false,
 
     "agentSurface.group.priority": 0,

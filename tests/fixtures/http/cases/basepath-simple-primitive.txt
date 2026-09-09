@@ -1,0 +1,2 @@
+METHOD GET
+URL https://api.example.com/v2/pets/42

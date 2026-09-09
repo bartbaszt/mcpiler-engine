@@ -36,6 +36,20 @@ public sealed class VocabularyTests
         Assert.False(Vocabulary.TryReadParameterLocation("querystring", out _));
     }
 
+    // The request compiler switches over this enum exhaustively and carries no refusal branch for a
+    // location it cannot serialize, because there is none: the impossibility is a property of the
+    // vocabulary rather than a runtime check. That only stays true while the enum is exactly these
+    // four, so the enum is what gets asserted. Adding a fifth member without a compiler arm is a
+    // build error; adding one with an arm has to be a deliberate decision, and this test is where it
+    // announces itself.
+    [Fact]
+    public void The_parameter_locations_are_exactly_the_four_a_request_can_carry()
+    {
+        Assert.Equal(
+            [ParameterLocation.Query, ParameterLocation.Header, ParameterLocation.Path, ParameterLocation.Cookie],
+            Enum.GetValues<ParameterLocation>());
+    }
+
     [Theory]
     [InlineData("spaceDelimited", ParameterStyle.SpaceDelimited)]
     [InlineData("spacedelimited", ParameterStyle.SpaceDelimited)]
@@ -104,11 +118,20 @@ public sealed class VocabularyTests
         Assert.Equal(expected, Vocabulary.DefaultStyle(location));
     }
 
+    // The rule is the style, not the location. A cookie parameter's default style is form, so it
+    // explodes by default exactly as a query parameter does; asserting the location-independence
+    // directly is what keeps a future revision from reintroducing a query-only special case.
     [Theory]
     [InlineData(ParameterLocation.Query, ParameterStyle.Form, true)]
     [InlineData(ParameterLocation.Query, ParameterStyle.SpaceDelimited, false)]
+    [InlineData(ParameterLocation.Query, ParameterStyle.DeepObject, false)]
     [InlineData(ParameterLocation.Path, ParameterStyle.Simple, false)]
+    [InlineData(ParameterLocation.Path, ParameterStyle.Matrix, false)]
+    [InlineData(ParameterLocation.Path, ParameterStyle.Form, true)]
     [InlineData(ParameterLocation.Header, ParameterStyle.Simple, false)]
+    [InlineData(ParameterLocation.Header, ParameterStyle.Form, true)]
+    [InlineData(ParameterLocation.Cookie, ParameterStyle.Form, true)]
+    [InlineData(ParameterLocation.Cookie, ParameterStyle.Simple, false)]
     public void Applies_the_documented_default_explode(
         ParameterLocation location,
         ParameterStyle style,

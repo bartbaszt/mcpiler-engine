@@ -299,8 +299,14 @@ refused.
 A parameter's `in` is `query`, `header`, `path` or `cookie`. `style` is one of
 `matrix`, `label`, `form`, `simple`, `spaceDelimited`, `pipeDelimited`,
 `deepObject`, `cookie`; the default is `simple` for path and header, `form` for
-query and cookie. `explode` defaults to true only for a query parameter with
-`form` style.
+query and cookie. `explode` defaults to true for the `form` style and to false
+for every other style, whatever the location. Query and cookie are therefore the
+two locations where a parameter that states neither `style` nor `explode`
+explodes.
+
+A writer omits an `explode` that equals this default, so the default is part of
+the wire contract rather than a reader convenience: a parameter that states no
+`explode` and a parameter that states the default one are the same document.
 
 `responses` matters for correctness, not documentation: a declared binary
 response media type is how a response becomes a file handle rather than a text

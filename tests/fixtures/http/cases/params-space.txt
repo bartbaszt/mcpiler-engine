@@ -1,0 +1,2 @@
+METHOD GET
+URL https://api.example.com/list?ids=1%202%203

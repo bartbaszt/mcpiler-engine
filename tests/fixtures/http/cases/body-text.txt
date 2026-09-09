@@ -1,0 +1,4 @@
+METHOD POST
+URL https://api.example.com/echo-text
+H Content-Type: text/plain
+BODY 68656c6c6f20776f726c64

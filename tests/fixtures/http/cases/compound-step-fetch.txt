@@ -1,0 +1,2 @@
+METHOD GET
+URL https://shop.example.com/orders/ord-77
