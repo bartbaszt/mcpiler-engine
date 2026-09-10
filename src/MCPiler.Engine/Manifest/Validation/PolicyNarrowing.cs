@@ -217,6 +217,84 @@ public static class PolicyNarrowing
         [.. Rules.Select(static rule => rule.Limit)];
 
     /// <summary>
+    /// The protected bounds indexed by the name an operator writes, compared ordinally.
+    /// </summary>
+    /// <remarks>
+    /// A host configures narrowing by name because the alternative is a second list of the
+    /// same nineteen bounds in whatever type the configuration surface uses, and a second
+    /// list drifts. The reflection guard behind <see cref="ProtectedLimits"/> then protects
+    /// the configuration surface too, for free.
+    /// </remarks>
+    public static IReadOnlyDictionary<string, ProtectedLimit> ByName { get; } =
+        Rules.ToDictionary(static rule => rule.Limit.Name, static rule => rule.Limit, StringComparer.Ordinal);
+
+    /// <summary>
+    /// The value <paramref name="policy"/> compiled for <paramref name="limitName"/>, expressed
+    /// in the same permissiveness units <see cref="ApplyNamed"/> compares.
+    /// </summary>
+    /// <remarks>
+    /// Exposed so a caller can compute a floor as the minimum of a process-wide setting and
+    /// what a manifest already compiled. Clamping before the comparison is what makes a floor
+    /// structurally incapable of widening, rather than merely intended not to.
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="limitName"/> is not a protected bound.</exception>
+    public static long Compiled(PolicySection policy, string limitName)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+
+        Rule rule = Array.Find(Rules, candidate => string.Equals(candidate.Limit.Name, limitName, StringComparison.Ordinal))
+            ?? throw new ArgumentOutOfRangeException(nameof(limitName), limitName, "Not a protected bound.");
+
+        return rule.Compiled(policy);
+    }
+
+    /// <summary>
+    /// Returns <paramref name="compiled"/> narrowed by bounds named in <paramref name="requested"/>,
+    /// reporting every attempt to widen one.
+    /// </summary>
+    /// <remarks>
+    /// Behaves exactly as <see cref="Apply"/>; only the way a caller names a bound differs. An
+    /// unrecognized name is a caller error rather than a diagnostic, because a configuration
+    /// surface is expected to have refused it by name already.
+    /// </remarks>
+    public static PolicySection ApplyNamed(
+        PolicySection compiled,
+        IReadOnlyDictionary<string, long> requested,
+        ICollection<ManifestDiagnostic> diagnostics)
+    {
+        ArgumentNullException.ThrowIfNull(compiled);
+        ArgumentNullException.ThrowIfNull(requested);
+        ArgumentNullException.ThrowIfNull(diagnostics);
+
+        PolicySection narrowed = compiled;
+
+        foreach (Rule rule in Rules)
+        {
+            if (!requested.TryGetValue(rule.Limit.Name, out long value))
+            {
+                continue;
+            }
+
+            long compiledValue = rule.Compiled(compiled);
+
+            if (value > compiledValue)
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.LimitWidened,
+                    $"Local configuration sets '{rule.Limit.Name}' to {Render(value, rule.Limit.Unit)}, " +
+                    $"which is more permissive than the compiled {Render(compiledValue, rule.Limit.Unit)}. " +
+                    "Local configuration may only narrow a compiled bound.",
+                    section: ManifestSectionName.Policy));
+                continue;
+            }
+
+            narrowed = rule.With(narrowed, value);
+        }
+
+        return narrowed;
+    }
+
+    /// <summary>
     /// Returns <paramref name="compiled"/> narrowed by <paramref name="overrides"/>, reporting
     /// every attempt to widen a bound or the perimeter.
     /// </summary>

@@ -1,0 +1,199 @@
+using System.Diagnostics.CodeAnalysis;
+
+using MCPiler.Engine.Runtime;
+
+namespace MCPiler.Engine.Host.Configuration;
+
+/// <summary>
+/// The complete set of settings this deployable accepts, and the refusal of everything else.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The list is short on purpose. A base URL, an allowed origin, a credential and any bound
+/// a Manifest compiles are absent, because those belong to the reviewed artifact rather than
+/// to whatever the process was started with. A deployment changes them by changing the
+/// Manifest.
+/// </para>
+/// <para>
+/// An unrecognized key is refused by name. Ignoring it is worse than rejecting it: the
+/// operator believes the setting applied, the process behaves as if it were never written,
+/// and the disagreement surfaces as behaviour rather than as a message at startup.
+/// </para>
+/// <para>
+/// Bound names are not restated here. They come from the library, which already enumerates
+/// every bound local configuration may narrow and already has a reflection guard proving the
+/// enumeration is complete. Restating them would be a second list to keep in step.
+/// </para>
+/// </remarks>
+public static class HostConfiguration
+{
+    /// <summary>Prefix for a bound narrowed on one mount: <c>mount:{prefix}:{Bound}</c>.</summary>
+    public const string MountNarrowingPrefix = "mount:";
+
+    /// <summary>Prefix for a bound narrowed across every mount: <c>floor:{Bound}</c>.</summary>
+    public const string FloorPrefix = "floor:";
+
+    /// <summary>Key naming the directory issued file handles keep their content in.</summary>
+    public const string FileStoreRootKey = "file-store-root";
+
+    /// <summary>Key naming the address a remote listener binds.</summary>
+    public const string ListenKey = "listen";
+
+    /// <summary>Key naming the transport, <c>http</c> or <c>stdio</c>.</summary>
+    public const string TransportKey = "transport";
+
+    /// <summary>Key refusing any Manifest that carries no completeness seal.</summary>
+    public const string RequireSealedKey = "require-sealed";
+
+    /// <summary>Key permitting a literal secret inside a Manifest.</summary>
+    public const string AllowInlineSecretsKey = "allow-inline-secrets";
+
+    /// <summary>Key naming a directory this process serves, which the file store must sit outside.</summary>
+    public const string ServedContentRootKey = "served-content-root";
+
+    private static readonly string[] Simple =
+    [
+        FileStoreRootKey,
+        ListenKey,
+        TransportKey,
+        RequireSealedKey,
+        AllowInlineSecretsKey,
+        ServedContentRootKey,
+    ];
+
+    /// <summary>Every key this deployable accepts, excluding the two prefixed families.</summary>
+    public static IReadOnlyList<string> AcceptedKeys => Simple;
+
+    /// <summary>
+    /// Binds settings and mounts into runtime options, or reports why it cannot.
+    /// </summary>
+    /// <param name="mounts">Prefix to Manifest path, in the order they were given.</param>
+    /// <param name="settings">Everything else the operator set.</param>
+    /// <param name="options">The bound options when this returns true.</param>
+    /// <param name="refusals">One message per rejected setting when this returns false.</param>
+    public static bool TryBind(
+        IReadOnlyList<KeyValuePair<string, string>> mounts,
+        IReadOnlyDictionary<string, string> settings,
+        [NotNullWhen(true)] out RuntimeOptions? options,
+        out IReadOnlyList<string> refusals)
+    {
+        ArgumentNullException.ThrowIfNull(mounts);
+        ArgumentNullException.ThrowIfNull(settings);
+
+        List<string> rejected = [];
+        Dictionary<string, Dictionary<string, string>> narrowing = new(StringComparer.OrdinalIgnoreCase);
+        Dictionary<string, string> floors = new(StringComparer.Ordinal);
+        List<string> served = [];
+
+        string? fileStoreRoot = null;
+        bool requireSealed = false;
+        bool allowInlineSecrets = false;
+
+        foreach ((string key, string value) in settings)
+        {
+            if (key.StartsWith(MountNarrowingPrefix, StringComparison.Ordinal))
+            {
+                BindMountNarrowing(key, value, narrowing, rejected);
+                continue;
+            }
+
+            if (key.StartsWith(FloorPrefix, StringComparison.Ordinal))
+            {
+                floors[key[FloorPrefix.Length..]] = value;
+                continue;
+            }
+
+            switch (key)
+            {
+                case FileStoreRootKey:
+                    fileStoreRoot = value;
+                    break;
+                case ServedContentRootKey:
+                    served.Add(value);
+                    break;
+                case RequireSealedKey:
+                    requireSealed = Flag(key, value, rejected);
+                    break;
+                case AllowInlineSecretsKey:
+                    allowInlineSecrets = Flag(key, value, rejected);
+                    break;
+                case ListenKey:
+                case TransportKey:
+                    // Read by the listener rather than by the runtime, and accepted here so
+                    // the completeness of this switch is the accepted-key list.
+                    break;
+                default:
+                    rejected.Add($"'{key}' is not a setting this host accepts. It accepts {string.Join(", ", Simple)}, '{MountNarrowingPrefix}{{prefix}}:{{bound}}' and '{FloorPrefix}{{bound}}'.");
+                    break;
+            }
+        }
+
+        if (fileStoreRoot is null)
+        {
+            rejected.Add($"'{FileStoreRootKey}' is required. Issued file handles need somewhere to keep their content.");
+        }
+
+        if (rejected.Count > 0)
+        {
+            options = null;
+            refusals = rejected;
+            return false;
+        }
+
+        options = new RuntimeOptions(
+            [.. mounts.Select(mount => new MountRequest(mount.Key, mount.Value)
+            {
+                Narrowing = narrowing.TryGetValue(mount.Key, out Dictionary<string, string>? own)
+                    ? own
+                    : new Dictionary<string, string>(StringComparer.Ordinal),
+            })],
+            fileStoreRoot!)
+        {
+            RequireSealed = requireSealed,
+            AllowInlineSecrets = allowInlineSecrets,
+            Floors = floors,
+            ServedContentRoots = served,
+        };
+
+        refusals = [];
+        return true;
+    }
+
+    private static void BindMountNarrowing(
+        string key,
+        string value,
+        Dictionary<string, Dictionary<string, string>> narrowing,
+        List<string> rejected)
+    {
+        string remainder = key[MountNarrowingPrefix.Length..];
+        int separator = remainder.LastIndexOf(':');
+
+        if (separator <= 0 || separator == remainder.Length - 1)
+        {
+            rejected.Add($"'{key}' does not name a mount and a bound. The shape is '{MountNarrowingPrefix}{{prefix}}:{{bound}}'.");
+            return;
+        }
+
+        string prefix = remainder[..separator];
+        string bound = remainder[(separator + 1)..];
+
+        if (!narrowing.TryGetValue(prefix, out Dictionary<string, string>? own))
+        {
+            own = new Dictionary<string, string>(StringComparer.Ordinal);
+            narrowing[prefix] = own;
+        }
+
+        own[bound] = value;
+    }
+
+    private static bool Flag(string key, string value, List<string> rejected)
+    {
+        if (bool.TryParse(value, out bool parsed))
+        {
+            return parsed;
+        }
+
+        rejected.Add($"'{key}' was given '{value}', which is not true or false.");
+        return false;
+    }
+}

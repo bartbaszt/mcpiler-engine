@@ -30,6 +30,9 @@ public sealed class HostBoundaryTests
 {
     private const string HostSourceRoot = "src/MCPiler.Engine.Host";
 
+    /// <summary>The one library namespace the deployable is allowed to name.</summary>
+    private const string Seam = "MCPiler.Engine.Runtime";
+
     /// <summary>
     /// Namespaces that carry product meaning: what a Manifest says, whether it is valid,
     /// what is derived from it, how it is searched, and how its programs are run.
@@ -160,6 +163,57 @@ public sealed class HostBoundaryTests
     /// <summary>
     /// The scan reaches the deployable and is not passing because it found nothing.
     /// </summary>
+    /// <summary>
+    /// The deployable talks to one namespace, and everything it needs arrives through it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The containment rule says the host holds no product decision. This says the same thing
+    /// from the other side, and catches what containment cannot: a host that names
+    /// <c>ManifestFormatSupport</c> to print a version string has taken no decision, and has
+    /// still reached past the seam. The next reach is a convenience, and the one after that
+    /// is a decision.
+    /// </para>
+    /// <para>
+    /// A single permitted namespace also makes the seam's own completeness visible. When the
+    /// host needs something the seam does not expose, this test fails and the answer is to
+    /// widen the seam deliberately, not to reach around it.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void The_deployable_reaches_the_library_only_through_the_seam()
+    {
+        Regex pattern = new(
+            @"MCPiler\.Engine(?:\.[A-Za-z0-9_]+)*",
+            RegexOptions.CultureInvariant,
+            TimeSpan.FromSeconds(5));
+
+        List<string> offenders = [];
+
+        foreach (string file in HostSources())
+        {
+            foreach (Match match in pattern.Matches(File.ReadAllText(file)))
+            {
+                string named = match.Value;
+
+                if (named.StartsWith("MCPiler.Engine.Host", StringComparison.Ordinal)
+                    || named.StartsWith(Seam, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                offenders.Add($"{EngineRepository.Relative(file)} -> {named}");
+            }
+        }
+
+        Assert.True(
+            offenders.Count == 0,
+            "The deployable reaches the library through "
+                + Seam
+                + " and nowhere else. Anything it needs belongs on the seam, where the decision "
+                + $"about what a host may see is made once. Reaching past it: {string.Join("; ", offenders)}");
+    }
+
     [Fact]
     public void The_scan_reaches_the_deployable()
     {

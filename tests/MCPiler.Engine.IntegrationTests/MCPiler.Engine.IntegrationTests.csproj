@@ -26,8 +26,14 @@
     <PackageReference Include="xunit.v3" />
   </ItemGroup>
 
+  <!--
+    The deployable is referenced here rather than from the unit suite because what is worth
+    asserting about it is behaviour of a process: which settings it accepts, what it refuses
+    to start with, and what a client sees over a transport. None of that is a unit.
+  -->
   <ItemGroup>
     <ProjectReference Include="..\..\src\MCPiler.Engine\MCPiler.Engine.csproj" />
+    <ProjectReference Include="..\..\src\MCPiler.Engine.Host\MCPiler.Engine.Host.csproj" />
   </ItemGroup>
 
 </Project>

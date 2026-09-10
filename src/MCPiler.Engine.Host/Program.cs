@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Reflection;
 
-using MCPiler.Engine.Manifest;
+using MCPiler.Engine.Runtime;
 
 namespace MCPiler.Engine.Host;
 
@@ -37,7 +37,7 @@ internal static class Program
     internal static string Identity()
         => string.Create(
             CultureInfo.InvariantCulture,
-            $"mcpiler-engine {Version()} (manifest format {ManifestFormatSupport.SupportedRange})");
+            $"mcpiler-engine {Version()} (manifest format {EngineRuntime.SupportedManifestFormatRange})");
 
     private static string Version()
         => typeof(Program).Assembly
