@@ -30,10 +30,10 @@ public sealed class HostConfigurationTests
             ["base-url"] = "https://elsewhere.example.com",
         };
 
-        bool bound = HostConfiguration.TryBind(Mounts(), [.. settings], out RuntimeOptions? options, out IReadOnlyList<string> refusals);
+        bool bound = HostConfiguration.TryBind(Mounts(), [.. settings], out HostBinding? binding, out IReadOnlyList<string> refusals);
 
         Assert.False(bound);
-        Assert.Null(options);
+        Assert.Null(binding);
         string refusal = Assert.Single(refusals);
         Assert.Contains("'base-url'", refusal, StringComparison.Ordinal);
         Assert.Contains(HostConfiguration.FileStoreRootKey, refusal, StringComparison.Ordinal);
@@ -89,9 +89,11 @@ public sealed class HostConfigurationTests
             new("/two", "/manifests/two"),
         ];
 
-        Assert.True(HostConfiguration.TryBind(mounts, [.. settings], out RuntimeOptions? options, out _));
+        Assert.True(HostConfiguration.TryBind(mounts, [.. settings], out HostBinding? binding, out _));
 
-        Assert.Equal("2", options!.Mounts[0].Narrowing["RedirectHopLimit"]);
+        RuntimeOptions options = binding!.Runtime;
+
+        Assert.Equal("2", options.Mounts[0].Narrowing["RedirectHopLimit"]);
         Assert.Empty(options.Mounts[1].Narrowing);
         Assert.Equal("4", options.Floors["Concurrency"]);
     }

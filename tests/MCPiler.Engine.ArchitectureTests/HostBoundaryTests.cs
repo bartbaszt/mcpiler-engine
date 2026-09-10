@@ -57,6 +57,11 @@ public sealed class HostBoundaryTests
         "MCPiler.Engine.Transform",
         "MCPiler.Engine.Compound",
         "MCPiler.Engine.Search",
+
+        // The protocol-neutral catalogue. It decides what a surface advertises, in which
+        // order, with which schema, which is exactly the kind of answer a deployable must
+        // receive rather than compute. The values it produces reach the host on the seam.
+        "MCPiler.Engine.Mcp",
     ];
 
     /// <summary>
@@ -248,6 +253,7 @@ public sealed class HostBoundaryTests
     [InlineData("private readonly MCPiler.Engine.Execution.ExecutionService _execution;")]
     [InlineData("using MCPiler.Engine.Transform;")]
     [InlineData("using MCPiler.Engine.Search;")]
+    [InlineData("var tools = MCPiler.Engine.Mcp.ToolSetProjection.Project(derived);")]
     public void The_containment_assertion_catches_a_product_decision_in_the_deployable(string driver)
     {
         var caught = ProductNamespaces.Any(space => driver.Contains(space, StringComparison.Ordinal))

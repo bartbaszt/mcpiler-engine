@@ -25,6 +25,16 @@
     <ProjectReference Include="../MCPiler.Engine/MCPiler.Engine.csproj" />
   </ItemGroup>
 
+  <!--
+    The protocol SDK is referenced by the deployable and not by the library. Framing,
+    negotiation, session handling and error shapes are the SDK's; what to advertise and what
+    an invocation means stay on the other side of the line, which is why the library needs
+    no protocol package at all.
+  -->
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol.AspNetCore" />
+  </ItemGroup>
+
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>

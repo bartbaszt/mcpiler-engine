@@ -476,6 +476,42 @@ public sealed class ToolSetDeriverTests
         Assert.Contains(diagnostics, diagnostic => diagnostic.Code == ManifestDiagnosticCodes.ToolNameInvalid);
     }
 
+    [Fact]
+    public void An_advertised_input_schema_carries_its_own_components()
+    {
+        var manifest = Load(Refs);
+        var tools = ToolSetDeriver.Derive(manifest, manifest.Server.Surface("default")!);
+        var recursive = tools.Tools.Single(tool => tool.Operation == "create-node").InputSchema!;
+
+        // The manifest declares this schema as a reference into its own agentSurface document,
+        // and the component refers to itself. An advertised schema travels alone, so the
+        // pointer has to be answerable from the schema and the recursion has to survive.
+        Assert.Equal("object", recursive.Type);
+        Assert.Equal(
+            """{"$ref":"#/$defs/NodeInput"}""",
+            recursive.Object!["properties"]!["children"]!["items"]!.ToJsonString());
+        Assert.NotNull(recursive.Object[SchemaReferenceResolver.DefsKeyword]);
+
+        var contained = recursive.Node.ToJsonString();
+
+        Assert.DoesNotContain("#/components/", contained, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_inline_input_schema_is_advertised_untouched()
+    {
+        var manifest = Load(Refs);
+        var tools = ToolSetDeriver.Derive(manifest, manifest.Server.Surface("default")!);
+        var inline = tools.Tools.Single(tool => tool.Operation == "get-tree").InputSchema!;
+
+        // Containment must be reachable without being unconditional: a schema that references
+        // nothing gains no '$defs' and no rewriting, so the bytes an author wrote are the bytes
+        // advertised.
+        Assert.Equal(
+            """{"type":"object","required":["nodeId"],"properties":{"nodeId":{"type":"string"},"depth":{"type":"integer"}}}""",
+            inline.Node.ToJsonString());
+    }
+
     // ---- helpers ---------------------------------------------------------------------
 
     private static string DescriptionOf(string slug, string? manifestText = null)
@@ -506,6 +542,9 @@ public sealed class ToolSetDeriverTests
 
     private static string MultiSurface { get; } =
         File.ReadAllText(TestRepository.Fixture("manifests", "multi-surface", "manifest.json"), Encoding.UTF8);
+
+    private static string Refs { get; } =
+        File.ReadAllText(TestRepository.Fixture("manifests", "refs", "manifest.json"), Encoding.UTF8);
 
     private const string FileSlotBehindAReference = """
     {

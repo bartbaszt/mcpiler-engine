@@ -1,3 +1,4 @@
+using MCPiler.Engine.Execution.Files;
 using MCPiler.Engine.Manifest.Model;
 
 namespace MCPiler.Engine.Runtime;
@@ -43,26 +44,53 @@ public sealed record StartupRefusal(string Mount, string Code, string Message)
 /// </summary>
 /// <remarks>
 /// <para>
-/// Tool names rather than tool definitions. A definition is a protocol rendering and belongs
-/// to whatever speaks the protocol; a name is what an operator asked to see. The
-/// <see cref="Fingerprint"/> covers everything advertised, so two surfaces that fingerprint
-/// alike list alike, and an inspection surface can prove agreement without reproducing the
-/// definitions it would have to render to compare them.
+/// The tools are carried as protocol-neutral values, not as manifest types and not as
+/// protocol types. Everything a listing shows is decided here; a transport maps these onto
+/// whatever its SDK wants and has nothing left to choose.
+/// </para>
+/// <para>
+/// The <see cref="Fingerprint"/> covers everything advertised, so two surfaces that
+/// fingerprint alike list alike, and an inspection surface can prove agreement without
+/// rendering the protocol payload it would otherwise have to compare.
 /// </para>
 /// </remarks>
 /// <param name="Slug">The surface identifier, which is also the last route segment.</param>
 /// <param name="DisplayName">The surface's declared name, defaulting to its slug.</param>
 /// <param name="IsDefault">Whether the mount prefix alone addresses this surface.</param>
 /// <param name="RequiredScopes">Scopes a token must carry to reach this surface.</param>
-/// <param name="ToolNames">Every advertised tool name, in advertisement order.</param>
+/// <param name="Tools">Every advertised tool, in advertisement order.</param>
 /// <param name="Fingerprint">A canonical digest of everything the surface advertises.</param>
 public sealed record MountedSurface(
     string Slug,
     string DisplayName,
     bool IsDefault,
     IReadOnlyList<string> RequiredScopes,
-    IReadOnlyList<string> ToolNames,
-    string Fingerprint);
+    IReadOnlyList<CatalogueTool> Tools,
+    string Fingerprint)
+{
+    /// <summary>Every advertised tool name, in advertisement order.</summary>
+    /// <remarks>
+    /// Read from <see cref="Tools"/> rather than stored beside it. Two lists that must agree
+    /// are two lists that eventually will not, and the one an operator reads is the one that
+    /// would go stale silently.
+    /// </remarks>
+    public IReadOnlyList<string> ToolNames => [.. Tools.Select(static tool => tool.Name)];
+
+    /// <summary>The advertised tool with this exact name, or <c>null</c>.</summary>
+    /// <remarks>
+    /// <para>
+    /// Ordinal, because a tool name is exact. A case-insensitive lookup would let a name
+    /// differing only in case reach a tool the caller did not name.
+    /// </para>
+    /// <para>
+    /// Internal on purpose. Resolving a called name decides whether a call is refused, and a
+    /// refusal that discloses whether a name exists is an oracle for what a surface holds. One
+    /// component owns that answer, and it is not the transport.
+    /// </para>
+    /// </remarks>
+    internal CatalogueTool? Find(string name)
+        => Tools.FirstOrDefault(tool => string.Equals(tool.Name, name, StringComparison.Ordinal));
+}
 
 /// <summary>
 /// One Manifest, loaded, narrowed, and with every surface already derived.
@@ -130,6 +158,23 @@ public sealed class RuntimeStartResult
         Warnings = warnings;
     }
 
+    /// <summary>
+    /// The verified file-handle store, present once the process may start.
+    /// </summary>
+    /// <remarks>
+    /// The store startup verified is the store execution uses. Constructing a second one at
+    /// invocation time would mean the thing that was proven usable and the thing that is used
+    /// are two objects, and only the first was checked.
+    /// </remarks>
+    internal FileHandleStore? Files { get; private init; }
+
+    /// <summary>Whether inline credential material was permitted for this process.</summary>
+    /// <remarks>
+    /// Carried from the options rather than re-read, so what loading accepted and what
+    /// execution resolves cannot disagree about the same switch.
+    /// </remarks>
+    internal bool AllowInlineSecrets { get; private init; }
+
     /// <summary>Every mount, in configuration order. Empty when the process is refused.</summary>
     public IReadOnlyList<MountedManifest> Mounts { get; }
 
@@ -142,8 +187,12 @@ public sealed class RuntimeStartResult
     /// <summary>Whether the process may open a listener.</summary>
     public bool Started => Refusals.Count == 0;
 
-    internal static RuntimeStartResult Ready(IReadOnlyList<MountedManifest> mounts, IReadOnlyList<StartupRefusal> warnings)
-        => new(mounts, [], warnings);
+    internal static RuntimeStartResult Ready(
+        IReadOnlyList<MountedManifest> mounts,
+        IReadOnlyList<StartupRefusal> warnings,
+        FileHandleStore files,
+        bool allowInlineSecrets)
+        => new(mounts, [], warnings) { Files = files, AllowInlineSecrets = allowInlineSecrets };
 
     internal static RuntimeStartResult Refused(IReadOnlyList<StartupRefusal> refusals, IReadOnlyList<StartupRefusal> warnings)
         => new([], refusals, warnings);

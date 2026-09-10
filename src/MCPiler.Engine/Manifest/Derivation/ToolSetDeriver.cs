@@ -202,12 +202,33 @@ public static class ToolSetDeriver
         return new ManifestTool(
             Name: name,
             Description: BuildDescription(manifest, operation, operationKey, resolver),
-            InputSchema: operation.InputSchema,
-            OutputSchema: CandidateOutputSchema(surface, operation),
+            InputSchema: Advertisable(operation.InputSchema, resolver),
+            OutputSchema: Advertisable(CandidateOutputSchema(surface, operation), resolver),
             Operation: operation.Slug,
             OperationKey: operationKey,
             Annotations: operation.EffectiveAnnotations(method));
     }
+
+    /// <summary>
+    /// Returns the schema in the form a consumer outside the manifest can use.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A manifest-local reference is legal in the document and unusable once the schema is
+    /// advertised on its own: the pointer names a place in a section document the consumer
+    /// never received. An advertised schema has to be self-contained, so every reachable
+    /// target is relocated into the schema's own <c>$defs</c>.
+    /// </para>
+    /// <para>
+    /// It happens here, before <see cref="Fingerprint"/> reads the node, and that ordering is
+    /// the point. Resolving anywhere downstream would leave the fingerprint taken over the
+    /// unresolved pointer, and two surfaces carrying the same pointer to different targets
+    /// would then fingerprint alike and advertise differently - which is exactly what the
+    /// fingerprint claims cannot happen.
+    /// </para>
+    /// </remarks>
+    private static ManifestSchema? Advertisable(ManifestSchema? schema, SchemaReferenceResolver? resolver)
+        => schema is null || resolver is null ? schema : resolver.SelfContain(schema);
 
     /// <summary>
     /// Builds the advertised description.

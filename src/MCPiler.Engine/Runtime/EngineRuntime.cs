@@ -3,10 +3,10 @@ using System.Globalization;
 using MCPiler.Engine.Execution;
 using MCPiler.Engine.Execution.Files;
 using MCPiler.Engine.Manifest;
-using MCPiler.Engine.Manifest.Derivation;
 using MCPiler.Engine.Manifest.Loading;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Manifest.Validation;
+using MCPiler.Engine.Mcp;
 
 namespace MCPiler.Engine.Runtime;
 
@@ -80,11 +80,11 @@ public static class EngineRuntime
         // The file-store root is verified after the Manifests because a Manifest's file policy
         // is what the store is configured from. Verifying it first would mean verifying a root
         // under defaults that the Manifests then change.
-        VerifyFileStoreRoot(options, mounts, refusals);
+        FileHandleStore? files = OpenFileStore(options, mounts, refusals);
 
-        return refusals.Count > 0
+        return refusals.Count > 0 || files is null
             ? RuntimeStartResult.Refused(refusals, warnings)
-            : RuntimeStartResult.Ready(mounts, warnings);
+            : RuntimeStartResult.Ready(mounts, warnings, files, options.AllowInlineSecrets);
     }
 
     private static MountedManifest? Mount(
@@ -171,15 +171,7 @@ public static class EngineRuntime
 
         foreach (ManifestSurface surface in document.Server.Surfaces.Where(static candidate => candidate.Enabled))
         {
-            SurfaceToolSet tools = ToolSetDeriver.Resolve(document, surface, derivation);
-
-            surfaces.Add(new MountedSurface(
-                surface.Slug,
-                surface.DisplayName,
-                surface.IsDefault,
-                surface.RequiredScopes,
-                [.. tools.Tools.Select(static tool => tool.Name)],
-                ToolSetDeriver.Fingerprint(tools)));
+            surfaces.Add(SurfaceCatalogue.Build(document, surface, derivation));
         }
 
         if (derivation.Any(static diagnostic => diagnostic.IsError))
@@ -223,13 +215,21 @@ public static class EngineRuntime
         }
     }
 
-    private static void VerifyFileStoreRoot(RuntimeOptions options, IReadOnlyList<MountedManifest> mounts, List<StartupRefusal> refusals)
+    /// <summary>
+    /// Opens the file-handle store the process will use, or records why it cannot.
+    /// </summary>
+    /// <remarks>
+    /// The store is returned rather than constructed and discarded. Verifying a root and then
+    /// building a second store later would mean the object that was proven usable is not the
+    /// object that stores anything, and only the first one was checked.
+    /// </remarks>
+    private static FileHandleStore? OpenFileStore(RuntimeOptions options, IReadOnlyList<MountedManifest> mounts, List<StartupRefusal> refusals)
     {
         if (refusals.Count > 0)
         {
             // Nothing will start, and constructing a store would create directories for a
             // process that is about to exit.
-            return;
+            return null;
         }
 
         FilePolicy policy = mounts.Count == 1
@@ -238,7 +238,7 @@ public static class EngineRuntime
 
         try
         {
-            _ = new FileHandleStore(FileHandleStoreOptions.For(options.FileStoreRoot, policy, options.ServedContentRoots));
+            return new FileHandleStore(FileHandleStoreOptions.For(options.FileStoreRoot, policy, options.ServedContentRoots));
         }
         catch (FileRuntimeException failure)
         {
@@ -247,6 +247,8 @@ public static class EngineRuntime
                 Setting = "FileStoreRoot",
                 Attempted = options.FileStoreRoot,
             });
+
+            return null;
         }
     }
 

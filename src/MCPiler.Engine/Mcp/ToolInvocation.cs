@@ -1,0 +1,264 @@
+using System.Globalization;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+
+using Json.Schema;
+
+using MCPiler.Engine.Execution;
+using MCPiler.Engine.Runtime;
+
+namespace MCPiler.Engine.Mcp;
+
+/// <summary>
+/// One tool call, from the name a caller sent to what it is told.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Every decision a call needs is here: whether the surface advertises the name, whether the
+/// arguments satisfy the contract that was advertised for it, which operation runs, and what
+/// an outcome means. A transport hands over a name and an argument object and receives a
+/// rendered answer, which is what keeps two transports from disagreeing about any of it.
+/// </para>
+/// <para>
+/// Order is the substance. Resolution before validation, validation before execution, and
+/// nothing reaches an upstream that has not passed both. Validating after compilation would
+/// mean an argument the advertised schema forbids could still have been serialized, and
+/// resolving after validating would mean a name the surface does not advertise could be
+/// measured against a schema.
+/// </para>
+/// <para>
+/// A step of this pipeline reaches nowhere a direct call could not. There is one path to an
+/// upstream and it starts here.
+/// </para>
+/// </remarks>
+internal static class ToolInvocation
+{
+    /// <summary>What a successful call with an empty body is rendered as.</summary>
+    /// <remarks>
+    /// An empty string would leave a caller unable to tell an empty answer from a lost one.
+    /// </remarks>
+    internal const string NoBody = "(no body)";
+
+    /// <summary>
+    /// The answer for a name the addressed surface does not advertise.
+    /// </summary>
+    /// <remarks>
+    /// It repeats the name the caller sent and says nothing else. The caller already knows
+    /// what it asked for; a near match, a count, or a hint that a larger catalogue sits
+    /// behind the surface would each be a fact about what the surface holds. This is also the
+    /// answer a hidden operation gets, so the two cannot be told apart.
+    /// </remarks>
+    internal static string UnknownTool(string name)
+        => string.Create(CultureInfo.InvariantCulture, $"No tool named '{name}' is available here.");
+
+    /// <summary>The answer for an advertised tool this build cannot yet run.</summary>
+    /// <remarks>
+    /// A Navigator tool is advertised deliberately and reached through the Navigator, which
+    /// this build does not implement. Saying so discloses nothing: the tool is in the listing
+    /// the same caller just read.
+    /// </remarks>
+    internal static string NotInvocable(string name)
+        => string.Create(
+            CultureInfo.InvariantCulture,
+            $"'{name}' is advertised by this build and cannot be invoked by it.");
+
+    /// <summary>Resolves, validates, executes and renders one call.</summary>
+    internal static async Task<ToolOutcome> InvokeAsync(
+        ExecutionService executions,
+        MountedManifest mount,
+        MountedSurface surface,
+        string tool,
+        JsonObject arguments,
+        CancellationToken cancellationToken)
+    {
+        if (surface.Find(tool) is not { } advertised)
+        {
+            return new ToolOutcome(UnknownTool(tool), IsError: true);
+        }
+
+        if (advertised.Operation is null)
+        {
+            return new ToolOutcome(NotInvocable(tool), IsError: true);
+        }
+
+        if (Validate(advertised, arguments) is { } rejected)
+        {
+            // Before anything is compiled, before a credential is read, before a socket. An
+            // argument that cannot satisfy the advertised contract must not cost an upstream
+            // request, and "no request was sent" has to be an assertion rather than a hope.
+            return new ToolOutcome(rejected, IsError: true);
+        }
+
+        var result = await executions
+            .ExecuteAsync(
+                new ExecutionRequest(mount.Document, advertised.Operation, arguments)
+                {
+                    // The mount, because that is the identity a handle has to be scoped to.
+                    // Two Manifests may declare the same server name, and a handle issued
+                    // under a shared scope would be redeemable from the other one.
+                    Scope = mount.Prefix,
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return Shape(result);
+    }
+
+    /// <summary>
+    /// Renders an execution outcome as what a caller is told.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A classified failure is a tool error. An unsuccessful upstream status is not: an
+    /// upstream that answers 404 answered, and reporting that as a tool error would tell a
+    /// caller its request was malformed when the request was fine and the resource was not
+    /// there. The status and the body are the result.
+    /// </para>
+    /// <para>
+    /// The unexplained arm is a floor rather than an expected answer. Every failure this
+    /// library produces carries a reason, so the arm exists to keep the mapping total over the
+    /// closed classification instead of depending on an invariant held elsewhere.
+    /// </para>
+    /// </remarks>
+    internal static ToolOutcome Shape(EngineExecutionResult result)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+
+        if (!result.Succeeded)
+        {
+            return new ToolOutcome(result.FailureReason ?? Unexplained(result.Failure), IsError: true);
+        }
+
+        if (result.ResponseFile is { } stored)
+        {
+            return new ToolOutcome(StoredResponse(stored), IsError: false);
+        }
+
+        return new ToolOutcome(
+            result.ResponseBody is null ? NoBody : Encoding.UTF8.GetString(result.ResponseBody),
+            IsError: false);
+    }
+
+    /// <summary>
+    /// Measures the arguments against the schema that was advertised for this tool.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Against the advertised bytes, not against a schema derived a second time. A caller that
+    /// validates locally and a caller that does not therefore get the same answer, and the
+    /// contract a listing published is the contract a call is held to.
+    /// </para>
+    /// <para>
+    /// Fail-closed. A schema that cannot be interpreted refuses the call rather than skipping
+    /// the check: the hardest contract to satisfy would otherwise be the one nothing measures.
+    /// </para>
+    /// <para>
+    /// The refusal names a location and nothing else. Echoing the offending value would put a
+    /// caller's argument, which may be credential material, into a message.
+    /// </para>
+    /// </remarks>
+    internal static string? Validate(CatalogueTool tool, JsonObject arguments)
+    {
+        ArgumentNullException.ThrowIfNull(tool);
+        ArgumentNullException.ThrowIfNull(arguments);
+
+        JsonSchema schema;
+
+        try
+        {
+            schema = JsonSchema.FromText(tool.InputSchemaJson, AdvertisedDialect);
+        }
+        catch (Exception failure) when (failure is JsonException or JsonSchemaException or NotSupportedException)
+        {
+            return UninterpretableSchema;
+        }
+
+        // Parsed from the argument object's own bytes rather than handed through a serializer,
+        // so what is measured is what a caller sent and not what a writer chose to emit.
+        using var instance = JsonDocument.Parse(arguments.ToJsonString());
+
+        EvaluationResults evaluation;
+
+        try
+        {
+            evaluation = schema.Evaluate(
+                instance.RootElement,
+                new EvaluationOptions { OutputFormat = OutputFormat.Hierarchical });
+        }
+        catch (Exception failure) when (failure is JsonSchemaException or NotSupportedException)
+        {
+            return UninterpretableSchema;
+        }
+
+        return evaluation.IsValid ? null : Rejected(Location(evaluation));
+    }
+
+    /// <summary>
+    /// The dialect an advertised schema is interpreted under.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Stated rather than defaulted, and the difference is not cosmetic. The evaluator's own
+    /// default is a later draft that refuses a keyword it does not recognise, and a manifest
+    /// schema legitimately carries keywords this dialect treats as annotations: the file-slot
+    /// marker, and the format's documented <c>nullable</c> deviation. Evaluated under the
+    /// default, every operation carrying either would have been refused as uninterpretable.
+    /// </para>
+    /// <para>
+    /// 2020-12 because that is the dialect a tool input schema is written in and the one the
+    /// producing side advertises. A schema declaring its own <c>$schema</c> still wins, which
+    /// is what makes this a default rather than an override.
+    /// </para>
+    /// </remarks>
+    private static readonly BuildOptions AdvertisedDialect = new() { Dialect = Dialect.Draft202012 };
+
+    /// <summary>
+    /// The instance location of the most specific failure.
+    /// </summary>
+    /// <remarks>
+    /// The deepest failing node, not the first. An applicator reports that "some properties
+    /// did not match" at the root, and a caller told only that has been told nothing it did
+    /// not already know.
+    /// </remarks>
+    private static string? Location(EvaluationResults evaluation)
+    {
+        var specific = (evaluation.Details ?? [])
+            .Where(static detail => !detail.IsValid)
+            .OrderBy(static detail => detail.InstanceLocation.ToString(), StringComparer.Ordinal)
+            .ThenBy(static detail => detail.EvaluationPath.ToString(), StringComparer.Ordinal)
+            .Select(Location)
+            .FirstOrDefault(static location => location is not null);
+
+        if (specific is not null)
+        {
+            return specific;
+        }
+
+        var location = evaluation.InstanceLocation.ToString();
+
+        return string.IsNullOrEmpty(location) ? null : location;
+    }
+
+    private static string Rejected(string? location)
+        => location is null
+            ? "The arguments do not satisfy the tool's advertised input schema."
+            : string.Create(
+                CultureInfo.InvariantCulture,
+                $"The arguments do not satisfy the tool's advertised input schema at '{location}'.");
+
+    private const string UninterpretableSchema =
+        "The tool's advertised input schema could not be interpreted, so the call was refused "
+        + "before any request was made.";
+
+    private static string Unexplained(ExecutionFailureKind failure)
+        => string.Create(
+            CultureInfo.InvariantCulture,
+            $"The call failed ({failure}) and the failure carried no explanation.");
+
+    private static string StoredResponse(FileHandleReference stored)
+        => string.Create(
+            CultureInfo.InvariantCulture,
+            $"Binary response stored as a file reference (handle '{stored.Id}', media type "
+            + $"{stored.MediaType}, {stored.Length} bytes). The handle expires automatically.");
+}

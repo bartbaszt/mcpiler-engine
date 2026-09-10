@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using System.Text.Json.Nodes;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Manifest.Validation;
@@ -32,6 +33,14 @@ namespace MCPiler.Engine.Manifest.Loading;
 /// self-referential type such as a tree node validate without tripping the depth cap.
 /// </para>
 /// <para>
+/// <b>Why it also contains.</b> A reference is legal inside a manifest and illegal on the
+/// protocol wire: an advertised tool schema travels alone, so a pointer into a section
+/// document a client never received resolves to nothing. <see cref="SelfContain"/> moves every
+/// reachable target into the schema's own <c>$defs</c> and rewrites the pointers, which keeps
+/// a recursive contract exact instead of truncating it. It is the one place that may do so,
+/// for the same reason resolution is: both need the bounds.
+/// </para>
+/// <para>
 /// There is no base URI, no document graph, no file access and no network access anywhere in
 /// this type. A non-local reference has nothing to resolve against and is refused rather
 /// than fetched.
@@ -39,6 +48,9 @@ namespace MCPiler.Engine.Manifest.Loading;
 /// </remarks>
 public sealed class SchemaReferenceResolver
 {
+    /// <summary>The keyword a self-contained schema carries its own components under.</summary>
+    public const string DefsKeyword = "$defs";
+
     private static readonly string[] SingleSchemaKeywords =
         ["items", "contains", "not", "additionalProperties", "contentSchema", "propertyNames"];
 
@@ -176,6 +188,298 @@ public sealed class SchemaReferenceResolver
         Walk(schema, section, pointer, depth: 0, visitedReferences, budget, diagnostics);
 
         return diagnostics;
+    }
+
+    /// <summary>
+    /// Returns a schema that carries everything it references.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A reference is legal in a manifest and unusable on the wire: an advertised schema
+    /// travels alone, so a pointer into a section document the reader never received resolves
+    /// to nothing. Every reachable target is therefore registered under the returned schema's
+    /// own <c>$defs</c> and every pointer is rewritten to name it there.
+    /// </para>
+    /// <para>
+    /// A schema that references nothing is returned unchanged, the same instance, so the
+    /// common case cannot be perturbed by this method existing.
+    /// </para>
+    /// <para>
+    /// A root whose only member is a reference is inlined instead of rewritten, because a
+    /// consumer expects a typed schema at that position and <c>{"$ref": ...}</c> declares no
+    /// type. Its own references still land in <c>$defs</c>, so a self-referential root appears
+    /// once inline and once as a component and the recursion stays exact. A reference that has
+    /// siblings is rewritten rather than inlined: inlining would have to decide what happens
+    /// to the sibling keywords, and silently dropping a declared one is worse than a root that
+    /// states its type by reference.
+    /// </para>
+    /// <para>
+    /// Nothing is truncated and nothing is expanded twice. A component is registered the first
+    /// time a pointer reaches it and every later reference names that entry, so a cycle
+    /// terminates on the registration rather than on a bound - which is what lets a legal
+    /// recursive type be advertised at all instead of being reduced and disclosed.
+    /// </para>
+    /// <para>
+    /// A reference that does not resolve is left exactly as it was. Loading already refuses a
+    /// manifest whose references are broken, and refusing again here would report one fault
+    /// twice and make this answer depend on whether validation had run.
+    /// </para>
+    /// </remarks>
+    /// <param name="schema">The schema to make self-contained.</param>
+    public ManifestSchema SelfContain(ManifestSchema schema)
+    {
+        ArgumentNullException.ThrowIfNull(schema);
+
+        var root = schema;
+
+        // Only a bare reference. With siblings the reference form is kept, because the
+        // sibling keywords apply alongside the target and inlining would have to drop them.
+        if (schema.RefPointer is not null && schema.Object is { Count: 1 })
+        {
+            if (!TryResolve(schema, out var resolvedRoot, out _))
+            {
+                return schema;
+            }
+
+            root = resolvedRoot;
+        }
+
+        if (root.Object is not { } document)
+        {
+            // A boolean schema references nothing and has nowhere to carry a component.
+            return schema;
+        }
+
+        var containment = new Containment(document);
+        var rewritten = (JsonObject)RewriteSchema(document, depth: 0, containment);
+
+        if (containment.Components.Count == 0)
+        {
+            // Nothing was relocated. When the root was a reference the resolved node is
+            // already the self-contained answer; otherwise the original instance is, and
+            // returning it is what makes byte identity a property rather than a hope.
+            return ReferenceEquals(root, schema) ? schema : ManifestSchema.From(rewritten);
+        }
+
+        if (rewritten[DefsKeyword] is JsonObject declared)
+        {
+            foreach (var (name, component) in containment.Components)
+            {
+                declared[name] = component;
+            }
+        }
+        else
+        {
+            var defs = new JsonObject();
+
+            foreach (var (name, component) in containment.Components)
+            {
+                defs[name] = component;
+            }
+
+            rewritten[DefsKeyword] = defs;
+        }
+
+        return ManifestSchema.From(rewritten);
+    }
+
+    /// <summary>
+    /// Rebuilds one schema node with every manifest-local reference under it rewritten.
+    /// </summary>
+    /// <remarks>
+    /// Members are copied in document order, so a node that needed no rewriting serializes to
+    /// the bytes it arrived as. Only the three keyword groups above are descended into: a
+    /// <c>$ref</c> sitting inside an <c>enum</c> value or a <c>const</c> is data, and
+    /// rewriting it would change what the schema accepts.
+    /// </remarks>
+    private JsonNode RewriteSchema(JsonNode node, int depth, Containment containment)
+    {
+        if (node is not JsonObject document || depth > Bounds.MaxDepth)
+        {
+            // A boolean schema is a leaf. Past the depth bound the manifest is refused
+            // anyway, and descending further would trade a diagnostic for a stack overflow.
+            return node.DeepClone();
+        }
+
+        var reference = LocalReference(document);
+        var registered = reference is null ? null : Register(reference, depth, containment);
+        var copy = new JsonObject();
+
+        foreach (var (keyword, value) in document)
+        {
+            if (registered is not null && string.Equals(keyword, ManifestSchema.RefKeyword, StringComparison.Ordinal))
+            {
+                copy[keyword] = JsonPointer.LocalFragmentPrefix + "/" + DefsKeyword + "/" + JsonPointer.Escape(registered);
+                continue;
+            }
+
+            copy[keyword] = RewriteMember(keyword, value, depth, containment);
+        }
+
+        return copy;
+    }
+
+    private JsonNode? RewriteMember(string keyword, JsonNode? value, int depth, Containment containment)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        if (Array.IndexOf(SingleSchemaKeywords, keyword) >= 0)
+        {
+            return RewriteSchema(value, depth + 1, containment);
+        }
+
+        if (Array.IndexOf(SchemaListKeywords, keyword) >= 0 && value is JsonArray list)
+        {
+            var rewritten = new JsonArray();
+
+            foreach (var element in list)
+            {
+                rewritten.Add(element is null ? null : RewriteSchema(element, depth + 1, containment));
+            }
+
+            return rewritten;
+        }
+
+        if (Array.IndexOf(SchemaMapKeywords, keyword) >= 0 && value is JsonObject map)
+        {
+            var rewritten = new JsonObject();
+
+            foreach (var (name, member) in map)
+            {
+                rewritten[name] = member is null ? null : RewriteSchema(member, depth + 1, containment);
+            }
+
+            return rewritten;
+        }
+
+        return value.DeepClone();
+    }
+
+    /// <summary>
+    /// Names the component a pointer refers to, registering it the first time it is reached.
+    /// </summary>
+    /// <remarks>
+    /// The name is recorded before the target is walked. A reference leading back to this
+    /// pointer therefore finds the name and stops, which is the whole mechanism by which a
+    /// cycle produces a finite document.
+    /// </remarks>
+    private string? Register(string pointer, int depth, Containment containment)
+    {
+        if (!JsonPointer.IsLocalFragment(pointer))
+        {
+            // Non-local, so there is nothing in this section to carry. Loading refuses it.
+            return null;
+        }
+
+        if (containment.Names.TryGetValue(pointer, out var known))
+        {
+            return known;
+        }
+
+        var probe = ManifestSchema.From(new JsonObject { [ManifestSchema.RefKeyword] = pointer });
+
+        if (!TryResolve(probe, out var target, out _))
+        {
+            return null;
+        }
+
+        var name = containment.Allocate(pointer);
+
+        containment.Components.Add(new KeyValuePair<string, JsonNode>(
+            name,
+            RewriteSchema(target.Node, depth, containment)));
+
+        return name;
+    }
+
+    private static string? LocalReference(JsonObject document)
+        => document[ManifestSchema.RefKeyword] is JsonValue value
+            && value.TryGetValue<string>(out var pointer)
+            ? pointer
+            : null;
+
+    /// <summary>The components collected while one schema is being made self-contained.</summary>
+    private sealed class Containment
+    {
+        private readonly HashSet<string> _allocated = new(StringComparer.Ordinal);
+
+        internal Containment(JsonObject root)
+        {
+            // Names the schema already uses for its own components are reserved before
+            // anything is allocated, so a relocated target cannot overwrite one the manifest
+            // wrote and mean something else under the same name.
+            if (root[DefsKeyword] is JsonObject declared)
+            {
+                foreach (var (name, _) in declared)
+                {
+                    _allocated.Add(name);
+                }
+            }
+        }
+
+        /// <summary>Pointer to the component name it was given.</summary>
+        internal Dictionary<string, string> Names { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>The relocated components, in the order they were registered.</summary>
+        /// <remarks>
+        /// A list rather than a dictionary. The serialized order is part of what a fingerprint
+        /// covers, and a dictionary's enumeration order is an implementation detail that has
+        /// already been mistaken for a specified one once in this codebase.
+        /// </remarks>
+        internal List<KeyValuePair<string, JsonNode>> Components { get; } = [];
+
+        /// <summary>Assigns a stable, unused name to <paramref name="pointer"/>.</summary>
+        /// <remarks>
+        /// The pointer's last token is used because it is what an author named the component,
+        /// and a reader of the advertised schema recognises it. Two pointers ending in the same
+        /// token are distinguished by an ordinal rather than by a longer path, so a name never
+        /// depends on how deeply a component happened to be nested.
+        /// </remarks>
+        internal string Allocate(string pointer)
+        {
+            var stem = Sanitize(LastToken(pointer));
+            var name = stem;
+
+            for (var ordinal = 2; !_allocated.Add(name); ordinal++)
+            {
+                name = stem + "-" + ordinal.ToString(CultureInfo.InvariantCulture);
+            }
+
+            Names[pointer] = name;
+            return name;
+        }
+
+        private static string LastToken(string pointer)
+        {
+            var separator = pointer.LastIndexOf('/');
+
+            return separator < 0
+                ? pointer
+                : JsonPointer.Unescape(pointer[(separator + 1)..]);
+        }
+
+        /// <summary>
+        /// Reduces a token to characters that need no pointer escaping and read as a name.
+        /// </summary>
+        private static string Sanitize(string token)
+        {
+            var builder = new StringBuilder(token.Length);
+
+            foreach (var character in token)
+            {
+                builder.Append(
+                    char.IsAsciiLetterOrDigit(character) || character is '_' or '.' or '-'
+                        ? character
+                        : '_');
+            }
+
+            var name = builder.ToString();
+
+            return name.Length == 0 ? "schema" : name;
+        }
     }
 
     private void Walk(

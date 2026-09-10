@@ -1,0 +1,109 @@
+using System.Text.Json.Nodes;
+
+using MCPiler.Engine.Execution;
+using MCPiler.Engine.Execution.Outbound;
+using MCPiler.Engine.Mcp;
+
+namespace MCPiler.Engine.Runtime;
+
+/// <summary>
+/// The process-wide machinery a mounted Manifest is invoked through.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The second half of the seam. <see cref="EngineRuntime"/> answers what a process serves;
+/// this answers what happens when a client calls one of it. A deployable holds both and names
+/// nothing else, which is why an outbound client, a credential resolver and a handle store are
+/// assembled here rather than wired up by whatever is hosting.
+/// </para>
+/// <para>
+/// The caller owns the lifetime, deliberately. An outbound client pool is the one thing in the
+/// process whose disposal has to happen at a point somebody chose: a pool disposed by a
+/// container's teardown ordering would close connections at a moment no drain accounted for.
+/// </para>
+/// <para>
+/// Created from a started runtime, so the store this executes against is the store startup
+/// proved usable, and the credential rules are the ones loading was told about. Passing those
+/// separately would let a process resolve secrets under a switch the Manifests were not read
+/// under.
+/// </para>
+/// </remarks>
+public sealed class EngineExecution : IDisposable
+{
+    private readonly UpstreamClientFactory _clients;
+    private readonly ExecutionService _executions;
+
+    private EngineExecution(UpstreamClientFactory clients, ExecutionService executions)
+    {
+        _clients = clients;
+        _executions = executions;
+    }
+
+    /// <summary>Assembles the execution machinery for a started runtime.</summary>
+    /// <param name="started">A runtime whose every mount is ready.</param>
+    public static EngineExecution Create(RuntimeStartResult started)
+        => Create(started, new OutboundConnectionPolicy());
+
+    /// <summary>
+    /// Assembles the execution machinery over a stated outbound connection policy.
+    /// </summary>
+    /// <remarks>
+    /// The policy is a parameter for the same reason it is a seam one layer down: the shipped
+    /// one refuses loopback, and every in-process server a test can reach lives there. A test
+    /// supplies a permissive judgement instead of the real policy being weakened to
+    /// accommodate it.
+    /// </remarks>
+    /// <param name="started">A runtime whose every mount is ready.</param>
+    /// <param name="connections">Which addresses a connection may be opened to.</param>
+    public static EngineExecution Create(RuntimeStartResult started, OutboundConnectionPolicy connections)
+    {
+        ArgumentNullException.ThrowIfNull(started);
+        ArgumentNullException.ThrowIfNull(connections);
+
+        if (!started.Started || started.Files is null)
+        {
+            throw new InvalidOperationException(
+                "A refused runtime executes nothing. Nothing partially mounts, so a caller that "
+                + "reached here has already ignored a refusal.");
+        }
+
+        UpstreamClientFactory clients = new(connections);
+
+        return new EngineExecution(
+            clients,
+            new ExecutionService(
+                new UpstreamSender(clients),
+                new ManifestSecretResolver(new SecretResolutionOptions(started.AllowInlineSecrets)),
+                started.Files));
+    }
+
+    /// <summary>Runs one tool call against one surface of one mount.</summary>
+    /// <remarks>
+    /// The mount and the surface are passed as the values a caller already resolved by
+    /// routing, rather than as names to be resolved again. A second resolution would be a
+    /// second answer to which Manifest a request addressed, and the one that disagreed would
+    /// be the one that accepted an address the first had already rejected.
+    /// </remarks>
+    /// <param name="mount">The Manifest the request addressed.</param>
+    /// <param name="surface">The surface the request addressed.</param>
+    /// <param name="tool">The tool name the caller sent, exactly as sent.</param>
+    /// <param name="arguments">The arguments the caller sent.</param>
+    /// <param name="cancellationToken">The caller's deadline.</param>
+    public Task<ToolOutcome> InvokeAsync(
+        MountedManifest mount,
+        MountedSurface surface,
+        string tool,
+        JsonObject arguments,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(mount);
+        ArgumentNullException.ThrowIfNull(surface);
+        ArgumentNullException.ThrowIfNull(tool);
+        ArgumentNullException.ThrowIfNull(arguments);
+
+        return ToolInvocation.InvokeAsync(_executions, mount, surface, tool, arguments, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public void Dispose() => _clients.Dispose();
+}

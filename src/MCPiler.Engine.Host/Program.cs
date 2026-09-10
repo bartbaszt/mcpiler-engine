@@ -36,7 +36,7 @@ internal static class Program
         ArgumentNullException.ThrowIfNull(args);
 
         CommandOutcome outcome = await HostCommands
-            .RunAsync(args, Identity(), CancellationToken.None)
+            .RunAsync(args, Identity(), CancellationToken.None, Console.Out)
             .ConfigureAwait(false);
 
         // Everything an operator reads goes to standard output, including refusals. A

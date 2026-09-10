@@ -5,6 +5,9 @@ using MCPiler.Engine.Host.Configuration;
 using MCPiler.Engine.Host.Hosting;
 using MCPiler.Engine.Runtime;
 
+using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.Hosting;
+
 namespace MCPiler.Engine.Host.Cli;
 
 /// <summary>What a command produced.</summary>
@@ -31,11 +34,17 @@ public static class HostCommands
     /// <summary>Runs the command described by <paramref name="args"/>.</summary>
     /// <param name="args">The process arguments.</param>
     /// <param name="identity">The build identity line.</param>
-    /// <param name="cancellationToken">Cancels a store operation.</param>
+    /// <param name="cancellationToken">Cancels a store operation or a running listener.</param>
+    /// <param name="progress">
+    /// Where a verb that does not return writes what it has to say. The serving verb reports
+    /// its startup and then blocks, so an operator who only saw the returned output would
+    /// learn what happened at start only once the process had stopped.
+    /// </param>
     public static async Task<CommandOutcome> RunAsync(
         IReadOnlyList<string> args,
         string identity,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        TextWriter? progress = null)
     {
         ArgumentNullException.ThrowIfNull(args);
         ArgumentException.ThrowIfNullOrEmpty(identity);
@@ -60,36 +69,57 @@ public static class HostCommands
         return parsed.Verb switch
         {
             HostVerb.Version => new CommandOutcome(ExitCodes.Success, identity + Environment.NewLine),
-            HostVerb.Serve => Serve(parsed, identity),
+            HostVerb.Serve => await ServeAsync(parsed, identity, progress, cancellationToken).ConfigureAwait(false),
             HostVerb.Inspect => Inspect(parsed, identity),
             _ => await FilesAsync(parsed, cancellationToken).ConfigureAwait(false),
         };
     }
 
-    private static CommandOutcome Serve(CommandLineResult parsed, string identity)
+    private static async Task<CommandOutcome> ServeAsync(
+        CommandLineResult parsed,
+        string identity,
+        TextWriter? progress,
+        CancellationToken cancellationToken)
     {
-        if (!Bind(parsed, out RuntimeOptions? options, out CommandOutcome? refused))
+        if (!Bind(parsed, out HostBinding? binding, out CommandOutcome? refused))
         {
             return refused;
         }
 
-        RuntimeStartResult result = EngineRuntime.Start(options);
+        RuntimeStartResult result = EngineRuntime.Start(binding.Runtime);
+        string report = identity + Environment.NewLine + StartupReport.Render(result);
 
-        // The listener itself is not attached yet. Startup is reported exactly as it will be
-        // once it is, so the refusal path an operator meets does not change when it arrives.
-        return new CommandOutcome(
-            StartupReport.ExitCode(result),
-            identity + Environment.NewLine + StartupReport.Render(result));
+        if (!result.Started)
+        {
+            return new CommandOutcome(StartupReport.ExitCode(result), report);
+        }
+
+        // Reported before the listener opens, not after it closes. Everything that could
+        // refuse has already refused, so this line means the mounts an operator configured
+        // are the mounts about to answer.
+        progress?.Write(report);
+        progress?.Flush();
+
+        // Outlives the application deliberately: the pool it owns is closed after the
+        // listener has stopped accepting, never by whichever container teardown ran first.
+        using EngineExecution execution = EngineExecution.Create(result);
+
+        await using WebApplication app = EngineWebHost.Build(result, binding.Listener, execution);
+
+        await app.StartAsync(cancellationToken).ConfigureAwait(false);
+        await app.WaitForShutdownAsync(cancellationToken).ConfigureAwait(false);
+
+        return new CommandOutcome(ExitCodes.Success, string.Empty);
     }
 
     private static CommandOutcome Inspect(CommandLineResult parsed, string identity)
     {
-        if (!Bind(parsed, out RuntimeOptions? options, out CommandOutcome? refused))
+        if (!Bind(parsed, out HostBinding? binding, out CommandOutcome? refused))
         {
             return refused;
         }
 
-        RuntimeStartResult result = EngineRuntime.Start(options);
+        RuntimeStartResult result = EngineRuntime.Start(binding.Runtime);
 
         if (!result.Started)
         {
@@ -134,12 +164,12 @@ public static class HostCommands
 
     private static async Task<CommandOutcome> FilesAsync(CommandLineResult parsed, CancellationToken cancellationToken)
     {
-        if (!Bind(parsed, out RuntimeOptions? options, out CommandOutcome? refused))
+        if (!Bind(parsed, out HostBinding? binding, out CommandOutcome? refused))
         {
             return refused;
         }
 
-        FileStoreInspection? store = FileStoreInspection.Open(options.FileStoreRoot, out StartupRefusal? unusable);
+        FileStoreInspection? store = FileStoreInspection.Open(binding.Runtime.FileStoreRoot, out StartupRefusal? unusable);
 
         if (store is null)
         {
@@ -207,12 +237,12 @@ public static class HostCommands
 
     private static bool Bind(
         CommandLineResult parsed,
-        out RuntimeOptions options,
+        out HostBinding binding,
         out CommandOutcome refused)
     {
-        if (HostConfiguration.TryBind(parsed.Mounts, parsed.Settings, out RuntimeOptions? bound, out IReadOnlyList<string> refusals))
+        if (HostConfiguration.TryBind(parsed.Mounts, parsed.Settings, out HostBinding? bound, out IReadOnlyList<string> refusals))
         {
-            options = bound;
+            binding = bound;
             refused = null!;
             return true;
         }
@@ -224,7 +254,7 @@ public static class HostCommands
             text.AppendLine(refusal);
         }
 
-        options = null!;
+        binding = null!;
         refused = new CommandOutcome(ExitCodes.Configuration, text.ToString());
         return false;
     }

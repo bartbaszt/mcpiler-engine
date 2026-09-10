@@ -8,6 +8,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="JsonSchema.Net" />
+  </ItemGroup>
+
+  <ItemGroup>
     <InternalsVisibleTo Include="MCPiler.Engine.UnitTests" />
   </ItemGroup>
 
