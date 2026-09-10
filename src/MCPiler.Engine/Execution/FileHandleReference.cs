@@ -80,6 +80,51 @@ public sealed record FileHandleReference(
     FileScanVerdict ScanVerdict,
     SignatureVerdict SignatureVerdict);
 
+/// <summary>One stored handle as an inspection surface sees it.</summary>
+/// <param name="Reference">The stored description. Metadata only; content is never carried here.</param>
+/// <param name="Expired">Whether the handle's lifetime has passed as of the store's clock.</param>
+/// <param name="ContentPresent">Whether the content the record points at is still on disk.</param>
+/// <remarks>
+/// <para>
+/// Listing reports an expired handle rather than hiding it. An operator asking what the store is
+/// holding is asking about disk, and a handle whose lifetime has passed still occupies it until
+/// something reclaims it. Omitting it would make the listing disagree with the directory for no
+/// reason the operator could see.
+/// </para>
+/// <para>
+/// Listing also does not remove anything. Redemption removes an expired handle because a caller
+/// asked for it and must not receive it; an operator asking what exists has asked for nothing to
+/// change, and a read that quietly mutates is a worse surface than one that reports an
+/// inconvenient truth.
+/// </para>
+/// </remarks>
+public sealed record FileHandleListing(FileHandleReference Reference, bool Expired, bool ContentPresent);
+
+/// <summary>What one sweep reclaimed, by reason.</summary>
+/// <param name="ExpiredHandles">Handles removed because their lifetime had passed.</param>
+/// <param name="UnreadableRecords">Records that would not parse and referred to nothing honourable.</param>
+/// <param name="RecordsWithoutContent">Records whose content was already gone.</param>
+/// <param name="ReclaimedContent">Content older than the grace window that no record referred to.</param>
+/// <remarks>
+/// The reasons are separated because they mean different things about the deployment. Expired
+/// handles are the store working. Orphan content is an admission that was interrupted. A record
+/// without content, or one that will not parse, is the store's own invariant having been violated
+/// by something outside it, and an operator who only ever saw a total would never learn that.
+/// </remarks>
+public sealed record FileSweepReport(
+    IReadOnlyList<string> ExpiredHandles,
+    IReadOnlyList<string> UnreadableRecords,
+    IReadOnlyList<string> RecordsWithoutContent,
+    IReadOnlyList<string> ReclaimedContent)
+{
+    /// <summary>An empty report.</summary>
+    public static FileSweepReport Empty { get; } = new([], [], [], []);
+
+    /// <summary>How many entries the sweep removed in total.</summary>
+    public int Total =>
+        ExpiredHandles.Count + UnreadableRecords.Count + RecordsWithoutContent.Count + ReclaimedContent.Count;
+}
+
 /// <summary>Why a handle lookup did not produce content.</summary>
 public enum FileHandleStatus
 {

@@ -337,15 +337,52 @@ public sealed class FileHandleStore
     }
 
     /// <summary>
+    /// Every handle the store currently holds a record for, expired ones included.
+    /// </summary>
+    /// <remarks>
+    /// Metadata only, and deliberately non-mutating. See <see cref="FileHandleListing"/> for why
+    /// an expired handle is reported rather than removed or hidden.
+    /// </remarks>
+    public async Task<IReadOnlyList<FileHandleListing>> ListAsync(CancellationToken cancellationToken)
+    {
+        var listings = new List<FileHandleListing>();
+
+        foreach (var recordPath in Directory.EnumerateFiles(_root, "*" + RecordExtension).Order(StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var record = await TryParseAsync(recordPath, cancellationToken).ConfigureAwait(false);
+
+            if (record is null)
+            {
+                // Reported by the sweep, which is the surface that may act on it. A listing that
+                // invented an identifier for an unparseable record would be describing a handle
+                // nobody holds.
+                continue;
+            }
+
+            listings.Add(new FileHandleListing(
+                record,
+                IsExpired(record),
+                File.Exists(Resolve(record.StoragePointer))));
+        }
+
+        return listings;
+    }
+
+    /// <summary>
     /// Removes every expired handle and reclaims content that no record refers to.
     /// </summary>
-    /// <returns>How many handles and orphans were removed.</returns>
-    public async Task<int> SweepAsync(CancellationToken cancellationToken)
+    /// <returns>What was removed, separated by reason.</returns>
+    public async Task<FileSweepReport> SweepAsync(CancellationToken cancellationToken)
     {
-        var removed = 0;
+        var expired = new List<string>();
+        var unreadable = new List<string>();
+        var withoutContent = new List<string>();
+        var reclaimed = new List<string>();
         var now = _clock.GetUtcNow().UtcDateTime;
 
-        foreach (var recordPath in Directory.EnumerateFiles(_root, "*" + RecordExtension))
+        foreach (var recordPath in Directory.EnumerateFiles(_root, "*" + RecordExtension).Order(StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -356,14 +393,14 @@ public sealed class FileHandleStore
                 // A record that will not parse refers to nothing this store can honour. Left in
                 // place it would be swept on every pass forever.
                 Discard(recordPath);
-                removed++;
+                unreadable.Add(Path.GetFileNameWithoutExtension(recordPath));
                 continue;
             }
 
             if (IsExpired(record))
             {
                 Remove(record, "lifetime elapsed", FileHandleAuditAction.Expired);
-                removed++;
+                expired.Add(record.Id);
                 continue;
             }
 
@@ -375,11 +412,11 @@ public sealed class FileHandleStore
                     record.Id,
                     record.Scope,
                     "record removed because its content was absent"));
-                removed++;
+                withoutContent.Add(record.Id);
             }
         }
 
-        foreach (var contentPath in Directory.EnumerateFiles(_root, "*" + ContentExtension))
+        foreach (var contentPath in Directory.EnumerateFiles(_root, "*" + ContentExtension).Order(StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -402,10 +439,10 @@ public sealed class FileHandleStore
                 id,
                 string.Empty,
                 "content had no record"));
-            removed++;
+            reclaimed.Add(id);
         }
 
-        return removed;
+        return new FileSweepReport(expired, unreadable, withoutContent, reclaimed);
     }
 
     private DateTime? Expiry()

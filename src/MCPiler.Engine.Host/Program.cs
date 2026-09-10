@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Reflection;
 
+using MCPiler.Engine.Host.Cli;
 using MCPiler.Engine.Runtime;
 
 namespace MCPiler.Engine.Host;
@@ -17,20 +18,33 @@ namespace MCPiler.Engine.Host;
 /// document" starts with guessing instead.
 /// </para>
 /// <para>
-/// Everything this host will grow - configuration, mounts, the listener, the transports -
+/// Everything this host grows - configuration, mounts, the listener, the transports -
 /// arrives behind the rule that makes the split checkable: the library decides what to
 /// serve, and this project decides how it is reached. A decision that lands here rather
 /// than there is invisible to every guard the library carries.
 /// </para>
+/// <para>
+/// The entry point itself holds no verb. It reads arguments, hands them to the command
+/// runner and writes what comes back, so every verb is reachable from a test without a
+/// process.
+/// </para>
 /// </remarks>
 internal static class Program
 {
-    internal static int Main(string[] args)
+    internal static async Task<int> Main(string[] args)
     {
         ArgumentNullException.ThrowIfNull(args);
 
-        Console.Out.WriteLine(Identity());
-        return 0;
+        CommandOutcome outcome = await HostCommands
+            .RunAsync(args, Identity(), CancellationToken.None)
+            .ConfigureAwait(false);
+
+        // Everything an operator reads goes to standard output, including refusals. A
+        // stream transport will own standard output later; until a verb speaks a protocol
+        // on it, splitting the two would be a distinction nothing consumes.
+        Console.Out.Write(outcome.Output);
+
+        return outcome.ExitCode;
     }
 
     /// <summary>The one fact this build can state about itself without reading anything.</summary>

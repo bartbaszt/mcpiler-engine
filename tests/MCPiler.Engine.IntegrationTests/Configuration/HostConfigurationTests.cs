@@ -30,7 +30,7 @@ public sealed class HostConfigurationTests
             ["base-url"] = "https://elsewhere.example.com",
         };
 
-        bool bound = HostConfiguration.TryBind(Mounts(), settings, out RuntimeOptions? options, out IReadOnlyList<string> refusals);
+        bool bound = HostConfiguration.TryBind(Mounts(), [.. settings], out RuntimeOptions? options, out IReadOnlyList<string> refusals);
 
         Assert.False(bound);
         Assert.Null(options);
@@ -62,14 +62,14 @@ public sealed class HostConfigurationTests
             [key] = "anything",
         };
 
-        Assert.False(HostConfiguration.TryBind(Mounts(), settings, out _, out IReadOnlyList<string> refusals));
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
         Assert.Contains(refusals, message => message.Contains($"'{key}'", StringComparison.Ordinal));
     }
 
     [Fact]
     public void A_file_store_root_is_required_because_an_issued_handle_needs_somewhere_to_live()
     {
-        Assert.False(HostConfiguration.TryBind(Mounts(), Empty(), out _, out IReadOnlyList<string> refusals));
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. Empty()], out _, out IReadOnlyList<string> refusals));
         Assert.Contains(refusals, message => message.Contains(HostConfiguration.FileStoreRootKey, StringComparison.Ordinal));
     }
 
@@ -89,7 +89,7 @@ public sealed class HostConfigurationTests
             new("/two", "/manifests/two"),
         ];
 
-        Assert.True(HostConfiguration.TryBind(mounts, settings, out RuntimeOptions? options, out _));
+        Assert.True(HostConfiguration.TryBind(mounts, [.. settings], out RuntimeOptions? options, out _));
 
         Assert.Equal("2", options!.Mounts[0].Narrowing["RedirectHopLimit"]);
         Assert.Empty(options.Mounts[1].Narrowing);
@@ -105,7 +105,7 @@ public sealed class HostConfigurationTests
             [HostConfiguration.MountNarrowingPrefix + "onlyoneword"] = "2",
         };
 
-        Assert.False(HostConfiguration.TryBind(Mounts(), settings, out _, out IReadOnlyList<string> refusals));
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
         Assert.Contains(refusals, message => message.Contains("does not name a mount and a bound", StringComparison.Ordinal));
     }
 
@@ -118,7 +118,7 @@ public sealed class HostConfigurationTests
             [HostConfiguration.RequireSealedKey] = "yes",
         };
 
-        Assert.False(HostConfiguration.TryBind(Mounts(), settings, out _, out IReadOnlyList<string> refusals));
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
         Assert.Contains(refusals, message => message.Contains("not true or false", StringComparison.Ordinal));
     }
 

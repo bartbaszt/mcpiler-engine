@@ -22,6 +22,15 @@ public static class ExitCodes
 
     /// <summary>An error the host does not attribute to configuration.</summary>
     public const int Failure = 1;
+
+    /// <summary>The arguments did not name something this host can do.</summary>
+    /// <remarks>
+    /// Distinct from <see cref="Configuration"/>, which means the command was understood and
+    /// the deployment is wrong. The conventional <c>EX_USAGE</c>. A script that mistypes a
+    /// verb and one whose Manifest widens a limit need different responses, and one code for
+    /// both would make an automated caller unable to tell them apart.
+    /// </remarks>
+    public const int Usage = 64;
 }
 
 /// <summary>

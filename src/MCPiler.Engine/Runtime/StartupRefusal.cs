@@ -39,31 +39,74 @@ public sealed record StartupRefusal(string Mount, string Code, string Message)
 }
 
 /// <summary>
-/// One Manifest, loaded and narrowed, ready to have a surface derived from it.
+/// One addressable surface of a mounted Manifest, described without manifest types.
 /// </summary>
 /// <remarks>
+/// <para>
+/// Tool names rather than tool definitions. A definition is a protocol rendering and belongs
+/// to whatever speaks the protocol; a name is what an operator asked to see. The
+/// <see cref="Fingerprint"/> covers everything advertised, so two surfaces that fingerprint
+/// alike list alike, and an inspection surface can prove agreement without reproducing the
+/// definitions it would have to render to compare them.
+/// </para>
+/// </remarks>
+/// <param name="Slug">The surface identifier, which is also the last route segment.</param>
+/// <param name="DisplayName">The surface's declared name, defaulting to its slug.</param>
+/// <param name="IsDefault">Whether the mount prefix alone addresses this surface.</param>
+/// <param name="RequiredScopes">Scopes a token must carry to reach this surface.</param>
+/// <param name="ToolNames">Every advertised tool name, in advertisement order.</param>
+/// <param name="Fingerprint">A canonical digest of everything the surface advertises.</param>
+public sealed record MountedSurface(
+    string Slug,
+    string DisplayName,
+    bool IsDefault,
+    IReadOnlyList<string> RequiredScopes,
+    IReadOnlyList<string> ToolNames,
+    string Fingerprint);
+
+/// <summary>
+/// One Manifest, loaded, narrowed, and with every surface already derived.
+/// </summary>
+/// <remarks>
+/// <para>
 /// The document is not exposed. A host serves a Manifest by asking this library what to
 /// serve, never by reading the document and deciding for itself; keeping the document
 /// internal is what makes that a fact rather than a convention.
+/// </para>
+/// <para>
+/// Surfaces are derived during startup rather than on first request. Two reasons, and the
+/// second is the one that matters: a derivation failure becomes a refusal to start instead of
+/// an error the first client sees, and an inspection verb and a serving verb read the same
+/// value, so the preview cannot disagree with what would be served.
+/// </para>
 /// </remarks>
 public sealed class MountedManifest
 {
-    internal MountedManifest(string prefix, string path, ManifestDocument document, PolicySection policy)
+    internal MountedManifest(
+        string prefix,
+        string path,
+        ManifestDocument document,
+        PolicySection policy,
+        IReadOnlyList<MountedSurface> surfaces)
     {
         Prefix = prefix;
         Path = path;
         Document = document;
         Policy = policy;
+        Surfaces = surfaces;
     }
 
     /// <summary>The route prefix this Manifest answers on.</summary>
     public string Prefix { get; }
 
-    /// <summary>The Manifest file or bundle directory it was loaded from.</summary>
+    /// <summary>The Manifest bundle directory it was loaded from.</summary>
     public string Path { get; }
 
     /// <summary>The server name the Manifest declares.</summary>
     public string ServerName => Document.Server.Name;
+
+    /// <summary>Every enabled surface, in declaration order.</summary>
+    public IReadOnlyList<MountedSurface> Surfaces { get; }
 
     internal ManifestDocument Document { get; }
 

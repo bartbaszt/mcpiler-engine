@@ -3,6 +3,7 @@ using System.Globalization;
 using MCPiler.Engine.Execution;
 using MCPiler.Engine.Execution.Files;
 using MCPiler.Engine.Manifest;
+using MCPiler.Engine.Manifest.Derivation;
 using MCPiler.Engine.Manifest.Loading;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Manifest.Validation;
@@ -162,7 +163,34 @@ public static class EngineRuntime
 
         warnings.AddRange(narrowing.Where(static candidate => !candidate.IsError).Select(diagnostic => Translate(request, diagnostic)));
 
-        return new MountedManifest(request.Prefix, request.Path, document, policy);
+        // Derived here, before anything listens. A surface that cannot be derived is a
+        // configuration fault, and discovering it on the first request would report it as a
+        // runtime fault to whoever happened to connect.
+        List<ManifestDiagnostic> derivation = [];
+        List<MountedSurface> surfaces = [];
+
+        foreach (ManifestSurface surface in document.Server.Surfaces.Where(static candidate => candidate.Enabled))
+        {
+            SurfaceToolSet tools = ToolSetDeriver.Resolve(document, surface, derivation);
+
+            surfaces.Add(new MountedSurface(
+                surface.Slug,
+                surface.DisplayName,
+                surface.IsDefault,
+                surface.RequiredScopes,
+                [.. tools.Tools.Select(static tool => tool.Name)],
+                ToolSetDeriver.Fingerprint(tools)));
+        }
+
+        if (derivation.Any(static diagnostic => diagnostic.IsError))
+        {
+            refusals.AddRange(derivation.Where(static candidate => candidate.IsError).Select(diagnostic => Translate(request, diagnostic)));
+            return null;
+        }
+
+        warnings.AddRange(derivation.Where(static candidate => !candidate.IsError).Select(diagnostic => Translate(request, diagnostic)));
+
+        return new MountedManifest(request.Prefix, request.Path, document, policy, surfaces);
     }
 
     /// <summary>

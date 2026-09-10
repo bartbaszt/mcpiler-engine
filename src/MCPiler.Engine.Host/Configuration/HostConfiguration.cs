@@ -68,12 +68,12 @@ public static class HostConfiguration
     /// Binds settings and mounts into runtime options, or reports why it cannot.
     /// </summary>
     /// <param name="mounts">Prefix to Manifest path, in the order they were given.</param>
-    /// <param name="settings">Everything else the operator set.</param>
+    /// <param name="settings">Everything else the operator set, in the order given.</param>
     /// <param name="options">The bound options when this returns true.</param>
     /// <param name="refusals">One message per rejected setting when this returns false.</param>
     public static bool TryBind(
         IReadOnlyList<KeyValuePair<string, string>> mounts,
-        IReadOnlyDictionary<string, string> settings,
+        IReadOnlyList<KeyValuePair<string, string>> settings,
         [NotNullWhen(true)] out RuntimeOptions? options,
         out IReadOnlyList<string> refusals)
     {

@@ -183,7 +183,8 @@ public sealed class FileHandleStoreTests : IDisposable
 
         var reclaimed = await store.SweepAsync(TestContext.Current.CancellationToken);
 
-        Assert.Equal(1, reclaimed);
+        Assert.Equal(1, reclaimed.Total);
+        Assert.Equal([orphanId], reclaimed.ReclaimedContent);
         Assert.False(File.Exists(orphanPath));
     }
 
@@ -200,7 +201,7 @@ public sealed class FileHandleStoreTests : IDisposable
 
         var store = new FileHandleStore(FileHandleStoreOptions.For(root, orphanGrace: TimeSpan.FromMinutes(5)));
 
-        Assert.Equal(0, await store.SweepAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(0, (await store.SweepAsync(TestContext.Current.CancellationToken)).Total);
     }
 
     [Fact]
@@ -302,7 +303,9 @@ public sealed class FileHandleStoreTests : IDisposable
         var reference = await Issue(store, "payload");
         clock.Advance(TimeSpan.FromMinutes(2));
 
-        Assert.Equal(1, await store.SweepAsync(TestContext.Current.CancellationToken));
+        var swept = await store.SweepAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal([reference.Id], swept.ExpiredHandles);
         Assert.Empty(Directory.GetFiles(root, reference.Id + ".*"));
     }
 
@@ -318,7 +321,7 @@ public sealed class FileHandleStoreTests : IDisposable
             FileHandleStatus.NotFound,
             (await store.OpenAsync(reference.Id, TestContext.Current.CancellationToken)).Status);
 
-        Assert.Equal(1, await store.SweepAsync(TestContext.Current.CancellationToken));
+        Assert.Equal(1, (await store.SweepAsync(TestContext.Current.CancellationToken)).Total);
         Assert.Empty(Directory.GetFiles(root, "*" + FileHandleStore.RecordExtension));
     }
 
