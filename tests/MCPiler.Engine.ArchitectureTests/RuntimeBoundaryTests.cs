@@ -38,30 +38,48 @@ public sealed class RuntimeBoundaryTests
 
     private const string Pointer = ManifestSourceRoot + "/Loading/JsonPointer.cs";
 
+    private const string ExecutionSourceRoot = EngineSourceRoot + "/Execution";
+
     /// <summary>
-    /// Components whose declared purpose is to touch the host: reading a bundle from a
-    /// directory, and packing, unpacking or sealing one.
+    /// Directories whose declared purpose is to touch the host, plus the three manifest files
+    /// that predate them.
     /// </summary>
     /// <remarks>
-    /// Everything else - the readers, the validator, the reference resolver, both derivers,
-    /// the ranker, the canonical writer and the request compiler - operates on bytes it was
-    /// handed. Keeping the set this small is what makes "loading a manifest cannot reach the
-    /// machine" checkable rather than merely intended. Credential resolution will eventually
-    /// read an environment variable or a secret file, and sending a compiled request will
-    /// eventually open a socket; when they do, they must be added here deliberately and
-    /// reviewed as components that touch the host, not arrive unnoticed inside an unrelated
-    /// change. A failure of the guard below is a finding about the code, never a reason to add
-    /// an entry here.
+    /// <para>
+    /// Per ADR-0057 the exemption names directories rather than files. A per-file list grows by
+    /// one every time something legitimately needs a socket or a secret, each addition is
+    /// individually reasonable, and after a few stages the rule asserts that host access is
+    /// confined to wherever host access happens to be - which nobody ever decided. Naming a
+    /// directory means adding a capability is a decision about structure: a new file inside an
+    /// adapter is ordinary, and a new adapter directory needs its own record.
+    /// </para>
+    /// <para>
+    /// The three manifest entries stay files. They are not an adapter surface, they are two
+    /// components that existed before the boundary was drawn this way, and widening them to
+    /// <c>Manifest/Loading/</c> and <c>Manifest/Sealing/</c> would exempt readers that must
+    /// stay covered.
+    /// </para>
+    /// <para>
+    /// A failure of the guard below is a finding about the code, never a reason to add an entry
+    /// here.
+    /// </para>
     /// </remarks>
     private static readonly string[] HostAccessPermitted =
     [
         ManifestSourceRoot + "/Loading/DirectoryManifestSource.cs",
         ManifestSourceRoot + "/Sealing/ManifestArchive.cs",
         ManifestSourceRoot + "/Sealing/ManifestSealer.cs",
+        ExecutionSourceRoot + "/Outbound/",
+        ExecutionSourceRoot + "/Secrets/",
+        ExecutionSourceRoot + "/Files/",
     ];
 
+    /// <summary>The exempted directories, which carry the additional containment rule.</summary>
+    private static readonly string[] HostAdapterDirectories =
+        [.. HostAccessPermitted.Where(entry => entry.EndsWith('/'))];
+
     /// <summary>
-    /// Entry points into the filesystem, the environment, the network and other processes.
+    /// Entry points into the filesystem, the environment and the network.
     /// </summary>
     private static readonly string[] HostAccessTokens =
     [
@@ -73,11 +91,40 @@ public sealed class RuntimeBoundaryTests
         "Environment.",
         "HttpClient",
         "HttpRequestMessage",
-        "WebRequest",
         "System.Net",
         "Socket",
+    ];
+
+    /// <summary>
+    /// Capabilities Engine does not need, forbidden everywhere including the adapters.
+    /// </summary>
+    /// <remarks>
+    /// Engine starts no process and inspects no volume, and it sends over the modern client, so
+    /// a second HTTP stack would be a second set of policy defaults - a redirect rule and a
+    /// connect callback configured in one place and silently absent in the other. An exemption
+    /// exists to let a named component do the thing it is named for, not to make every host API
+    /// available inside it.
+    /// </remarks>
+    private static readonly string[] AlwaysForbiddenTokens =
+    [
+        "WebRequest",
         "Process.",
         "DriveInfo",
+    ];
+
+    /// <summary>
+    /// Namespaces that carry product meaning: what a manifest says, whether it is valid, what
+    /// is derived from it and how it is searched.
+    /// </summary>
+    private static readonly string[] ProductNamespaces =
+    [
+        "MCPiler.Engine.Manifest.Model",
+        "MCPiler.Engine.Manifest.Validation",
+        "MCPiler.Engine.Manifest.Derivation",
+        "MCPiler.Engine.Manifest.Search",
+        "MCPiler.Engine.Manifest.Loading",
+        "MCPiler.Engine.Manifest.Canonical",
+        "MCPiler.Engine.Manifest.Sealing",
     ];
 
     [Fact]
@@ -88,13 +135,17 @@ public sealed class RuntimeBoundaryTests
         foreach (var file in RuntimeSources())
         {
             var relative = EngineRepository.Relative(file);
+            var text = File.ReadAllText(file);
 
-            if (HostAccessPermitted.Contains(relative, StringComparer.Ordinal))
+            offenders.AddRange(
+                AlwaysForbiddenTokens
+                    .Where(token => text.Contains(token, StringComparison.Ordinal))
+                    .Select(token => $"{relative} -> {token} (forbidden everywhere)"));
+
+            if (IsExempt(relative))
             {
                 continue;
             }
-
-            var text = File.ReadAllText(file);
 
             offenders.AddRange(
                 HostAccessTokens
@@ -104,9 +155,100 @@ public sealed class RuntimeBoundaryTests
 
         Assert.True(
             offenders.Count == 0,
-            "Loading, validating and deriving from a manifest must not reach the host. "
-                + "A component that needs to may be added to HostAccessPermitted with a stated reason. "
+            "Loading a manifest, validating it, deriving from it and deciding what to send must not "
+                + "reach the host. A component that needs to belongs inside an adapter directory named "
+                + "in ADR-0057, and a capability listed as always forbidden belongs nowhere. "
                 + $"Unexpected host access: {string.Join("; ", offenders)}");
+    }
+
+    /// <summary>
+    /// An adapter directory holds the capability it is named for and no product decision.
+    /// </summary>
+    /// <remarks>
+    /// Without this, an exemption granted to reach a socket doubles as the one place where
+    /// product logic escapes the rule that would otherwise cover it - and it would escape
+    /// invisibly, because the host-access guard is satisfied by the exemption and no other
+    /// guard looks inside. The adapters take numbers, names and bytes; what a manifest declared
+    /// is decided in <c>Execution/</c>, which the guard above still covers in full.
+    /// </remarks>
+    [Fact]
+    public void An_adapter_directory_contains_no_manifest_knowledge()
+    {
+        var offenders = new List<string>();
+
+        foreach (var file in RuntimeSources())
+        {
+            var relative = EngineRepository.Relative(file);
+
+            if (!HostAdapterDirectories.Any(directory => relative.StartsWith(directory, StringComparison.Ordinal)))
+            {
+                continue;
+            }
+
+            var text = File.ReadAllText(file);
+
+            offenders.AddRange(
+                ProductNamespaces
+                    .Where(space => text.Contains(space, StringComparison.Ordinal))
+                    .Select(space => $"{relative} -> {space}"));
+        }
+
+        Assert.True(
+            offenders.Count == 0,
+            "An adapter directory is exempted from the host-access rule because it holds one "
+                + "capability, not because it is unsupervised. Manifest model, validation, derivation "
+                + "and search belong in Execution/ and the rest of the library, where the host-access "
+                + $"guard still applies. Offending references: {string.Join("; ", offenders)}");
+    }
+
+    /// <summary>
+    /// The containment assertion is not vacuous: the namespaces it forbids are ones the
+    /// adapters would plausibly reach for, and a synthetic file inside an adapter directory is
+    /// caught.
+    /// </summary>
+    /// <remarks>
+    /// A guard over a set that nothing would ever contain passes forever and proves nothing.
+    /// The drivers below are the shapes the adapters were actually written with before this
+    /// rule existed - a client factory keyed on the manifest's execution limits, a store
+    /// configured from the manifest's file policy, a resolver reading the credentials section -
+    /// so the assertion is checked against the mistake it is meant to catch.
+    /// </remarks>
+    [Theory]
+    [InlineData("using MCPiler.Engine.Manifest.Model;")]
+    [InlineData("public HttpClient Client(MCPiler.Engine.Manifest.Model.ExecutionLimits limits)")]
+    [InlineData("// see MCPiler.Engine.Manifest.Validation.ManifestValidator")]
+    [InlineData("private readonly MCPiler.Engine.Manifest.Search.LexicalRanker _ranker;")]
+    [InlineData("using MCPiler.Engine.Manifest.Derivation;")]
+    public void The_containment_assertion_catches_manifest_knowledge_inside_an_adapter(string driver)
+    {
+        var caught = ProductNamespaces.Any(space => driver.Contains(space, StringComparison.Ordinal));
+
+        Assert.True(
+            caught,
+            "A file with this line inside an adapter directory would carry manifest knowledge and "
+                + $"the containment assertion would not notice: {driver}");
+    }
+
+    /// <summary>
+    /// A file that sits beside an adapter directory rather than inside it is still covered.
+    /// </summary>
+    /// <remarks>
+    /// The exemption is a prefix match, and a prefix that ends at a directory name rather than
+    /// at a separator would exempt a sibling whose name merely starts the same way -
+    /// <c>Execution/FilesExtra.cs</c> against an exemption for <c>Execution/Files</c>. The
+    /// separator is why every directory entry ends in one; this asserts it stays that way.
+    /// </remarks>
+    [Fact]
+    public void An_exemption_covers_a_directory_and_not_a_name_that_merely_starts_the_same_way()
+    {
+        foreach (var directory in HostAdapterDirectories)
+        {
+            var sibling = directory.TrimEnd('/') + "Extra.cs";
+
+            Assert.False(
+                IsExempt(sibling),
+                $"The exemption '{directory}' also covers '{sibling}', which is a different component.");
+        }
     }
 
     /// <summary>
@@ -143,17 +285,61 @@ public sealed class RuntimeBoundaryTests
 
     /// <summary>
     /// A stale exemption is worse than no exemption: it silently widens the permitted set
-    /// the moment a file is renamed.
+    /// the moment a file is renamed or a directory is emptied.
     /// </summary>
     [Fact]
-    public void Every_host_access_exemption_names_a_file_that_exists()
+    public void Every_host_access_exemption_names_something_that_exists()
     {
         var missing = HostAccessPermitted
-            .Where(entry => !EngineRepository.Exists(entry))
+            .Where(entry => entry.EndsWith('/')
+                ? !Directory.Exists(EngineRepository.Absolute(entry.TrimEnd('/')))
+                : !EngineRepository.Exists(entry))
             .ToList();
 
         Assert.True(missing.Count == 0, $"Stale host-access exemption: {string.Join(", ", missing)}");
     }
+
+    /// <summary>
+    /// The exemption is a named handful, not the tree.
+    /// </summary>
+    /// <remarks>
+    /// Two failures this catches. An exemption that covers no scanned file is stale and its
+    /// removal is silent; an exemption set that covers everything scanned turns the host-access
+    /// guard into a formality that still reports green. Both are how a boundary stops meaning
+    /// anything without anyone deciding it should.
+    /// </remarks>
+    [Fact]
+    public void The_exemption_set_stays_a_named_minority_of_what_is_scanned()
+    {
+        var scanned = RuntimeSources().Select(EngineRepository.Relative).ToList();
+
+        var uncovered = HostAccessPermitted
+            .Where(entry => !scanned.Any(path => entry.EndsWith('/')
+                ? path.StartsWith(entry, StringComparison.Ordinal)
+                : string.Equals(path, entry, StringComparison.Ordinal)))
+            .ToList();
+
+        Assert.True(
+            uncovered.Count == 0,
+            $"An exemption covers no scanned production file: {string.Join(", ", uncovered)}");
+
+        var covered = scanned.Where(IsExempt).ToList();
+
+        Assert.True(
+            covered.Count < scanned.Count,
+            "Every scanned file is exempt, so the host-access guard asserts nothing.");
+
+        Assert.True(
+            covered.Count > 0,
+            "No scanned file is exempt, so either the adapters moved or the exemption prefixes no "
+                + "longer match the tree and the guard is passing for the wrong reason.");
+    }
+
+    /// <summary>Whether <paramref name="relative"/> is inside the exempted set.</summary>
+    private static bool IsExempt(string relative)
+        => HostAccessPermitted.Any(entry => entry.EndsWith('/')
+            ? relative.StartsWith(entry, StringComparison.Ordinal)
+            : string.Equals(relative, entry, StringComparison.Ordinal));
 
     /// <summary>
     /// Provenance is Studio-only identity travelling inside a public artifact. Engine carries

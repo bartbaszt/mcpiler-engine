@@ -46,6 +46,18 @@ digests, not by a self-verifying file.
 The manifest format is versioned independently of Engine. During alpha the format version
 stays in the `0.x` range and Engine states its supported range when it refuses a manifest.
 
+## File handles
+
+A binary upstream response is written to a local store and returned as a handle rather than
+inlined into a result. [`docs/file-handles.md`](docs/file-handles.md) is the contract for
+that store: where the root may point and what is verified about it at startup, how storage
+names are generated, what a handle record holds, the write order that decides what a failed
+admission leaves behind, when a handle expires and where that is enforced, and what a scan
+verdict claims.
+
+It is the only durable state Engine keeps. Everything else Engine does is a function of the
+manifest it was given and the request it was handed.
+
 ## Status
 
 Pre-alpha. The manifest format is not stable and no compatibility is promised yet.
