@@ -23,6 +23,7 @@ try {
 
     $projects = @(
         'tests/MCPiler.Engine.UnitTests/MCPiler.Engine.UnitTests.csproj',
+        'tests/MCPiler.Engine.IntegrationTests/MCPiler.Engine.IntegrationTests.csproj',
         'tests/MCPiler.Engine.ArchitectureTests/MCPiler.Engine.ArchitectureTests.csproj'
     )
     foreach ($project in $projects) {

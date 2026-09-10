@@ -19,6 +19,7 @@ dotnet build "$solution" -c "$configuration" --no-restore
 
 for project in \
   tests/MCPiler.Engine.UnitTests/MCPiler.Engine.UnitTests.csproj \
+  tests/MCPiler.Engine.IntegrationTests/MCPiler.Engine.IntegrationTests.csproj \
   tests/MCPiler.Engine.ArchitectureTests/MCPiler.Engine.ArchitectureTests.csproj
 do
   echo "==> dotnet test $project -c $configuration --no-build"

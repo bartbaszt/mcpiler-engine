@@ -1,0 +1,292 @@
+{
+  "note": "Origin-perimeter decisions both implementations must agree on. Unlike the request cases in this directory, these are AUTHORED rather than generated: the expected outcome states what the perimeter is supposed to decide, not what either implementation currently decides. Generating them from an implementation would make a shared defect invisible, which is exactly how a green test came to certify that 127.0.0.1 could not be configured as an allowed origin. A case that fails is a claim about the perimeter that one implementation does not honour, and the fix belongs in that implementation unless the case itself is wrong.",
+  "matchCases": [
+    {
+      "name": "exact-origin",
+      "entries": ["https://api.example.com"],
+      "target": "https://api.example.com/v1/items",
+      "allowed": true,
+      "why": "Scheme, host and default port all agree; the path is not part of an origin."
+    },
+    {
+      "name": "scheme-differs",
+      "entries": ["https://api.example.com"],
+      "target": "http://api.example.com/v1/items",
+      "allowed": false,
+      "why": "An origin includes its scheme. A downgrade to plaintext is a different origin."
+    },
+    {
+      "name": "host-case-is-not-significant",
+      "entries": ["https://API.Example.COM"],
+      "target": "https://api.example.com/x",
+      "allowed": true,
+      "why": "Host names are case-insensitive, so both sides lower-case before comparing."
+    },
+    {
+      "name": "scheme-case-is-not-significant",
+      "entries": ["HTTPS://api.example.com"],
+      "target": "https://api.example.com/x",
+      "allowed": true,
+      "why": "Scheme comparison is case-insensitive."
+    },
+    {
+      "name": "explicit-default-port-equals-implicit",
+      "entries": ["https://api.example.com:443"],
+      "target": "https://api.example.com/x",
+      "allowed": true,
+      "why": "443 stated explicitly and 443 implied by https are one origin."
+    },
+    {
+      "name": "implicit-default-port-equals-explicit",
+      "entries": ["https://api.example.com"],
+      "target": "https://api.example.com:443/x",
+      "allowed": true,
+      "why": "The same equality in the other direction, which a one-sided normalization would miss."
+    },
+    {
+      "name": "http-default-port-is-eighty",
+      "entries": ["http://api.example.com"],
+      "target": "http://api.example.com:80/x",
+      "allowed": true,
+      "why": "The default port depends on the scheme, so http resolves to 80 and not to 443."
+    },
+    {
+      "name": "non-default-port-differs",
+      "entries": ["https://api.example.com"],
+      "target": "https://api.example.com:8443/x",
+      "allowed": false,
+      "why": "A port is part of an origin; 8443 is not 443."
+    },
+    {
+      "name": "trailing-dot-on-entry",
+      "entries": ["https://api.example.com."],
+      "target": "https://api.example.com/x",
+      "allowed": true,
+      "why": "A fully qualified name with a root dot denotes the same host."
+    },
+    {
+      "name": "trailing-dot-on-target",
+      "entries": ["https://api.example.com"],
+      "target": "https://api.example.com./x",
+      "allowed": true,
+      "why": "The root dot is stripped on both sides, so the direction does not matter."
+    },
+    {
+      "name": "idn-entry-matches-punycode-target",
+      "entries": ["https://bücher.example"],
+      "target": "https://xn--bcher-kva.example/x",
+      "allowed": true,
+      "why": "Both sides compare the ASCII form, so a unicode entry covers its punycode spelling."
+    },
+    {
+      "name": "punycode-entry-matches-idn-target",
+      "entries": ["https://xn--bcher-kva.example"],
+      "target": "https://bücher.example/x",
+      "allowed": true,
+      "why": "The same equality in the other direction."
+    },
+    {
+      "name": "target-with-embedded-credentials-never-matches",
+      "entries": ["https://api.example.com"],
+      "target": "https://user:secret@api.example.com/x",
+      "allowed": false,
+      "why": "Userinfo in a target is refused outright rather than ignored, because ignoring it would let a credential ride along to an origin the operator approved without one."
+    },
+    {
+      "name": "wildcard-matches-one-label",
+      "entries": ["https://*.example.com"],
+      "target": "https://api.example.com/x",
+      "allowed": true,
+      "why": "A wildcard grants whole additional labels beneath the parent."
+    },
+    {
+      "name": "wildcard-matches-several-labels",
+      "entries": ["https://*.example.com"],
+      "target": "https://eu.api.example.com/x",
+      "allowed": true,
+      "why": "Suffix matching admits more than one additional label."
+    },
+    {
+      "name": "wildcard-does-not-match-the-apex",
+      "entries": ["https://*.example.com"],
+      "target": "https://example.com/x",
+      "allowed": false,
+      "why": "The parent apex is not beneath the parent. Granting it would silently widen the entry."
+    },
+    {
+      "name": "wildcard-does-not-match-a-suffix-lookalike",
+      "entries": ["https://*.example.com"],
+      "target": "https://evilexample.com/x",
+      "allowed": false,
+      "why": "Matching characters is not matching labels. Without a label boundary, an attacker registers the concatenation."
+    },
+    {
+      "name": "wildcard-does-not-match-a-different-registrable-domain",
+      "entries": ["https://*.example.com"],
+      "target": "https://api.example.com.attacker.test/x",
+      "allowed": false,
+      "why": "The parent must be a suffix, not an infix."
+    },
+    {
+      "name": "wildcard-respects-the-port",
+      "entries": ["https://*.example.com:8443"],
+      "target": "https://api.example.com/x",
+      "allowed": false,
+      "why": "A wildcard widens the host, never the port."
+    },
+    {
+      "name": "address-literal-exact",
+      "entries": ["https://192.0.2.10"],
+      "target": "https://192.0.2.10/x",
+      "allowed": true,
+      "why": "An address literal is a usable entry. Whether the address may then be connected to is the outbound address policy's decision, not this one."
+    },
+    {
+      "name": "address-literal-with-a-zero-octet",
+      "entries": ["https://192.0.2.0"],
+      "target": "https://192.0.2.0/x",
+      "allowed": true,
+      "why": "A zero octet is ordinary. An earlier revision rejected every address containing one as a side effect of a leading-zero guard."
+    },
+    {
+      "name": "address-literal-does-not-match-a-neighbour",
+      "entries": ["https://192.0.2.10"],
+      "target": "https://192.0.2.11/x",
+      "allowed": false,
+      "why": "Address comparison is exact."
+    },
+    {
+      "name": "decimal-encoded-target-normalizes-to-its-address",
+      "entries": ["https://192.0.2.10"],
+      "target": "https://3221225994/x",
+      "allowed": true,
+      "why": "Canonicalizing both sides is what defeats an alternative encoding: 3221225994 IS 192.0.2.10, so it matches the entry that means that address and nothing else."
+    },
+    {
+      "name": "hex-encoded-target-normalizes-to-its-address",
+      "entries": ["https://192.0.2.10"],
+      "target": "https://0xc000020a/x",
+      "allowed": true,
+      "why": "The same address in hexadecimal."
+    },
+    {
+      "name": "octal-encoded-target-normalizes-to-its-address",
+      "entries": ["https://192.0.2.10"],
+      "target": "https://0300.0000.0002.0012/x",
+      "allowed": true,
+      "why": "The same address with every octet written in octal."
+    },
+    {
+      "name": "encoded-target-does-not-match-a-different-address",
+      "entries": ["https://192.0.2.11"],
+      "target": "https://3221225994/x",
+      "allowed": false,
+      "why": "Normalization must not be mistaken for permissiveness: the encoded form still resolves to one specific address."
+    },
+    {
+      "name": "a-zero-padded-octet-is-octal-and-so-a-different-address",
+      "entries": ["https://192.0.2.10"],
+      "target": "https://192.000.002.010/x",
+      "allowed": false,
+      "why": "A leading zero means octal, so 010 is 8 and this host is 192.0.2.8. It must not match an entry meaning 192.0.2.10. The trap runs the other way too: an operator who writes the padded form as an ENTRY, intending decimal, opens 192.0.2.8 and not the address they meant. Pinned here so nobody later 'fixes' the parser into reading it as decimal, which would be a different silent widening."
+    },
+    {
+      "name": "a-zero-padded-entry-means-the-octal-address-it-denotes",
+      "entries": ["https://192.000.002.010"],
+      "target": "https://192.0.2.8/x",
+      "allowed": true,
+      "why": "The same rule stated from the entry side, so the octal reading is asserted rather than inferred from a refusal."
+    },
+    {
+      "name": "ipv6-literal-exact",
+      "entries": ["https://[2001:db8::1]"],
+      "target": "https://[2001:db8::1]/x",
+      "allowed": true,
+      "why": "IPv6 entries are permitted in the same way as IPv4."
+    },
+    {
+      "name": "ipv6-expanded-target-matches-compressed-entry",
+      "entries": ["https://[2001:db8::1]"],
+      "target": "https://[2001:0db8:0000:0000:0000:0000:0000:0001]/x",
+      "allowed": true,
+      "why": "IPv6 has many spellings of one address, so both sides compare the compressed form."
+    },
+    {
+      "name": "ipv6-case-is-not-significant",
+      "entries": ["https://[2001:DB8::1]"],
+      "target": "https://[2001:db8::1]/x",
+      "allowed": true,
+      "why": "Hexadecimal digits are case-insensitive."
+    },
+    {
+      "name": "ipv6-does-not-match-a-neighbour",
+      "entries": ["https://[2001:db8::1]"],
+      "target": "https://[2001:db8::2]/x",
+      "allowed": false,
+      "why": "Address comparison is exact in this family too."
+    },
+    {
+      "name": "empty-list-allows-nothing",
+      "entries": [],
+      "target": "https://api.example.com/x",
+      "allowed": false,
+      "why": "An empty perimeter is closed, not open. A caller that wants no restriction must say so somewhere else."
+    },
+    {
+      "name": "several-entries-any-may-match",
+      "entries": ["https://a.example.com", "https://b.example.com"],
+      "target": "https://b.example.com/x",
+      "allowed": true,
+      "why": "The list is a disjunction and the order of entries does not matter."
+    },
+    {
+      "name": "non-http-target-never-matches",
+      "entries": ["https://api.example.com"],
+      "target": "ftp://api.example.com/x",
+      "allowed": false,
+      "why": "Only http and https are addressable by this runtime."
+    }
+  ],
+  "rejectedEntries": [
+    {
+      "name": "empty",
+      "entry": "",
+      "reason": "An empty entry states nothing and would silently contribute no perimeter."
+    },
+    {
+      "name": "whitespace",
+      "entry": "   ",
+      "reason": "Whitespace is an empty entry with a typo."
+    },
+    {
+      "name": "not-absolute",
+      "entry": "api.example.com",
+      "reason": "Without a scheme there is no origin to compare."
+    },
+    {
+      "name": "unsupported-scheme",
+      "entry": "ftp://api.example.com",
+      "reason": "This runtime addresses only http and https."
+    },
+    {
+      "name": "embedded-credentials",
+      "entry": "https://user:secret@api.example.com",
+      "reason": "An entry is a destination, not a credential store. Accepting userinfo here would put a secret in configuration that is read for display."
+    },
+    {
+      "name": "wildcard-on-the-apex",
+      "entry": "https://*.com",
+      "reason": "A wildcard directly over a public suffix grants an unbounded set of unrelated domains."
+    },
+    {
+      "name": "wildcard-over-an-ipv4-literal",
+      "entry": "https://*.0.0.1",
+      "reason": "Suffix matching cannot tell a numeric label from a domain label, so this one entry would grant 1.0.0.1 through 254.0.0.1."
+    },
+    {
+      "name": "backslash-in-host",
+      "entry": "https://api.example.com\\@evil.test",
+      "reason": "A backslash is a host-form trap that different parsers split differently."
+    }
+  ]
+}

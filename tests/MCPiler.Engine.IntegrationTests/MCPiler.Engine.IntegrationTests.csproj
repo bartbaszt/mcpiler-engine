@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!--
+    This suite exists because some obligations are properties of a real connection and
+    cannot be observed through a fake message handler: the outbound address policy
+    decides against a resolved address, the connect timeout elapses against a socket
+    that never completes, and the whole-execution time budget spans several real
+    round trips. A fake handler would let all three be asserted rather than measured.
+
+    Microsoft.AspNetCore.App is a shared framework reference rather than a package, so
+    Directory.Packages.props keeps its two entries and the forbidden-package guard in
+    MCPiler.Engine.ArchitectureTests is unaffected. Engine's own product code does not
+    reference it and must not: the loopback host is a test instrument, not a runtime
+    dependency.
+  -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="xunit.v3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\MCPiler.Engine\MCPiler.Engine.csproj" />
+  </ItemGroup>
+
+</Project>
