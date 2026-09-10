@@ -29,8 +29,25 @@ namespace MCPiler.Engine.ArchitectureTests;
 /// </remarks>
 public sealed class RuntimeBoundaryTests
 {
-    /// <summary>Everything the guards read. Widening this constant is how a new namespace gets covered.</summary>
-    private const string EngineSourceRoot = "src/MCPiler.Engine";
+    /// <summary>
+    /// Every production project. The scan starts here so a new project is covered by
+    /// arriving, not by somebody remembering to widen a constant.
+    /// </summary>
+    /// <remarks>
+    /// This used to be <c>src/MCPiler.Engine</c>. A second project under <c>src/</c> was
+    /// therefore invisible to every guard in this file, and invisible silently: the
+    /// existing assertions would all have stayed green while covering none of it. That is
+    /// the failure mode <c>LESSONS.md</c> names - a guard scoped to the namespace it was
+    /// written for stops guarding without saying so. The partition assertion below is what
+    /// makes a third project a decision rather than an omission.
+    /// </remarks>
+    private const string SourceRoot = "src";
+
+    /// <summary>The library. The host-access rules below are rules about this project.</summary>
+    private const string EngineSourceRoot = SourceRoot + "/MCPiler.Engine";
+
+    /// <summary>The deployable. Governed by <c>HostBoundaryTests</c>, on different terms.</summary>
+    private const string HostSourceRoot = SourceRoot + "/MCPiler.Engine.Host";
 
     private const string ManifestSourceRoot = EngineSourceRoot + "/Manifest";
 
@@ -132,7 +149,7 @@ public sealed class RuntimeBoundaryTests
     {
         var offenders = new List<string>();
 
-        foreach (var file in RuntimeSources())
+        foreach (var file in LibrarySources())
         {
             var relative = EngineRepository.Relative(file);
             var text = File.ReadAllText(file);
@@ -281,6 +298,57 @@ public sealed class RuntimeBoundaryTests
                 + ManifestSourceRoot
                 + " was scanned, so either the source tree collapsed back to one namespace or the "
                 + "scan root was narrowed and these guards stopped proving what they claim.");
+
+        var outsideLibrary = scanned
+            .Where(path => !path.StartsWith(EngineSourceRoot + "/", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.True(
+            outsideLibrary.Count > 0,
+            "The scan root is "
+                + SourceRoot
+                + ", not one project. Nothing outside "
+                + EngineSourceRoot
+                + " was scanned, which is exactly what the previous scan root did silently when the "
+                + "host project arrived beside the library.");
+    }
+
+    /// <summary>
+    /// Every production project is claimed by a boundary guard, and a third one fails here
+    /// rather than shipping ungoverned.
+    /// </summary>
+    /// <remarks>
+    /// The two projects are governed on different terms. The library reaches the host only
+    /// through named adapter directories; the deployable reaches the host freely and holds no
+    /// product decision instead. Both are real rules, and neither is the default, so a new
+    /// project belongs to neither until somebody says which. Without this assertion the
+    /// default is "governed by nothing" and it is reached by adding a directory.
+    /// </remarks>
+    [Fact]
+    public void Every_production_project_is_claimed_by_a_boundary_guard()
+    {
+        string[] governed = [EngineSourceRoot + "/", HostSourceRoot + "/"];
+
+        var unclaimed = RuntimeSources()
+            .Select(EngineRepository.Relative)
+            .Where(path => !governed.Any(root => path.StartsWith(root, StringComparison.Ordinal)))
+            .ToList();
+
+        Assert.True(
+            unclaimed.Count == 0,
+            "A production source file belongs to no project this guard knows about. Decide which "
+                + "boundary rules apply to it and say so here, in RuntimeBoundaryTests for a library "
+                + $"and in HostBoundaryTests for a deployable. Unclaimed: {string.Join(", ", unclaimed)}");
+
+        foreach (var root in governed)
+        {
+            Assert.True(
+                RuntimeSources().Any(path => EngineRepository
+                    .Relative(path)
+                    .StartsWith(root, StringComparison.Ordinal)),
+                $"No scanned file lives under '{root}', so the rules written for it are asserted "
+                    + "against nothing.");
+        }
     }
 
     /// <summary>
@@ -311,7 +379,7 @@ public sealed class RuntimeBoundaryTests
     [Fact]
     public void The_exemption_set_stays_a_named_minority_of_what_is_scanned()
     {
-        var scanned = RuntimeSources().Select(EngineRepository.Relative).ToList();
+        var scanned = LibrarySources().Select(EngineRepository.Relative).ToList();
 
         var uncovered = HostAccessPermitted
             .Where(entry => !scanned.Any(path => entry.EndsWith('/')
@@ -456,6 +524,16 @@ public sealed class RuntimeBoundaryTests
     private static IEnumerable<string> RuntimeSources()
         => EngineRepository
             .ProductionSources()
+            .Where(path => EngineRepository
+                .Relative(path)
+                .StartsWith(SourceRoot + "/", StringComparison.Ordinal));
+
+    /// <summary>
+    /// The library only. The host-access rules are rules about the library, and applying
+    /// them to the deployable would forbid it from opening the listener it exists to open.
+    /// </summary>
+    private static IEnumerable<string> LibrarySources()
+        => RuntimeSources()
             .Where(path => EngineRepository
                 .Relative(path)
                 .StartsWith(EngineSourceRoot + "/", StringComparison.Ordinal));

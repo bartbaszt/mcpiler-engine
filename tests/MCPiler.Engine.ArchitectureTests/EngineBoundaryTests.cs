@@ -1,3 +1,5 @@
+using System.Text.RegularExpressions;
+
 using Xunit;
 
 namespace MCPiler.Engine.ArchitectureTests;
@@ -89,12 +91,21 @@ public sealed class EngineBoundaryTests
     /// disclosure of private development structure, and the two are indistinguishable from
     /// the outside.
     /// </summary>
+    /// <remarks>
+    /// Build files are scanned too, and that is not thoroughness for its own sake. A
+    /// project file is prose as much as it is configuration - it carries the comments that
+    /// explain why a flag is set - and it ships in every clone. The scan reached only
+    /// <c>*.md</c> and production C# until a project comment was written pointing at a
+    /// private decision record, which no assertion noticed. A rule about published content
+    /// has to cover the published content, not the file extensions somebody happened to
+    /// think of.
+    /// </remarks>
     [Fact]
     public void No_document_references_a_private_platform_location()
     {
         var offenders = new List<string>();
 
-        foreach (var file in EngineRepository.Files("*.md"))
+        foreach (var file in PublishedText())
         {
             var text = File.ReadAllText(file);
             foreach (var reference in ForbiddenDocumentationReferences)
@@ -123,8 +134,7 @@ public sealed class EngineBoundaryTests
     [Fact]
     public void No_published_content_cites_a_private_decision_record()
     {
-        var offenders = EngineRepository.Files("*.md")
-            .Concat(EngineRepository.ProductionSources())
+        var offenders = PublishedText()
             .Where(file => CitesADecisionRecord(File.ReadAllText(file)))
             .Select(EngineRepository.Relative)
             .Order(StringComparer.Ordinal)
@@ -205,6 +215,55 @@ public sealed class EngineBoundaryTests
             $"Forbidden dependency class referenced: {string.Join(", ", offenders)}");
     }
 
+    /// <summary>
+    /// The dependency set is exactly this list, so a package arrives as a decision rather
+    /// than as a transitive surprise.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A forbidden-list guard answers "did we take something we already knew was wrong".
+    /// It cannot answer "did we take something at all", and that is the question that
+    /// matters for a repository whose whole claim is a small, permissively licensed
+    /// dependency graph. A package nobody thought to forbid passes the other guard
+    /// silently.
+    /// </para>
+    /// <para>
+    /// Every entry is named with the reason it is here. Changing this list is the review:
+    /// the diff shows a dependency being added, in a file whose only purpose is to say
+    /// which dependencies exist.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void The_declared_package_set_is_exactly_the_reviewed_list()
+    {
+        string[] reviewed =
+        [
+            // Analyzers. Build-time only, nothing ships.
+            "Meziantou.Analyzer",
+            "Microsoft.CodeAnalysis.BannedApiAnalyzers",
+            "Microsoft.VisualStudio.Threading.Analyzers",
+
+            // Runtime. The protocol SDK and the JSON Schema evaluator.
+            "ModelContextProtocol.AspNetCore",
+            "ModelContextProtocol.Core",
+            "JsonSchema.Net",
+
+            // Testing.
+            "xunit.v3",
+        ];
+
+        var declared = new Regex(
+            @"<PackageVersion\s+Include=""(?<id>[^""]+)""",
+            RegexOptions.CultureInvariant,
+            TimeSpan.FromSeconds(5))
+            .Matches(File.ReadAllText(EngineRepository.Absolute("Directory.Packages.props")))
+            .Select(match => match.Groups["id"].Value)
+            .Order(StringComparer.Ordinal)
+            .ToList();
+
+        Assert.Equal([.. reviewed.Order(StringComparer.Ordinal)], declared);
+    }
+
     [Fact]
     public void No_forbidden_platform_namespace_is_referenced()
     {
@@ -229,6 +288,22 @@ public sealed class EngineBoundaryTests
 
     private static IEnumerable<string> SourceFiles(params string[] patterns)
         => EngineRepository.Files(patterns);
+
+    /// <summary>
+    /// Everything published with the repository that a human reads: prose, production
+    /// source, and the build files whose comments explain the source.
+    /// </summary>
+    /// <remarks>
+    /// Test sources are deliberately absent. A guard names the rule it enforces, and
+    /// naming a private decision record is how it says which rule - the citation belongs
+    /// there and nowhere the repository publishes as its own explanation of itself.
+    /// </remarks>
+    private static IEnumerable<string> PublishedText()
+        => EngineRepository
+            .Files("*.md", "*.csproj", "*.props", "*.targets", "*.slnx")
+            .Concat(EngineRepository.ProductionSources())
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal);
 
     private static string Relative(string path)
         => EngineRepository.Relative(path);

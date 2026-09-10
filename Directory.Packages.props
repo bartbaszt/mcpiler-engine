@@ -19,17 +19,34 @@
     <PackageVersion Include="Microsoft.VisualStudio.Threading.Analyzers" Version="18.7.23" />
   </ItemGroup>
 
-  <ItemGroup Label="Testing">
-    <PackageVersion Include="xunit.v3" Version="4.0.0" />
+  <ItemGroup Label="Runtime">
+    <!--
+      The Model Context Protocol SDK. Engine speaks the protocol rather than defining it,
+      and framing, negotiation and error shapes are the SDK's to own on both transports.
+      Hand-rolling them would put Engine and the Studio on two implementations of one wire
+      contract, which is the divergence this whole split exists to avoid. Same package and
+      same version the Studio consumes, deliberately.
+    -->
+    <PackageVersion Include="ModelContextProtocol.AspNetCore" Version="2.2.0" />
+    <PackageVersion Include="ModelContextProtocol.Core" Version="2.2.0" />
 
     <!--
-      Test-only. The published JSON Schemas under schemas/ describe the manifest format
-      for editors and third-party tooling; the readers in Manifest/Loading remain the
-      runtime authority. An independent evaluator is what makes the schema tests evidence
-      rather than a restatement of the readers. MIT licensed, same evaluator the Studio
-      already uses, so the two agree on JSON Schema semantics.
+      Runtime as of the MCP host. Two obligations need a real evaluator: validating
+      structured content against the schema that was advertised, and validating arguments
+      against an operation's input schema before anything is compiled. Both are decisions
+      about what a client sent, so neither can be deferred to a producer.
+
+      It remains the evaluator the schema tests use, which is the point: the published
+      JSON Schemas under schemas/ and the readers in Manifest/Loading are checked against
+      the same semantics the runtime applies. MIT licensed, and the same evaluator the
+      Studio uses, so the two implementations agree on JSON Schema by construction rather
+      than by comparison.
     -->
     <PackageVersion Include="JsonSchema.Net" Version="9.4.0" />
+  </ItemGroup>
+
+  <ItemGroup Label="Testing">
+    <PackageVersion Include="xunit.v3" Version="4.0.0" />
   </ItemGroup>
 
 </Project>

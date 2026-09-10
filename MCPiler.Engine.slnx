@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="src/MCPiler.Engine/MCPiler.Engine.csproj" />
+  <Project Path="src/MCPiler.Engine.Host/MCPiler.Engine.Host.csproj" />
   <Project Path="tests/MCPiler.Engine.UnitTests/MCPiler.Engine.UnitTests.csproj" />
   <Project Path="tests/MCPiler.Engine.IntegrationTests/MCPiler.Engine.IntegrationTests.csproj" />
   <Project Path="tests/MCPiler.Engine.ArchitectureTests/MCPiler.Engine.ArchitectureTests.csproj" />

@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The Engine's deployable. The library beside it decides what to serve; this project
+    decides how it is reached - a command line, a listener, a transport, a container
+    entry point. Everything the product means lives in the library, and an architecture
+    guard asserts that separation rather than trusting it.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>MCPiler.Engine.Host</RootNamespace>
+    <AssemblyName>mcpiler-engine</AssemblyName>
+    <Version>0.0.1-alpha</Version>
+
+    <!--
+      Never packed. Engine's public contract is this executable's command line and the
+      Manifest format, not a .NET API surface. The flag is not a consequence of the 0.x
+      version window; nobody is invited to reference the assembly at all.
+    -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../MCPiler.Engine/MCPiler.Engine.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+</Project>
