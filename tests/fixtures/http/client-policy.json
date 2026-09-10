@@ -1,0 +1,73 @@
+{
+  "note": "Authored, not generated. A fixture generated from one implementation records that implementation's beliefs, so a setting both sides get wrong stays invisible in two green suites at once. Each case states a governing policy and the client behaviour it must produce; both repositories carry this file byte-identically and replay their own copy against their own client factory. The redirect hop limit is deliberately absent: it is not a property of the transport stack on either side, it is an argument to the send loop, and asserting it here would compare nothing.",
+  "cases": [
+    {
+      "name": "defaults",
+      "why": "The shipped numbers. If the two implementations disagree about what an unstated policy means, every other case is comparing different baselines.",
+      "policy": {
+        "connectTimeoutSeconds": 10,
+        "maxConnectionsPerServer": 8
+      },
+      "client": {
+        "allowAutoRedirect": false,
+        "connectTimeoutSeconds": 10,
+        "maxConnectionsPerServer": 8,
+        "automaticDecompression": ["gzip", "deflate"],
+        "hasConnectCallback": true,
+        "perClientDeadline": "none",
+        "userAgentPresent": true
+      }
+    },
+    {
+      "name": "narrowed",
+      "why": "An operator tightening both dials. The values are distinct from each other and from every default, so a factory that read one field into the other fails here rather than passing by coincidence.",
+      "policy": {
+        "connectTimeoutSeconds": 3,
+        "maxConnectionsPerServer": 2
+      },
+      "client": {
+        "allowAutoRedirect": false,
+        "connectTimeoutSeconds": 3,
+        "maxConnectionsPerServer": 2,
+        "automaticDecompression": ["gzip", "deflate"],
+        "hasConnectCallback": true,
+        "perClientDeadline": "none",
+        "userAgentPresent": true
+      }
+    },
+    {
+      "name": "single-connection",
+      "why": "A ceiling of one is the boundary an off-by-one in the pool configuration would cross, and it is a real deployment shape for an upstream that serialises requests.",
+      "policy": {
+        "connectTimeoutSeconds": 30,
+        "maxConnectionsPerServer": 1
+      },
+      "client": {
+        "allowAutoRedirect": false,
+        "connectTimeoutSeconds": 30,
+        "maxConnectionsPerServer": 1,
+        "automaticDecompression": ["gzip", "deflate"],
+        "hasConnectCallback": true,
+        "perClientDeadline": "none",
+        "userAgentPresent": true
+      }
+    },
+    {
+      "name": "wide",
+      "why": "A high ceiling with a long dial. Decompression and the disabled redirect follow must not become conditional on the numbers, and the per-client deadline must stay absent no matter how generous the policy is.",
+      "policy": {
+        "connectTimeoutSeconds": 120,
+        "maxConnectionsPerServer": 64
+      },
+      "client": {
+        "allowAutoRedirect": false,
+        "connectTimeoutSeconds": 120,
+        "maxConnectionsPerServer": 64,
+        "automaticDecompression": ["gzip", "deflate"],
+        "hasConnectCallback": true,
+        "perClientDeadline": "none",
+        "userAgentPresent": true
+      }
+    }
+  ]
+}

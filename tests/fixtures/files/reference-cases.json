@@ -1,0 +1,161 @@
+{
+  "note": "Authored, not generated. A corpus generated from one implementation records that implementation's beliefs, so a rule both sides get wrong the same way would be invisible in two green suites at once. Every case states what a file reference must carry after the same bytes are ingested with the same declared name and media type. The identifier and the storage pointer are deliberately absent: one is meant to differ, and the other is implementation-defined - the Platform addresses content by hash and Engine by entropy. What must agree is the filename, the media type, the byte length and the content hash. The payload is base64 so the corpus stays a single file that both repositories can hold byte-identically.",
+  "cases": [
+    {
+      "name": "plain-name",
+      "why": "The ordinary case. A name with nothing to strip survives unchanged.",
+      "declaredFileName": "report.pdf",
+      "declaredMediaType": "application/pdf",
+      "payloadBase64": "JVBERi0xLjQKJeLjz9MK",
+      "reference": {
+        "fileName": "report.pdf",
+        "mediaType": "application/pdf",
+        "length": 15,
+        "contentHash": "1f71fba76d8b649e6b537b4a1ea44346545550d05ffa1ed4537b55489d80ae8f"
+      }
+    },
+    {
+      "name": "posix-path",
+      "why": "A declared name carrying a POSIX path keeps only the last segment.",
+      "declaredFileName": "/var/tmp/export/report.pdf",
+      "declaredMediaType": "application/pdf",
+      "payloadBase64": "JVBERi0xLjQKJeLjz9MK",
+      "reference": {
+        "fileName": "report.pdf",
+        "mediaType": "application/pdf",
+        "length": 15,
+        "contentHash": "1f71fba76d8b649e6b537b4a1ea44346545550d05ffa1ed4537b55489d80ae8f"
+      }
+    },
+    {
+      "name": "windows-path",
+      "why": "Backslashes are stripped regardless of the platform running, because the separator that matters is whichever one the eventual consumer honours.",
+      "declaredFileName": "C:\\Users\\operator\\report.pdf",
+      "declaredMediaType": "application/pdf",
+      "payloadBase64": "JVBERi0xLjQKJeLjz9MK",
+      "reference": {
+        "fileName": "report.pdf",
+        "mediaType": "application/pdf",
+        "length": 15,
+        "contentHash": "1f71fba76d8b649e6b537b4a1ea44346545550d05ffa1ed4537b55489d80ae8f"
+      }
+    },
+    {
+      "name": "traversal",
+      "why": "A traversal sequence is a path, and only the last segment of a path survives. Nothing about storage depends on this - the stored name is generated - but a name echoed to a client should not read as an instruction.",
+      "declaredFileName": "../../../etc/passwd",
+      "declaredMediaType": "text/plain",
+      "payloadBase64": "aGVsbG8=",
+      "reference": {
+        "fileName": "passwd",
+        "mediaType": "text/plain",
+        "length": 5,
+        "contentHash": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+      }
+    },
+    {
+      "name": "colon-separated",
+      "why": "A colon separates a name from a drive or a stream on some platforms. It is stripped for the same reason a backslash is.",
+      "declaredFileName": "D:notes.txt",
+      "declaredMediaType": "text/plain",
+      "payloadBase64": "aGVsbG8=",
+      "reference": {
+        "fileName": "notes.txt",
+        "mediaType": "text/plain",
+        "length": 5,
+        "contentHash": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+      }
+    },
+    {
+      "name": "control-characters",
+      "why": "A control character in an echoed name can rewrite the line it is printed on. Removed rather than replaced, so the visible name is what remains.",
+      "declaredFileName": "re\u0000po\u001brt.pdf",
+      "declaredMediaType": "application/pdf",
+      "payloadBase64": "JVBERi0xLjQKJeLjz9MK",
+      "reference": {
+        "fileName": "report.pdf",
+        "mediaType": "application/pdf",
+        "length": 15,
+        "contentHash": "1f71fba76d8b649e6b537b4a1ea44346545550d05ffa1ed4537b55489d80ae8f"
+      }
+    },
+    {
+      "name": "trailing-dot-and-space",
+      "why": "A trailing dot or space is silently dropped by some filesystems, so a name that ends in one does not round-trip. Trimmed here rather than left to surprise a consumer.",
+      "declaredFileName": "report.pdf. ",
+      "declaredMediaType": "application/pdf",
+      "payloadBase64": "JVBERi0xLjQKJeLjz9MK",
+      "reference": {
+        "fileName": "report.pdf",
+        "mediaType": "application/pdf",
+        "length": 15,
+        "contentHash": "1f71fba76d8b649e6b537b4a1ea44346545550d05ffa1ed4537b55489d80ae8f"
+      }
+    },
+    {
+      "name": "interior-whitespace-preserved",
+      "why": "Interior whitespace is content. An earlier Platform rule collapsed runs of it, which discarded something the caller supplied and bought no safety; the corpus pins the preserved form so that rule cannot come back on one side only.",
+      "declaredFileName": "quarterly  report .pdf",
+      "declaredMediaType": "application/pdf",
+      "payloadBase64": "JVBERi0xLjQKJeLjz9MK",
+      "reference": {
+        "fileName": "quarterly  report .pdf",
+        "mediaType": "application/pdf",
+        "length": 15,
+        "contentHash": "1f71fba76d8b649e6b537b4a1ea44346545550d05ffa1ed4537b55489d80ae8f"
+      }
+    },
+    {
+      "name": "empty-name",
+      "why": "An upstream that declares nothing still gets a name, and both implementations have to pick the same one.",
+      "declaredFileName": "",
+      "declaredMediaType": "application/octet-stream",
+      "payloadBase64": "AAECAwQ=",
+      "reference": {
+        "fileName": "download",
+        "mediaType": "application/octet-stream",
+        "length": 5,
+        "contentHash": "08bb5e5d6eaac1049ede0893d30ed022b1a4d9b5b48db414871f51c9cb35283d"
+      }
+    },
+    {
+      "name": "name-that-sanitizes-to-nothing",
+      "why": "A name consisting only of separators and dots leaves nothing behind, and the fallback has to be the same one an absent name gets.",
+      "declaredFileName": "/// . ",
+      "declaredMediaType": "application/octet-stream",
+      "payloadBase64": "AAECAwQ=",
+      "reference": {
+        "fileName": "download",
+        "mediaType": "application/octet-stream",
+        "length": 5,
+        "contentHash": "08bb5e5d6eaac1049ede0893d30ed022b1a4d9b5b48db414871f51c9cb35283d"
+      }
+    },
+    {
+      "name": "empty-payload",
+      "why": "Zero bytes is a length and a hash like any other. An implementation that treated an empty body as an absent one would disagree here.",
+      "declaredFileName": "empty.bin",
+      "declaredMediaType": "application/octet-stream",
+      "payloadBase64": "",
+      "reference": {
+        "fileName": "empty.bin",
+        "mediaType": "application/octet-stream",
+        "length": 0,
+        "contentHash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "name": "media-type-with-parameters",
+      "why": "The declared media type is recorded as declared, parameters included. Stripping them is a decision about presentation and it must not happen on one side only.",
+      "declaredFileName": "page.html",
+      "declaredMediaType": "text/html; charset=utf-8",
+      "payloadBase64": "PGh0bWw+PC9odG1sPg==",
+      "reference": {
+        "fileName": "page.html",
+        "mediaType": "text/html; charset=utf-8",
+        "length": 13,
+        "contentHash": "b633a587c652d02386c4f16f8c6f6aab7352d97f16367c3c40576214372dd628"
+      }
+    }
+  ]
+}

@@ -388,7 +388,7 @@ public sealed class FileHandleStoreTests : IDisposable
     [InlineData("application/json")]
     [InlineData("application/json; charset=utf-8")]
     [InlineData("APPLICATION/JSON")]
-    public async Task A_media_type_is_compared_by_its_essence_and_recorded_that_way(string declared)
+    public async Task A_media_type_is_compared_by_its_essence_and_recorded_as_declared(string declared)
     {
         var store = Store(out _);
 
@@ -399,10 +399,14 @@ public sealed class FileHandleStoreTests : IDisposable
             "connector-a",
             TestContext.Current.CancellationToken);
 
-        // Parameters and case say nothing about how the bytes begin. Comparing the whole header
-        // value would make one payload conflict or match depending on whether a charset was
-        // mentioned.
-        Assert.Equal("application/json", reference.MediaType);
+        // Two different questions, and the answer to one is not the answer to the other.
+        // Parameters and case say nothing about how the bytes begin, so the signature is
+        // compared against the essence - otherwise one payload would conflict or match
+        // depending on whether a charset was mentioned. The record keeps what the upstream
+        // actually declared, because a charset on a text payload is information the consumer
+        // needs and because the shared reference corpus requires both implementations to carry
+        // the same value.
+        Assert.Equal(declared, reference.MediaType);
         Assert.Equal(SignatureVerdict.Match, reference.SignatureVerdict);
     }
 

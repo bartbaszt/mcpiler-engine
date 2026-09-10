@@ -214,8 +214,12 @@ public sealed class FileHandleStore
             reference = new FileHandleReference(
                 id,
                 SanitizeFileName(declaredFileName),
-                ContentSignature.Essence(declaredMediaType) is { Length: > 0 } essence
-                    ? essence
+                // Recorded as declared, parameters included. The essence is what the signature
+                // check compares against; it is not what the reference carries. A charset on a
+                // text payload is information the consumer needs, and dropping it here would
+                // also disagree with the other implementation, which the shared corpus pins.
+                declaredMediaType?.Trim() is { Length: > 0 } declared
+                    ? declared
                     : "application/octet-stream",
                 length,
                 hash,
