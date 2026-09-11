@@ -124,6 +124,11 @@ internal static class McpRegistration
     /// rather than with an empty tool list. An empty list reads as a server that legitimately
     /// exposes nothing, which is the disclosure this avoids making.
     /// </para>
+    /// <para>
+    /// The identity handed back at handshake is the addressed surface's, copied field for
+    /// field. The default is this assembly's own name and version, which would tell a client
+    /// connected to one Manifest exactly what a client connected to another is told.
+    /// </para>
     /// </remarks>
     private static Task ConfigureSessionAsync(
         HttpContext context,
@@ -134,6 +139,16 @@ internal static class McpRegistration
         {
             return Task.CompletedTask;
         }
+
+        ServerIdentity identity = addressed.Surface.Identity;
+
+        options.ServerInfo = new Implementation
+        {
+            Name = identity.Name,
+            Version = identity.Version,
+            Title = identity.Title,
+            Description = identity.Description,
+        };
 
         options.Capabilities ??= new ServerCapabilities();
         options.Capabilities.Tools = new ToolsCapability();

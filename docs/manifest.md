@@ -399,6 +399,14 @@ dimension disagrees with the payload, vector ranking is disabled and the manifes
 still loads and serves. Discovery falls back to lexical ranking. `validate`
 reports the problem; loading does not fail.
 
+Engine supplies only the stored half. It issues no embedding request and contacts
+no provider, so a semantic ranking happens only when the caller passes a
+`queryVector` to `catalogue.discover`, embedded with the `model` this section
+declares. Without one, or without a usable matrix, discovery ranks lexically and
+says so by answering exactly as it would have with no vector at all. A query
+vector whose length disagrees with the matrix is a tool error rather than a silent
+downgrade.
+
 ### `provenance`
 
 Optional and completely opaque. Engine parses it as an object and reads nothing

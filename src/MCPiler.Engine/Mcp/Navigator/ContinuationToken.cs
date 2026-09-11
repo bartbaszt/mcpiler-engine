@@ -19,10 +19,12 @@ namespace MCPiler.Engine.Mcp.Navigator;
 /// about caller behaviour into something this code enforces.
 /// </para>
 /// <para>
-/// The identity covers the query, the surface and the index fingerprint, so a token issued on
-/// one surface is not redeemable on another and a token issued against one Manifest is not
-/// redeemable after it changes. It is a digest, so the token discloses none of the three.
-/// </para>
+    /// The identity covers the query, the surface, the index fingerprint and the query vector,
+    /// so a token issued on one surface is not redeemable on another, one issued against a
+    /// Manifest is not redeemable after it changes, and one issued against a vector-assisted
+    /// ranking is not redeemable against a lexical-only one. It is a digest, so the token
+    /// discloses none of the four.
+    /// </para>
 /// <para>
 /// Opaque to a caller and not encrypted: the honest claim is that a caller must not read or
 /// construct one, not that it cannot. Everything inside is already something the caller
@@ -52,12 +54,18 @@ internal static class ContinuationToken
     /// <param name="query">The query text, absent or empty meaning "everything".</param>
     /// <param name="surface">The surface slug whose exposure table filtered the ranking.</param>
     /// <param name="index">The fingerprint of the index that was ranked.</param>
-    internal static string Identify(string? query, string surface, string index)
+    /// <param name="vector">
+    /// A digest of the query vector the ranking used, or <c>null</c> when it used none. Two
+    /// rankings of one query that differ in their semantic half are two lists, and a position
+    /// in one is not a position in the other.
+    /// </param>
+    internal static string Identify(string? query, string surface, string index, string? vector)
         => CanonicalJson.Hash(new JsonObject
         {
             ["query"] = query ?? string.Empty,
             ["surface"] = surface,
             ["index"] = index,
+            ["vector"] = vector,
         })[..IdentityLength];
 
     /// <summary>Issues a token for the next position in an identified list.</summary>

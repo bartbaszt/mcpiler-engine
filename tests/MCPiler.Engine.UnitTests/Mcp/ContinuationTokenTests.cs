@@ -69,13 +69,29 @@ public sealed class ContinuationTokenTests
     }
 
     [Fact]
-    public void The_identity_of_a_list_depends_on_all_three_of_its_parts()
+    public void The_identity_of_a_list_depends_on_every_one_of_its_parts()
     {
-        string baseline = ContinuationToken.Identify("pets", "full", "fingerprint");
+        string baseline = ContinuationToken.Identify("pets", "full", "fingerprint", vector: null);
 
-        Assert.NotEqual(baseline, ContinuationToken.Identify("cats", "full", "fingerprint"));
-        Assert.NotEqual(baseline, ContinuationToken.Identify("pets", "read", "fingerprint"));
-        Assert.NotEqual(baseline, ContinuationToken.Identify("pets", "full", "other"));
+        Assert.NotEqual(baseline, ContinuationToken.Identify("cats", "full", "fingerprint", vector: null));
+        Assert.NotEqual(baseline, ContinuationToken.Identify("pets", "read", "fingerprint", vector: null));
+        Assert.NotEqual(baseline, ContinuationToken.Identify("pets", "full", "other", vector: null));
+        Assert.NotEqual(baseline, ContinuationToken.Identify("pets", "full", "fingerprint", "digest"));
+    }
+
+    /// <summary>
+    /// Two rankings of one query that used different query vectors are two lists.
+    /// </summary>
+    /// <remarks>
+    /// The case the offset alone would get wrong most quietly: same query text, same surface,
+    /// same catalogue, and a page boundary computed over a different order.
+    /// </remarks>
+    [Fact]
+    public void A_semantic_ranking_is_not_the_list_a_lexical_one_paged()
+    {
+        Assert.NotEqual(
+            ContinuationToken.Identify("pets", "full", "fingerprint", "one"),
+            ContinuationToken.Identify("pets", "full", "fingerprint", "two"));
     }
 
     [Fact]
@@ -83,8 +99,8 @@ public sealed class ContinuationTokenTests
     {
         // Both list everything, so a token issued under one has to work under the other.
         Assert.Equal(
-            ContinuationToken.Identify(null, "full", "fingerprint"),
-            ContinuationToken.Identify(string.Empty, "full", "fingerprint"));
+            ContinuationToken.Identify(null, "full", "fingerprint", vector: null),
+            ContinuationToken.Identify(string.Empty, "full", "fingerprint", vector: null));
     }
 
     private static string Encode(string text)

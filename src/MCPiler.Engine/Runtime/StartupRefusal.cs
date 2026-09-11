@@ -86,6 +86,15 @@ public sealed record MountedSurface(
     /// </remarks>
     internal IReadOnlyList<CatalogueTool> Navigable { get; init; } = [];
 
+    /// <summary>How this surface introduces itself to a client that connects to it.</summary>
+    /// <remarks>
+    /// Per surface rather than per Manifest, because a client addresses a surface. Two
+    /// surfaces of one Manifest hold different tools and answer at different addresses; giving
+    /// them one indistinguishable identity would leave a client unable to tell which of the
+    /// two it is talking to, which is the same complaint one level down.
+    /// </remarks>
+    public ServerIdentity Identity { get; init; } = ServerIdentity.Undeclared;
+
     /// <summary>Every advertised tool name, in advertisement order.</summary>
     /// <remarks>
     /// Read from <see cref="Tools"/> rather than stored beside it. Two lists that must agree

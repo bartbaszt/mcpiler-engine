@@ -162,6 +162,44 @@ internal static class ServedManifests
         }
         """;
 
+    /// <summary>
+    /// A fully identified server: name, version, description, and one named surface of two.
+    /// </summary>
+    /// <remarks>
+    /// The second surface is deliberately left unnamed so one document answers both halves of
+    /// the title question - what a client is told when the Manifest authored a surface name,
+    /// and what it is told when the surface has only the slug that is already in the address.
+    /// </remarks>
+    public const string Identified = """
+        {
+          "manifestFormatVersion": "0.2",
+          "sections": {
+            "server": {
+              "inline": {
+                "name": "Pet API",
+                "description": "Everything about pets.",
+                "version": "3.1.4",
+                "surfaces": [
+                  { "slug": "read", "name": "Read only", "operations": [ { "operation": "list-pets" } ] },
+                  { "slug": "full", "isDefault": true, "operations": [ { "operation": "list-pets" } ] }
+                ]
+              }
+            },
+            "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+            "operations": {
+              "inline": { "operations": [ { "key": "GET /pets", "method": "GET", "path": "/pets" } ] }
+            },
+            "agentSurface": {
+              "inline": {
+                "operations": [
+                  { "slug": "list-pets", "name": "List pets", "binding": { "type": "http", "operation": "GET /pets" } }
+                ]
+              }
+            }
+          }
+        }
+        """;
+
     /// <summary>A second server whose one tool name collides with the first's.</summary>
     public const string CollidingNames = """
         {

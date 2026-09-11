@@ -76,7 +76,32 @@ public sealed class LexicalRanker
     /// The query text. Null or empty lists every discoverable operation with a zero score,
     /// which is what a caller browsing a surface expects.
     /// </param>
-    public LexicalRankOutcome Rank(string? query)
+    public LexicalRankOutcome Rank(string? query) => Rank(query, semantic: null);
+
+    /// <summary>
+    /// Ranks the index against a query, merging in a semantic component computed elsewhere.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The semantic contribution is supplied rather than computed because producing it needs
+    /// an artifact the index does not carry and a query vector the caller brought. What this
+    /// ranker still owns is everything that decides the answer's shape: which entries the
+    /// surface allows, which merged scores survive, the quantization, and the total order. One
+    /// ordering rule, whether or not a semantic half exists.
+    /// </para>
+    /// <para>
+    /// Merged before quantization, deliberately. Quantizing the lexical half and then adding a
+    /// scaled similarity would let a component derived from floating-point arithmetic decide
+    /// order at a resolution the format does not promise to reproduce. Inside the step, it
+    /// cannot.
+    /// </para>
+    /// </remarks>
+    /// <param name="query">The query text.</param>
+    /// <param name="semantic">
+    /// Per-operation contributions in score units, or <c>null</c> when the ranking has no
+    /// semantic half. An operation the map does not mention contributes nothing.
+    /// </param>
+    internal LexicalRankOutcome Rank(string? query, IReadOnlyDictionary<string, int>? semantic)
     {
         var terms = SearchTokenizer.Tokenize(query);
         var results = new List<LexicalSearchResult>(_index.Operations.Count);
@@ -90,17 +115,24 @@ public sealed class LexicalRanker
                 continue;
             }
 
-            var (score, matched) = Score(document, terms);
+            var (merged, matched) = Merge(document, terms);
 
-            // With a query present, an operation that matched nothing is not a result.
-            if (terms.Count > 0 && score <= 0)
+            if (semantic is not null && semantic.TryGetValue(document.Operation, out var contribution))
+            {
+                merged += contribution;
+            }
+
+            // With a query present, an operation that matched nothing is not a result. The
+            // test is on the merged total, so an operation the query never names lexically is
+            // still a result when the semantic half found it.
+            if (terms.Count > 0 && merged <= 0)
             {
                 continue;
             }
 
             results.Add(new LexicalSearchResult(
                 document.Operation,
-                score,
+                merged / _quantizationStep * _quantizationStep,
                 matched,
                 document.Summary,
                 document.Risk));
@@ -116,7 +148,7 @@ public sealed class LexicalRanker
     }
 
     /// <summary>
-    /// Scores one document, merging the lexical and metadata components.
+    /// Merges one document's lexical and metadata components, before quantization.
     /// </summary>
     /// <remarks>
     /// A term that occurs in several fields contributes its best field once per component,
@@ -125,7 +157,7 @@ public sealed class LexicalRanker
     /// because curated aliases and example intents are strong intent signals even though they
     /// are never advertised.
     /// </remarks>
-    private (int Score, IReadOnlyList<string> MatchedBy) Score(
+    private (int Merged, IReadOnlyList<string> MatchedBy) Merge(
         SearchDocumentEntry document,
         IReadOnlyList<string> terms)
     {
@@ -167,16 +199,13 @@ public sealed class LexicalRanker
             metadata += bestMetadata;
         }
 
-        var merged = lexical + (_scoring.MetaMultiplier * metadata);
-        var quantized = merged / _quantizationStep * _quantizationStep;
-
         var describe = matched
             .OrderByDescending(Weight)
             .ThenBy(static field => field, StringComparer.Ordinal)
             .Take(MaxMatchedBy)
             .ToList();
 
-        return (quantized, describe);
+        return (lexical + (_scoring.MetaMultiplier * metadata), describe);
     }
 
     /// <remarks>

@@ -98,6 +98,77 @@ public sealed class VectorDegradationTests : IDisposable
         Assert.Contains("list-pets", page.Payload, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A semantic query is answered while every address this process could dial is refused.
+    /// </summary>
+    /// <remarks>
+    /// The vector arrives from the caller and the matrix arrives from the bundle, so the
+    /// ranking has both halves and still needs no provider. Observed rather than asserted
+    /// about source code: a build that reached for an embedding endpoint would fail here
+    /// instead of passing a review.
+    /// </remarks>
+    [Fact]
+    public async Task A_semantic_query_is_answered_with_every_outbound_address_refused()
+    {
+        await using var upstream = await Idle();
+        await using var engine = await ServeAsync(
+            upstream.Address,
+            Usable(),
+            dimension: 2,
+            connections: new OutboundConnectionPolicy(static _ => true));
+
+        using var session = await McpHttpSession.OpenAsync(engine.At("api/full"), Token);
+
+        var page = await session.CallAsync(
+            "catalogue.discover",
+            """{"query":"pets","queryVector":[1,0]}""",
+            2,
+            Token);
+
+        Assert.Contains("list-pets", page.Payload, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"isError\":true", page.Payload, StringComparison.Ordinal);
+    }
+
+    /// <summary>The same semantic query answers with the same bytes on a fresh process.</summary>
+    [Fact]
+    public async Task A_semantic_page_is_the_same_bytes_on_a_second_mount()
+    {
+        await using var upstream = await Idle();
+
+        await using var first = await ServeAsync(upstream.Address, Usable(), dimension: 2);
+        await using var second = await ServeAsync(upstream.Address, Usable(), dimension: 2);
+
+        Assert.Equal(await PageAsync(first, Semantic), await PageAsync(second, Semantic));
+    }
+
+    /// <summary>
+    /// A query vector of the wrong length is refused, and the refusal says both lengths.
+    /// </summary>
+    /// <remarks>
+    /// Named rather than ignored. A caller that embedded its query with the wrong model has a
+    /// fixable mistake, and a silently lexical answer would present it as a relevance problem.
+    /// </remarks>
+    [Fact]
+    public async Task A_query_vector_of_the_wrong_length_is_refused_over_the_wire()
+    {
+        await using var upstream = await Idle();
+        await using var engine = await ServeAsync(upstream.Address, Usable(), dimension: 2);
+
+        using var session = await McpHttpSession.OpenAsync(engine.At("api/full"), Token);
+
+        var refused = await session.CallAsync(
+            "catalogue.discover",
+            """{"query":"pets","queryVector":[1,0,0]}""",
+            2,
+            Token);
+
+        string text = JsonNode.Parse(refused.Payload)!["result"]!["content"]![0]!["text"]!.GetValue<string>();
+
+        Assert.Contains("\"isError\":true", refused.Payload, StringComparison.Ordinal);
+        Assert.Contains("3", text, StringComparison.Ordinal);
+        Assert.Contains("2", text, StringComparison.Ordinal);
+    }
+
     public void Dispose()
     {
         foreach (string root in _roots.Where(Directory.Exists))
@@ -130,11 +201,19 @@ public sealed class VectorDegradationTests : IDisposable
         Assert.Equal(expected, await PageAsync(degraded));
     }
 
-    private async Task<string> PageAsync(ServedEngine engine)
+    /// <summary>The query every page comparison here is taken over.</summary>
+    private const string Lexical = """{"query":"pets"}""";
+
+    /// <summary>The same query with a caller-supplied vector beside it.</summary>
+    private const string Semantic = """{"query":"pets","queryVector":[1,0]}""";
+
+    private Task<string> PageAsync(ServedEngine engine) => PageAsync(engine, Lexical);
+
+    private async Task<string> PageAsync(ServedEngine engine, string arguments)
     {
         using var session = await McpHttpSession.OpenAsync(engine.At("api/full"), Token);
 
-        var page = await session.CallAsync("catalogue.discover", """{"query":"pets"}""", 2, Token);
+        var page = await session.CallAsync("catalogue.discover", arguments, 2, Token);
 
         return page.Body;
     }

@@ -9,6 +9,7 @@ using MCPiler.Engine.Manifest.Derivation;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Manifest.Search;
 using MCPiler.Engine.Runtime;
+using MCPiler.Engine.Search.Hybrid;
 
 namespace MCPiler.Engine.Mcp.Navigator;
 
@@ -48,6 +49,15 @@ internal static class NavigatorRuntime
     internal const string PageSizeArgument = "pageSize";
     internal const string ContinuationArgument = "continuation";
     internal const string ArgumentsArgument = "arguments";
+    internal const string QueryVectorArgument = "queryVector";
+
+    /// <summary>The answer for a query vector that is not a list of numbers.</summary>
+    /// <remarks>
+    /// Unreachable through the advertised schema, which already constrains the argument, and
+    /// stated anyway: the check that runs is the one that decides, and a malformed vector read
+    /// as an absent one would silently downgrade the ranking the caller asked for.
+    /// </remarks>
+    internal const string MalformedVector = "The query vector must be a list of numbers.";
 
     /// <summary>
     /// The answer for an operation this surface cannot reach.
@@ -116,11 +126,31 @@ internal static class NavigatorRuntime
             return Page([], continuation: null);
         }
 
+        if (!TryVector(arguments, out IReadOnlyList<double>? supplied))
+        {
+            return new ToolOutcome(MalformedVector, IsError: true);
+        }
+
+        if (!HybridRanker.TryResolve(
+                mount.Index.Vectors,
+                mount.Index.Section,
+                supplied,
+                out SemanticTerm? semantic,
+                out string? unusable))
+        {
+            return new ToolOutcome(unusable, IsError: true);
+        }
+
         string? query = Text(arguments, QueryArgument);
         int pageSize = Integer(arguments, PageSizeArgument)
             ?? Math.Clamp(declared.EffectiveNavigator.PageSize, 1, NavigatorToolDefinitions.MaxPageSize);
 
-        string identity = ContinuationToken.Identify(query, surface.Slug, mount.Index.Fingerprint);
+        string identity = ContinuationToken.Identify(
+            query,
+            surface.Slug,
+            mount.Index.Fingerprint,
+            semantic?.Identity);
+
         int offset = 0;
 
         if (Text(arguments, ContinuationArgument) is { Length: > 0 } token
@@ -130,7 +160,7 @@ internal static class NavigatorRuntime
         }
 
         IReadOnlyList<LexicalSearchResult> ranked = new LexicalRanker(mount.Index.Section, declared)
-            .Rank(query)
+            .Rank(query, semantic?.Contributions)
             .Results;
 
         List<LexicalSearchResult> items = [.. ranked.Skip(offset).Take(pageSize)];
@@ -346,6 +376,54 @@ internal static class NavigatorRuntime
     /// restart.
     /// </remarks>
     private static string Render(JsonNode payload) => Encoding.UTF8.GetString(CanonicalJson.Serialize(payload));
+
+    /// <summary>Reads the caller's query vector, if it sent one.</summary>
+    /// <remarks>
+    /// Absent and malformed are kept apart. An unreadable vector read as an absent one would
+    /// answer a semantic query with a lexical ranking and say nothing, which is the failure
+    /// this whole argument exists to avoid.
+    /// </remarks>
+    private static bool TryVector(JsonObject arguments, out IReadOnlyList<double>? vector)
+    {
+        vector = null;
+
+        if (arguments[QueryVectorArgument] is not { } sent)
+        {
+            return true;
+        }
+
+        if (sent is not JsonArray declared)
+        {
+            return false;
+        }
+
+        List<double> values = new(declared.Count);
+
+        foreach (JsonNode? element in declared)
+        {
+            if (element is not JsonValue value)
+            {
+                return false;
+            }
+
+            try
+            {
+                if (!value.TryGetValue(out double number))
+                {
+                    return false;
+                }
+
+                values.Add(number);
+            }
+            catch (FormatException)
+            {
+                return false;
+            }
+        }
+
+        vector = values;
+        return true;
+    }
 
     private static string? Text(JsonObject arguments, string name)
         => arguments[name] is JsonValue value && value.TryGetValue(out string? text) ? text : null;

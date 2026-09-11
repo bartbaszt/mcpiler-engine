@@ -41,6 +41,11 @@
               "continuation": {
                 "type": "string",
                 "description": "Opaque continuation token from a previous page."
+              },
+              "queryVector": {
+                "type": "array",
+                "items": { "type": "number" },
+                "description": "Optional embedding of the query, computed by the caller with the model the catalogue declares. Used only when the catalogue carries a usable vector matrix; a vector whose length differs from the catalogue's dimension is a tool error."
               }
             }
           },
@@ -54,7 +59,7 @@
             "properties": {
               "operationKey": {
                 "type": "string",
-                "description": "The operation identifier, e.g. 'GET /pets'."
+                "description": "The operation identifier returned by catalogue.discover, e.g. 'list-pets'."
               }
             },
             "required": ["operationKey"]
@@ -69,7 +74,7 @@
             "properties": {
               "operationKey": {
                 "type": "string",
-                "description": "The operation identifier, e.g. 'GET /pets'."
+                "description": "The operation identifier returned by catalogue.discover, e.g. 'list-pets'."
               },
               "arguments": {
                 "type": "object",

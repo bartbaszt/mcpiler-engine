@@ -54,6 +54,14 @@ public static class SurfaceCatalogue
             // a surface that cannot resolve an identifier should fail to start rather than
             // fail the first caller that asks for one.
             Navigable = ToolSetProjection.Project(ToolSetDeriver.DeriveNavigable(manifest, surface)),
+
+            // The declared identity, resolved once here so no transport has to decide what to
+            // say when the Manifest leaves a field out.
+            Identity = new ServerIdentity(
+                manifest.Server.Name,
+                manifest.Server.Version ?? string.Empty,
+                surface.Name,
+                manifest.Server.Description),
         };
     }
 }

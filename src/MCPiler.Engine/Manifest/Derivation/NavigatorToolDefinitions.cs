@@ -42,6 +42,25 @@ public static class NavigatorToolDefinitions
         + "or invalid arguments produce a tool error and perform no upstream request.";
 
     /// <summary>
+    /// How the operation identifier is described to a caller.
+    /// </summary>
+    /// <remarks>
+    /// One constant for both tools, because a caller that reads two descriptions of the same
+    /// identifier and finds two shapes has to guess which one is true. The identifier is the
+    /// manifest slug: it is what discovery returns, what the exposure table addresses, and
+    /// what execution resolves. A binding key such as <c>GET /pets</c> is none of those, and
+    /// two agent operations may bind one key, so accepting it would make resolution a choice
+    /// between them.
+    /// </remarks>
+    private const string OperationDescription =
+        "The operation identifier returned by catalogue.discover, e.g. 'list-pets'.";
+
+    private const string QueryVectorDescription =
+        "Optional embedding of the query, computed by the caller with the model the catalogue "
+        + "declares. Used only when the catalogue carries a usable vector matrix; a vector "
+        + "whose length differs from the catalogue's dimension is a tool error.";
+
+    /// <summary>
     /// Builds the Navigator tools for one surface.
     /// </summary>
     /// <param name="pageSize">
@@ -80,6 +99,12 @@ public static class NavigatorToolDefinitions
                             ["type"] = "string",
                             ["description"] = "Opaque continuation token from a previous page.",
                         },
+                        ["queryVector"] = new JsonObject
+                        {
+                            ["type"] = "array",
+                            ["items"] = new JsonObject { ["type"] = "number" },
+                            ["description"] = QueryVectorDescription,
+                        },
                     },
                 })),
 
@@ -94,7 +119,7 @@ public static class NavigatorToolDefinitions
                         ["operationKey"] = new JsonObject
                         {
                             ["type"] = "string",
-                            ["description"] = "The operation identifier, e.g. 'GET /pets'.",
+                            ["description"] = OperationDescription,
                         },
                     },
                     ["required"] = new JsonArray("operationKey"),
@@ -111,7 +136,7 @@ public static class NavigatorToolDefinitions
                         ["operationKey"] = new JsonObject
                         {
                             ["type"] = "string",
-                            ["description"] = "The operation identifier, e.g. 'GET /pets'.",
+                            ["description"] = OperationDescription,
                         },
                         ["arguments"] = new JsonObject
                         {
