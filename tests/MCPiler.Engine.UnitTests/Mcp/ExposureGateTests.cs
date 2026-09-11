@@ -1,6 +1,7 @@
 using MCPiler.Engine.Manifest.Loading;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Mcp;
+using MCPiler.Engine.Mcp.Navigator;
 using MCPiler.Engine.Runtime;
 
 using Xunit;
@@ -89,7 +90,8 @@ public sealed class ExposureGateTests
             "bundle",
             manifest,
             manifest.Policy,
-            [new MountedSurface(surfaceSlug, surfaceSlug, IsDefault: true, [], [], "fingerprint")]);
+            [new MountedSurface(surfaceSlug, surfaceSlug, IsDefault: true, [], [], "fingerprint")],
+            NavigatorIndex.Resolve(manifest, []));
 
     private static ManifestDocument Load(string manifestText)
     {

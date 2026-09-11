@@ -7,6 +7,7 @@ using MCPiler.Engine.Manifest.Loading;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Manifest.Validation;
 using MCPiler.Engine.Mcp;
+using MCPiler.Engine.Mcp.Navigator;
 
 namespace MCPiler.Engine.Runtime;
 
@@ -169,6 +170,12 @@ public static class EngineRuntime
         List<ManifestDiagnostic> derivation = [];
         List<MountedSurface> surfaces = [];
 
+        // The index before the surfaces, because every surface ranks from it and a Manifest
+        // whose declared index no longer describes its own operations degrades discovery
+        // silently: fewer or worse results, and nothing in the answer saying so. The same
+        // reconciliation rule the tool set gets, and the same consequence.
+        NavigatorIndex index = NavigatorIndex.Resolve(document, derivation);
+
         foreach (ManifestSurface surface in document.Server.Surfaces.Where(static candidate => candidate.Enabled))
         {
             surfaces.Add(SurfaceCatalogue.Build(document, surface, derivation));
@@ -182,7 +189,7 @@ public static class EngineRuntime
 
         warnings.AddRange(derivation.Where(static candidate => !candidate.IsError).Select(diagnostic => Translate(request, diagnostic)));
 
-        return new MountedManifest(request.Prefix, request.Path, document, policy, surfaces);
+        return new MountedManifest(request.Prefix, request.Path, document, policy, surfaces, index);
     }
 
     /// <summary>

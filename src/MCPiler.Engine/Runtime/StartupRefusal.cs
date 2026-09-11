@@ -1,5 +1,6 @@
 using MCPiler.Engine.Execution.Files;
 using MCPiler.Engine.Manifest.Model;
+using MCPiler.Engine.Mcp.Navigator;
 
 namespace MCPiler.Engine.Runtime;
 
@@ -68,6 +69,23 @@ public sealed record MountedSurface(
     IReadOnlyList<CatalogueTool> Tools,
     string Fingerprint)
 {
+    /// <summary>
+    /// Every operation the Navigator may resolve here, in exposure order.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A superset of <see cref="Tools"/>, and the reason it is a separate list: the operations
+    /// a surface exposes only through the Navigator appear in no listing, so a set derived
+    /// from what is advertised cannot resolve them. Keyed by operation, not by tool name,
+    /// because that is the identifier discovery hands back.
+    /// </para>
+    /// <para>
+    /// Internal, and empty by default so a constructed surface that advertises nothing also
+    /// reaches nothing. A surface built for a mount is given the real set.
+    /// </para>
+    /// </remarks>
+    internal IReadOnlyList<CatalogueTool> Navigable { get; init; } = [];
+
     /// <summary>Every advertised tool name, in advertisement order.</summary>
     /// <remarks>
     /// Read from <see cref="Tools"/> rather than stored beside it. Two lists that must agree
@@ -90,6 +108,15 @@ public sealed record MountedSurface(
     /// </remarks>
     internal CatalogueTool? Find(string name)
         => Tools.FirstOrDefault(tool => string.Equals(tool.Name, name, StringComparison.Ordinal));
+
+    /// <summary>The Navigator-reachable operation with this exact identifier, or <c>null</c>.</summary>
+    /// <remarks>
+    /// Ordinal for the same reason <see cref="Find"/> is, and internal for a stronger one: an
+    /// answer here distinguishes an operation that exists from one that does not, and the
+    /// whole point of Navigator exposure is that the distinction does not leave this library.
+    /// </remarks>
+    internal CatalogueTool? FindNavigable(string operation)
+        => Navigable.FirstOrDefault(tool => string.Equals(tool.Operation, operation, StringComparison.Ordinal));
 }
 
 /// <summary>
@@ -115,13 +142,15 @@ public sealed class MountedManifest
         string path,
         ManifestDocument document,
         PolicySection policy,
-        IReadOnlyList<MountedSurface> surfaces)
+        IReadOnlyList<MountedSurface> surfaces,
+        NavigatorIndex index)
     {
         Prefix = prefix;
         Path = path;
         Document = document;
         Policy = policy;
         Surfaces = surfaces;
+        Index = index;
     }
 
     /// <summary>The route prefix this Manifest answers on.</summary>
@@ -139,6 +168,15 @@ public sealed class MountedManifest
     internal ManifestDocument Document { get; }
 
     internal PolicySection Policy { get; }
+
+    /// <summary>The lexical index every surface of this Manifest ranks from.</summary>
+    /// <remarks>
+    /// One index per Manifest, not per surface: the index documents operations, and a surface
+    /// decides which of them it exposes at the moment it is queried. Building one per surface
+    /// would bake an exposure decision into an artifact and make the query-time filter — the
+    /// only check that does not trust the index — redundant with it.
+    /// </remarks>
+    internal NavigatorIndex Index { get; }
 }
 
 /// <summary>

@@ -48,6 +48,12 @@ public static class SurfaceCatalogue
             surface.IsDefault,
             surface.RequiredScopes,
             ToolSetProjection.Project(tools),
-            ToolSetDeriver.Fingerprint(tools));
+            ToolSetDeriver.Fingerprint(tools))
+        {
+            // What the Navigator may reach, derived here for the same reason the listing is:
+            // a surface that cannot resolve an identifier should fail to start rather than
+            // fail the first caller that asks for one.
+            Navigable = ToolSetProjection.Project(ToolSetDeriver.DeriveNavigable(manifest, surface)),
+        };
     }
 }

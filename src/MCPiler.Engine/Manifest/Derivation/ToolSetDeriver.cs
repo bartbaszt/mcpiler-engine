@@ -90,6 +90,56 @@ public static class ToolSetDeriver
     }
 
     /// <summary>
+    /// Derives the operations a surface's Navigator may reach.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A superset of the advertised set and a different question. Advertisement asks what a
+    /// listing shows; this asks what an identifier may resolve to. Direct operations answer
+    /// both, because reaching one through the Navigator is the same reach the listing already
+    /// granted; Navigator-exposed operations answer only this one, which is the entire point
+    /// of that exposure. Hidden operations answer neither.
+    /// </para>
+    /// <para>
+    /// The Navigator trio is absent: the three tools are the way in, not somewhere it leads.
+    /// </para>
+    /// <para>
+    /// Always derived, never reconciled against a declared <c>tools</c> section, because that
+    /// section pins what a surface advertises and says nothing about what it may reach. The
+    /// two cannot drift apart on a started mount anyway: a declared set that disagrees with
+    /// the derivation refuses the mount before anything listens.
+    /// </para>
+    /// </remarks>
+    /// <param name="manifest">The loaded manifest.</param>
+    /// <param name="surface">The surface whose exposure table decides.</param>
+    public static SurfaceToolSet DeriveNavigable(ManifestDocument manifest, ManifestSurface surface)
+    {
+        ArgumentNullException.ThrowIfNull(manifest);
+        ArgumentNullException.ThrowIfNull(surface);
+
+        var names = ToolName.Allocate(manifest.AgentSurface.Operations.Select(static entry => entry.Slug));
+        var resolver = SchemaResolverFor(manifest);
+        var tools = new List<ManifestTool>(surface.Operations.Count);
+
+        foreach (var entry in surface.Operations)
+        {
+            if (entry.Exposure is not (OperationExposure.Direct or OperationExposure.Navigator))
+            {
+                continue;
+            }
+
+            if (manifest.AgentSurface.Operation(entry.Operation) is not { } operation)
+            {
+                continue;
+            }
+
+            tools.Add(BuildTool(manifest, surface, operation, names[operation.Slug], resolver));
+        }
+
+        return new SurfaceToolSet(tools);
+    }
+
+    /// <summary>
     /// Derives the tool sets for every enabled surface.
     /// </summary>
     /// <param name="manifest">The loaded manifest.</param>

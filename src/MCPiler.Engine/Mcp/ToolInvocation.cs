@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using Json.Schema;
 
 using MCPiler.Engine.Execution;
+using MCPiler.Engine.Mcp.Navigator;
 using MCPiler.Engine.Runtime;
 
 namespace MCPiler.Engine.Mcp;
@@ -29,8 +30,10 @@ namespace MCPiler.Engine.Mcp;
 /// refusal reveal whether an excluded operation exists.
 /// </para>
 /// <para>
-/// A step of this pipeline reaches nowhere a direct call could not. There is one path to an
-/// upstream and it starts here.
+/// A Navigator tool branches after resolution and rejoins before validation. It is the same
+/// order with the same steps: the Navigator settles exposure for the operation a caller named
+/// instead of the surface listing settling it, and everything after that is shared code. There
+/// is one path to an upstream and it starts here.
 /// </para>
 /// </remarks>
 internal static class ToolInvocation
@@ -53,19 +56,8 @@ internal static class ToolInvocation
     internal static string UnknownTool(string name)
         => string.Create(CultureInfo.InvariantCulture, $"No tool named '{name}' is available here.");
 
-    /// <summary>The answer for an advertised tool this build cannot yet run.</summary>
-    /// <remarks>
-    /// A Navigator tool is advertised deliberately and reached through the Navigator, which
-    /// this build does not implement. Saying so discloses nothing: the tool is in the listing
-    /// the same caller just read.
-    /// </remarks>
-    internal static string NotInvocable(string name)
-        => string.Create(
-            CultureInfo.InvariantCulture,
-            $"'{name}' is advertised by this build and cannot be invoked by it.");
-
     /// <summary>Resolves, validates, executes and renders one call.</summary>
-    internal static async Task<ToolOutcome> InvokeAsync(
+    internal static Task<ToolOutcome> InvokeAsync(
         ExecutionService executions,
         MountedManifest mount,
         MountedSurface surface,
@@ -75,12 +67,18 @@ internal static class ToolInvocation
     {
         if (surface.Find(tool) is not { } advertised)
         {
-            return new ToolOutcome(UnknownTool(tool), IsError: true);
+            return Task.FromResult(new ToolOutcome(UnknownTool(tool), IsError: true));
         }
 
+        // The Navigator trio backs no operation, so there is no exposure entry to consult for
+        // it: a surface either advertises the three or it does not, and the listing the caller
+        // just read is that decision. Its own arguments are still measured first, so a page
+        // size outside the advertised bounds is refused by the contract that published them.
         if (advertised.Operation is null)
         {
-            return new ToolOutcome(NotInvocable(tool), IsError: true);
+            return Validate(advertised, arguments) is { } malformed
+                ? Task.FromResult(new ToolOutcome(malformed, IsError: true))
+                : NavigatorRuntime.InvokeAsync(executions, mount, surface, tool, arguments, cancellationToken);
         }
 
         if (!ExposureGate.Permits(mount, surface, advertised.Operation, InvocationPath.Direct))
@@ -90,11 +88,41 @@ internal static class ToolInvocation
             // the set its exposure produces is refused before anything listens. This arm is
             // therefore unreachable today and is still the authority: the listing is derived,
             // the table is authored, and when they disagree the authored one decides. The
-            // Navigator reaches this method by the other path with no listing behind it at all.
-            return new ToolOutcome(UnknownTool(tool), IsError: true);
+            // Navigator reaches the catalogue by the other path with no listing behind it.
+            return Task.FromResult(new ToolOutcome(UnknownTool(tool), IsError: true));
         }
 
-        if (Validate(advertised, arguments) is { } rejected)
+        return RunAsync(executions, mount, advertised, arguments, cancellationToken);
+    }
+
+    /// <summary>
+    /// Validates, executes and renders one already-permitted operation.
+    /// </summary>
+    /// <remarks>
+    /// The half of the pipeline both entrances share. Exposure is settled before a caller
+    /// arrives here — by the surface listing on the direct path and by the Navigator's own
+    /// resolution on the other — so that everything after it is decided once. A second
+    /// validation rule or a second shaping rule for the Navigator would be a second contract
+    /// for the same operation, and the two would diverge the first time either changed.
+    /// </remarks>
+    internal static async Task<ToolOutcome> RunAsync(
+        ExecutionService executions,
+        MountedManifest mount,
+        CatalogueTool operation,
+        JsonObject arguments,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(executions);
+        ArgumentNullException.ThrowIfNull(mount);
+        ArgumentNullException.ThrowIfNull(operation);
+        ArgumentNullException.ThrowIfNull(arguments);
+
+        if (operation.Operation is not { } slug)
+        {
+            throw new ArgumentException("A Navigator tool backs no operation and cannot be run.", nameof(operation));
+        }
+
+        if (Validate(operation, arguments) is { } rejected)
         {
             // Before anything is compiled, before a credential is read, before a socket. An
             // argument that cannot satisfy the advertised contract must not cost an upstream
@@ -104,7 +132,7 @@ internal static class ToolInvocation
 
         var result = await executions
             .ExecuteAsync(
-                new ExecutionRequest(mount.Document, advertised.Operation, arguments)
+                new ExecutionRequest(mount.Document, slug, arguments)
                 {
                     // The mount, because that is the identity a handle has to be scoped to.
                     // Two Manifests may declare the same server name, and a handle issued
