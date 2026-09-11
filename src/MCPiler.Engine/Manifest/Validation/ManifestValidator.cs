@@ -1,7 +1,9 @@
 using System.Globalization;
+using System.Text.Json.Nodes;
 
 using MCPiler.Engine.Manifest.Loading;
 using MCPiler.Engine.Manifest.Model;
+using MCPiler.Engine.Transform;
 
 namespace MCPiler.Engine.Manifest.Validation;
 
@@ -40,8 +42,119 @@ public static class ManifestValidator
         ValidateCredentialReachability(manifest, diagnostics);
         ValidateSchemaReferences(manifest, diagnostics);
         ValidateDeclaredTools(manifest, diagnostics);
+        ValidateTransformPrograms(manifest, diagnostics);
 
         return diagnostics;
+    }
+
+    /// <summary>
+    /// Every transformation program the manifest carries passes Tier-1 validation.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A program is a separately versioned document that arrives inside an artifact this
+    /// process did not author, so it is checked here rather than trusted. The refusal is
+    /// <see cref="ManifestDiagnosticCodes.TransformInvalid"/> and it carries the program
+    /// grammar's own code, because one manifest code covering twelve distinct defects would
+    /// tell an operator only that something is wrong somewhere.
+    /// </para>
+    /// <para>
+    /// The ceiling comes from the narrowed policy, which is the policy this deployment will
+    /// actually enforce. Measuring a static estimate against the manifest's unnarrowed values
+    /// would pass a program the evaluator then aborts on.
+    /// </para>
+    /// </remarks>
+    private static void ValidateTransformPrograms(ManifestDocument manifest, List<ManifestDiagnostic> diagnostics)
+    {
+        TransformCeiling declared = manifest.Policy.EffectiveTransformCeiling;
+        var ceiling = new TransformCeilingValues(
+            declared.MaxSteps,
+            declared.MaxDepth,
+            declared.MaxNodes,
+            declared.MaxOutputBytes,
+            declared.MaxArrayFanout);
+
+        for (int index = 0; index < manifest.AgentSurface.Operations.Count; index++)
+        {
+            AgentOperationEntry operation = manifest.AgentSurface.Operations[index];
+            IReadOnlySet<string> files = ExclusionValidation.FileArguments(operation.InputSchema?.Object);
+            string binding = JsonPointer.Build("operations", Segment(index), "binding");
+
+            foreach ((string member, JsonObject program) in ProgramsOf(operation.Binding))
+            {
+                foreach (TransformFinding finding in TransformValidation.Validate(program, ceiling, files))
+                {
+                    diagnostics.Add(new ManifestDiagnostic(
+                        ManifestDiagnosticCodes.TransformInvalid,
+                        DiagnosticSeverity.Error,
+                        Located(finding),
+                        ManifestSectionName.AgentSurface,
+                        binding + member + finding.Pointer)
+                    {
+                        ProgramCode = finding.Code,
+                    });
+                }
+            }
+        }
+    }
+
+    /// <summary>Prefixes the step index onto a program finding's message.</summary>
+    /// <remarks>
+    /// The index is what every criterion asks a refusal to name and what the author counts in.
+    /// It is stated rather than left to be read out of the pointer, because the pointer locates
+    /// the offending member and those are not always the same depth.
+    /// </remarks>
+    private static string Located(TransformFinding finding)
+        => finding.Step is { } step
+            ? string.Create(CultureInfo.InvariantCulture, $"Step {step}: {finding.Message}")
+            : finding.Message;
+
+    /// <summary>
+    /// Every transformation program a binding carries, with the pointer from the binding to it.
+    /// </summary>
+    /// <remarks>
+    /// The pointer is assembled token by token rather than written as one string with slashes
+    /// in it. A slash inside a reference token is escaped, so a path written as text arrives as
+    /// a single member name nobody declared and the diagnostic points nowhere.
+    /// </remarks>
+    private static IEnumerable<(string Pointer, JsonObject Program)> ProgramsOf(ManifestBinding binding)
+    {
+        switch (binding)
+        {
+            case TransformedHttpBinding transformed:
+                if (transformed.InputProgram is { } input)
+                {
+                    yield return (JsonPointer.Build("inputProgram"), input);
+                }
+
+                if (transformed.OutputProgram is { } output)
+                {
+                    yield return (JsonPointer.Build("outputProgram"), output);
+                }
+
+                break;
+
+            case CompoundBinding compound:
+                for (int index = 0; index < compound.Steps.Count; index++)
+                {
+                    if (compound.Steps[index].InputProgram is { } step)
+                    {
+                        yield return (
+                            JsonPointer.Build("steps", Segment(index), "inputProgram"),
+                            step);
+                    }
+                }
+
+                if (compound.OutputSelection?.OutputProgram is { } selection)
+                {
+                    yield return (JsonPointer.Build("outputSelection", "outputProgram"), selection);
+                }
+
+                break;
+
+            default:
+                break;
+        }
     }
 
     /// <summary>

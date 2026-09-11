@@ -30,6 +30,17 @@ public sealed record StartupRefusal(string Mount, string Code, string Message)
     /// <summary>The section the refusal belongs to.</summary>
     public string? Section { get; init; }
 
+    /// <summary>
+    /// The reason code from a nested grammar carried inside the Manifest, when there is one.
+    /// </summary>
+    /// <remarks>
+    /// A transformation program states its own reasons, and one Manifest code covers every way
+    /// a program can be wrong. Dropping the inner code at this seam would leave an operator
+    /// told that a program is invalid and nothing else, which is the diagnostic the format
+    /// exists to avoid.
+    /// </remarks>
+    public string? ProgramCode { get; init; }
+
     /// <summary>The configuration name at fault.</summary>
     public string? Setting { get; init; }
 

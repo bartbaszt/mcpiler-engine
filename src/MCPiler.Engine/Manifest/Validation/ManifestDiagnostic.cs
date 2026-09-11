@@ -42,6 +42,18 @@ public sealed record ManifestDiagnostic(
     string? Section = null,
     string? Pointer = null)
 {
+    /// <summary>
+    /// The reason code from a nested grammar's own vocabulary, or <c>null</c> when the finding
+    /// belongs entirely to the manifest format.
+    /// </summary>
+    /// <remarks>
+    /// A transformation program is a separately versioned contract carried inside a manifest,
+    /// and it states its own reasons. Without this, every way a program can be wrong would
+    /// arrive as one manifest code and the specific, machine-readable reason the format
+    /// promises would exist only in the message - which this record says is not contractual.
+    /// </remarks>
+    public string? ProgramCode { get; init; }
+
     /// <summary>True when this finding blocks loading.</summary>
     public bool IsError => Severity == DiagnosticSeverity.Error;
 
@@ -72,9 +84,13 @@ public sealed record ManifestDiagnostic(
             ({ } section, { } pointer) => string.Create(CultureInfo.InvariantCulture, $"{section}{pointer}"),
         };
 
+        var code = ProgramCode is null
+            ? Code
+            : string.Create(CultureInfo.InvariantCulture, $"{Code} ({ProgramCode})");
+
         return string.Create(
             CultureInfo.InvariantCulture,
-            $"{Severity.ToString().ToLowerInvariant()} {Code} at {location}: {Message}");
+            $"{Severity.ToString().ToLowerInvariant()} {code} at {location}: {Message}");
     }
 }
 

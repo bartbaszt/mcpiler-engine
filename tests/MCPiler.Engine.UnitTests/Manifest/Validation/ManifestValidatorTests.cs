@@ -136,6 +136,149 @@ public sealed class ManifestValidatorTests
     /// exactly how a transformation once presented a file-free key while executing a binary
     /// upload. Resolution here uses the same accessor execution will use.
     /// </remarks>
+    /// <summary>
+    /// A transformation program the manifest carries is validated, not carried unread.
+    /// </summary>
+    /// <remarks>
+    /// The manifest code is one code for every way a program can be wrong, so the finding also
+    /// carries the program grammar's own reason. Without that an operator would be told a
+    /// program is invalid and nothing else, and the format promises a specific machine-readable
+    /// reason rather than a category.
+    /// </remarks>
+    [Fact]
+    public void An_invalid_transformation_program_refuses_the_manifest()
+    {
+        ManifestDocument manifest = Build(
+            agentSurface: new AgentSurfaceSection(
+            [
+                Agent("list-pets", new TransformedHttpBinding(
+                    new HttpBinding("GET /pets"),
+                    InputProgram: Program(new JsonObject { ["op"] = "eval" }))),
+            ]));
+
+        ManifestDiagnostic finding = Assert.Single(ManifestValidator.Validate(manifest));
+
+        Assert.Equal(ManifestDiagnosticCodes.TransformInvalid, finding.Code);
+        Assert.Equal("E_UNKNOWN_OPERATION", finding.ProgramCode);
+        Assert.Equal(DiagnosticSeverity.Error, finding.Severity);
+        Assert.Equal(ManifestSectionName.AgentSurface, finding.Section);
+        Assert.Equal("/operations/0/binding/inputProgram/steps/0/op", finding.Pointer);
+        Assert.StartsWith("Step 0:", finding.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_valid_transformation_program_is_accepted()
+    {
+        ManifestDocument manifest = Build(
+            agentSurface: new AgentSurfaceSection(
+            [
+                Agent("list-pets", new TransformedHttpBinding(
+                    new HttpBinding("GET /pets"),
+                    InputProgram: Program(new JsonObject
+                    {
+                        ["op"] = "copy",
+                        ["source"] = "/state",
+                        ["target"] = "/query/status",
+                        ["onMissing"] = "skip",
+                    }))),
+            ]));
+
+        Assert.Empty(ManifestValidator.Validate(manifest));
+    }
+
+    /// <summary>
+    /// The static estimate is measured against the policy this deployment enforces.
+    /// </summary>
+    /// <remarks>
+    /// The program's own bounds are inside the format's defaults, so nothing about the program
+    /// alone refuses it. A narrower policy is what makes it unservable, and discovering that at
+    /// load is the difference between a deployment error and an intermittent tool fault.
+    /// </remarks>
+    [Fact]
+    public void The_policy_ceiling_governs_the_static_estimate()
+    {
+        var iteration = new JsonObject
+        {
+            ["op"] = "mapArray",
+            ["source"] = "/rows",
+            ["target"] = "/body/rows",
+            ["maxItems"] = 32,
+            ["onMissing"] = "skip",
+            ["steps"] = new JsonArray(new JsonObject
+            {
+                ["op"] = "copy",
+                ["source"] = "/raw",
+                ["target"] = "/value",
+                ["onMissing"] = "skip",
+            }),
+        };
+
+        AgentSurfaceSection surface = new(
+        [
+            Agent("list-pets", new TransformedHttpBinding(
+                new HttpBinding("GET /pets"),
+                InputProgram: Program(iteration))),
+        ]);
+
+        Assert.Empty(ManifestValidator.Validate(Build(agentSurface: surface)));
+
+        var narrow = new PolicySection(
+            new Uri("https://api.example.com/v1"),
+            TransformCeiling: new TransformCeiling(
+                MaxSteps: 8,
+                MaxDepth: 32,
+                MaxNodes: 8192,
+                MaxOutputBytes: 256L * 1024,
+                MaxArrayFanout: 1024));
+
+        ManifestDiagnostic finding = Assert.Single(
+            ManifestValidator.Validate(Build(policy: narrow, agentSurface: surface)));
+
+        Assert.Equal("E_STEP_LIMIT", finding.ProgramCode);
+    }
+
+    [Fact]
+    public void A_compound_step_program_is_validated_too()
+    {
+        ManifestDocument manifest = Build(
+            agentSurface: new AgentSurfaceSection(
+            [
+                Agent("fetch", new HttpBinding("GET /pets")),
+                Agent("list-pets", new CompoundBinding(
+                [
+                    new CompoundStepEntry(
+                        "one",
+                        "fetch",
+                        InputProgram: Program(new JsonObject { ["op"] = "eval" })),
+                ])),
+            ]));
+
+        ManifestDiagnostic finding = Assert.Single(
+            ManifestValidator.Validate(manifest),
+            static diagnostic => diagnostic.Code == ManifestDiagnosticCodes.TransformInvalid);
+
+        Assert.Equal("E_UNKNOWN_OPERATION", finding.ProgramCode);
+        Assert.Equal("/operations/1/binding/steps/0/inputProgram/steps/0/op", finding.Pointer);
+    }
+
+    /// <summary>A well-formed input-direction envelope wrapping one step.</summary>
+    private static JsonObject Program(JsonObject step)
+        => new()
+        {
+            ["transformVersion"] = 1,
+            ["direction"] = "input",
+            ["base"] = "passthrough",
+            ["limits"] = new JsonObject
+            {
+                ["maxSteps"] = 64,
+                ["maxDepth"] = 32,
+                ["maxNodes"] = 8192,
+                ["maxOutputBytes"] = 262144,
+                ["maxArrayFanout"] = 1024,
+            },
+            ["steps"] = new JsonArray(step),
+        };
+
     [Fact]
     public void A_transformed_binding_is_checked_through_its_base_key()
     {

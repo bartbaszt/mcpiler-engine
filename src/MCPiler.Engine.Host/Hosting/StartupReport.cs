@@ -102,7 +102,14 @@ public static class StartupReport
             line.Append(' ').Append(refusal.Mount);
         }
 
-        line.Append(' ').Append('[').Append(refusal.Code).Append(']').Append(' ').Append(refusal.Message);
+        line.Append(' ').Append('[').Append(refusal.Code);
+
+        if (refusal.ProgramCode is { } program)
+        {
+            line.Append(' ').Append(program);
+        }
+
+        line.Append(']').Append(' ').Append(refusal.Message);
 
         if (refusal.Manifest is { } manifest)
         {

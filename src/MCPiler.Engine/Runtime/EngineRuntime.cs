@@ -365,5 +365,6 @@ public static class EngineRuntime
         {
             Manifest = request.Path,
             Section = diagnostic.Section,
+            ProgramCode = diagnostic.ProgramCode,
         };
 }

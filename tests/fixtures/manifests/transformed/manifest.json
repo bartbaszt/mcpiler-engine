@@ -80,9 +80,9 @@
             "summary": "Searches the index and returns titles with links",
             "inputSchema": {
               "type": "object",
-              "required": ["query"],
+              "required": ["term"],
               "properties": {
-                "query": { "type": "string" },
+                "term": { "type": "string" },
                 "limit": { "type": "integer" }
               }
             },
@@ -113,27 +113,42 @@
                 "transformVersion": 1,
                 "direction": "input",
                 "base": "empty",
+                "limits": {
+                  "maxSteps": 32,
+                  "maxDepth": 16,
+                  "maxNodes": 4096,
+                  "maxOutputBytes": 131072,
+                  "maxArrayFanout": 256
+                },
                 "steps": [
-                  { "op": "copy", "from": "/query", "to": "/query/q" },
-                  { "op": "copy", "from": "/limit", "to": "/query/page_size", "onMissing": "skip" },
-                  { "op": "setConstant", "to": "/headers/X-Api-Version", "value": "2" }
+                  { "op": "copy", "source": "/term", "target": "/query/q" },
+                  { "op": "copy", "source": "/limit", "target": "/query/page_size", "onMissing": "skip" },
+                  { "op": "setConstant", "target": "/headers/X-Api-Version", "value": "2" }
                 ]
               },
               "outputProgram": {
                 "transformVersion": 1,
                 "direction": "output",
                 "base": "empty",
+                "limits": {
+                  "maxSteps": 32,
+                  "maxDepth": 16,
+                  "maxNodes": 4096,
+                  "maxOutputBytes": 131072,
+                  "maxArrayFanout": 256
+                },
                 "steps": [
                   {
                     "op": "mapArray",
-                    "from": "/body/hits",
-                    "to": "/results",
-                    "item": [
-                      { "op": "copy", "from": "/title", "to": "/title" },
-                      { "op": "copy", "from": "/url", "to": "/link" }
+                    "source": "/body/hits",
+                    "target": "/results",
+                    "maxItems": 10,
+                    "steps": [
+                      { "op": "copy", "source": "/title", "target": "/title" },
+                      { "op": "copy", "source": "/url", "target": "/link" }
                     ]
                   },
-                  { "op": "copy", "from": "/body/meta/total", "to": "/total", "onMissing": "skip" }
+                  { "op": "copy", "source": "/body/meta/total", "target": "/total", "onMissing": "skip" }
                 ]
               }
             }

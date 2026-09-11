@@ -350,6 +350,65 @@ Bindings:
   over other operations in this manifest. A step names another operation's slug.
   Nesting is refused. A step may read a previous step's response, never its own.
 
+### Transformation programs
+
+A transformation program is a separate versioned contract carried inside a
+manifest. It states its own reasons, so a program that is refused produces the
+manifest code `binding/transform-invalid` together with the program's own code.
+One manifest code covers every way a program can be wrong; the program code is
+what says which.
+
+The envelope is exactly `transformVersion`, `direction` (`input` or `output`),
+`base` (`passthrough` or `empty`), `limits` and `steps`. `limits` is required and
+carries `maxSteps`, `maxDepth`, `maxNodes`, `maxOutputBytes` and
+`maxArrayFanout`, each a positive integer. A program declaring no bound is
+refused. Where a program's bound and `policy.transformCeiling` disagree the
+smaller governs; a program declaring more than the ceiling allows is clamped, not
+refused, because choosing the values and enforcing an administrator ceiling
+belong to whoever produced the artifact.
+
+A step is a flat object carrying exactly one `op` from a closed vocabulary of
+nineteen: `copy`, `move`, `omit`, `pick`, `nest`, `flatten`, `flattenArray`,
+`merge`, `setConstant`, `default`, `convert`, `template`, `coalesce`, `enumMap`,
+`mapArray`, `mapObject`, `limitArray`, `when`, `fileRef`. The vocabulary grows
+only under a new `transformVersion`; there is no configuration key, host
+registration or plug-in that adds to it. Every location a step reads or writes is
+declared as an RFC 6901 pointer parameter, named `source` and `target`; a step
+never computes its own location. `mapArray` requires `maxItems` and `mapObject`
+requires `maxEntries`.
+
+Inside `mapArray` and `mapObject` the nested steps address the iterated item as
+their document root. An item has no request parts, so a pointer rooted at a part
+selector is refused there.
+
+A `when` condition is a closed predicate object over `exists`, `eq`, `neq`, `in`,
+`gt`, `lt`, `gte`, `lte`, `and`, `or` and `not`, never a string. `template`
+patterns admit literal text and named `{placeholder}` tokens bound to declared
+pointer arguments, and nothing else. A literal shaped like a file handle, a
+`convert` addressing a file argument, and any write to `/headers/content-type`
+are all refused: handles move only through `fileRef`, and the content type and
+any multipart boundary are produced by request compilation.
+
+Program codes:
+
+| code | meaning |
+|---|---|
+| `E_UNSUPPORTED_TRANSFORM_VERSION` | A `transformVersion` this build does not implement. Checked before anything else is read. |
+| `E_UNKNOWN_FIELD` | A member outside the envelope, the step, the predicate or the argument it appears in. |
+| `E_UNKNOWN_OPERATION` | An `op` outside the closed vocabulary. |
+| `E_MISSING_BOUND` | A required bound is absent or not a positive integer. |
+| `E_POINTER_SYNTAX` | A pointer is not a valid RFC 6901 JSON Pointer. |
+| `E_POINTER_ROOT` | A pointer is rooted outside the set permitted for its direction and position. |
+| `E_TEMPLATE_PATTERN` | A pattern carries something other than literal text and bound placeholders. |
+| `E_STEP_LIMIT` | The static worst-case step count exceeds the effective limit. |
+| `E_STATIC_DEPTH` | The static worst-case nesting depth exceeds the effective limit. |
+| `E_STATIC_FANOUT` | The static worst-case array fan-out exceeds the effective limit. |
+| `E_FILE_HANDLE` | A program constructs a file handle or coerces a file argument. |
+| `E_CONTENT_TYPE_RESERVED` | A program writes the content type. |
+
+Shape inference and dry-run evidence are the producer's. A manifest carrying
+neither is complete; their absence is not a defect in the artifact.
+
 **`credentialRef` lives on the request, not on the manifest.** It appears on an
 `http` binding and inside a `transformedHttp` binding's `base`, and nowhere else:
 on a transformed wrapper or on a compound binding it is an unknown member and the

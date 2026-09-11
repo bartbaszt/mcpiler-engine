@@ -143,6 +143,7 @@ public sealed class RuntimeBoundaryTests
         "MCPiler.Engine.Manifest.Canonical",
         "MCPiler.Engine.Manifest.Sealing",
         "MCPiler.Engine.Search.Hybrid",
+        "MCPiler.Engine.Transform",
     ];
 
     [Fact]
@@ -237,6 +238,7 @@ public sealed class RuntimeBoundaryTests
     [InlineData("// see MCPiler.Engine.Manifest.Validation.ManifestValidator")]
     [InlineData("private readonly MCPiler.Engine.Manifest.Search.LexicalRanker _ranker;")]
     [InlineData("using MCPiler.Engine.Manifest.Derivation;")]
+    [InlineData("var findings = MCPiler.Engine.Transform.TransformValidation.Validate(program, ceiling, files);")]
     public void The_containment_assertion_catches_manifest_knowledge_inside_an_adapter(string driver)
     {
         var caught = ProductNamespaces.Any(space => driver.Contains(space, StringComparison.Ordinal));
