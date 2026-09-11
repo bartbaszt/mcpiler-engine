@@ -1,4 +1,6 @@
+using System.Globalization;
 using System.IO;
+using Xunit;
 
 namespace MCPiler.Engine.IntegrationTests.Mcp;
 
@@ -365,6 +367,16 @@ internal static class ServedManifests
             }
             """;
 
+    /// <summary>The operation slugs the derived lexical index carries, in its order.</summary>
+    /// <remarks>
+    /// Ordinal by slug, and every agent operation is here including the ones no surface
+    /// exposes: the index documents what the Manifest describes, and a surface decides what
+    /// it shows at the moment it is asked. A vector matrix has to line up with this list, not
+    /// with any surface's.
+    /// </remarks>
+    public static IReadOnlyList<string> IndexedOperations { get; } =
+        ["get-pet", "hidden-pet", "list-pets", "quiet-pet"];
+
     /// <summary>Writes <paramref name="manifest"/> into a fresh bundle directory.</summary>
     public static string Write(string root, string name, string manifest)
     {
@@ -372,5 +384,42 @@ internal static class ServedManifests
         Directory.CreateDirectory(directory);
         File.WriteAllText(Path.Combine(directory, "manifest.json"), manifest);
         return directory;
+    }
+
+    /// <summary>Writes the bundle with an external <c>vectors</c> section carrying these bytes.</summary>
+    /// <param name="dimension">
+    /// The dimension the section index declares, which is a second statement of what the
+    /// matrix header says. Omitted when the test is about the header alone.
+    /// </param>
+    public static string Write(string root, string name, string manifest, byte[] vectors, int? dimension = null)
+    {
+        ArgumentNullException.ThrowIfNull(manifest);
+        ArgumentNullException.ThrowIfNull(vectors);
+
+        const string Anchor = "\"sections\": {";
+        string declared = dimension is { } value
+            ? string.Create(CultureInfo.InvariantCulture, $"\"vectors\": {{ \"path\": \"{PayloadFile}\", \"dimension\": {value} }},")
+            : $"\"vectors\": {{ \"path\": \"{PayloadFile}\" }},";
+
+        Assert.Equal(1, Occurrences(manifest, Anchor));
+
+        string directory = Write(root, name, manifest.Replace(Anchor, Anchor + "\n" + declared, StringComparison.Ordinal));
+        File.WriteAllBytes(Path.Combine(directory, PayloadFile), vectors);
+        return directory;
+    }
+
+    private const string PayloadFile = "vectors.bin";
+
+    private static int Occurrences(string text, string value)
+    {
+        int found = 0;
+
+        for (int index = text.IndexOf(value, StringComparison.Ordinal); index >= 0;
+             index = text.IndexOf(value, index + value.Length, StringComparison.Ordinal))
+        {
+            found++;
+        }
+
+        return found;
     }
 }

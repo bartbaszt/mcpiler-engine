@@ -352,6 +352,18 @@ public static class ManifestDiagnosticCodes
     /// <summary>Warning: the vector matrix dimension does not match the query model.</summary>
     public const string VectorsDimensionMismatch = "vectors/dimension-mismatch";
 
+    /// <summary>
+    /// Warning: the vector matrix describes operations other than the ones being served.
+    /// Ranking degrades to lexical.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="VectorsUnreadable"/> and <see cref="VectorsDimensionMismatch"/>
+    /// because it sends an operator somewhere else. The bytes parse and the shape is right;
+    /// what is wrong is that the matrix was compiled from a different operation set, which is
+    /// fixed by re-exporting the bundle rather than by re-embedding at another dimension.
+    /// </remarks>
+    public const string VectorsOperationMismatch = "vectors/operation-mismatch";
+
     // The archive group describes the transport container, never the manifest document inside
     // it. Keeping it separate means an operator reading an archive code knows immediately that
     // the bundle never got as far as being parsed as a manifest.
@@ -455,6 +467,7 @@ public static class ManifestDiagnosticCodes
         SearchBuilderVersionUnsupported,
         VectorsUnreadable,
         VectorsDimensionMismatch,
+        VectorsOperationMismatch,
         ArchiveUnreadable,
         ArchiveEntryTypeUnsupported,
         ArchiveEntryPathUnsafe,
@@ -467,8 +480,8 @@ public static class ManifestDiagnosticCodes
     /// The codes that are always reported as warnings and therefore never block loading.
     /// </summary>
     /// <remarks>
-    /// These are the two deliberately degrading paths plus the informational findings. Every
-    /// other code fails closed.
+    /// These are the deliberately degrading paths plus the informational findings. Every other
+    /// code fails closed.
     /// </remarks>
     public static IReadOnlySet<string> AlwaysWarning { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -480,6 +493,7 @@ public static class ManifestDiagnosticCodes
         SearchBuilderVersionUnsupported,
         VectorsUnreadable,
         VectorsDimensionMismatch,
+        VectorsOperationMismatch,
     };
 
     /// <summary>The group prefixes the code shape permits.</summary>

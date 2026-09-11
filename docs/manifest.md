@@ -496,7 +496,7 @@ contents of an environment variable.
 The following codes are always warnings; every other code is an error:
 `manifest/unsealed`, `operations/no-responses-declared`, `surface/no-operations`,
 `credential/inline-discouraged`, `credential/unreferenced`,
-`vectors/unreadable`, `vectors/dimension-mismatch`,
+`vectors/unreadable`, `vectors/dimension-mismatch`, `vectors/operation-mismatch`,
 `search/builder-version-unsupported`.
 
 ### `manifest` — document and packaging
@@ -627,10 +627,15 @@ The following codes are always warnings; every other code is an error:
 
 ### `vectors` — semantic ranking
 
+A Manifest that declares no `vectors` section reports nothing: ranking is lexical, and that
+is a supported configuration rather than a defect. The codes below mean a payload was
+supplied and cannot be used. In every one of them ranking stays lexical and the mount starts.
+
 | Code | Meaning |
 |---|---|
-| `vectors/unreadable` | The payload is absent or not a valid matrix; ranking is lexical. |
-| `vectors/dimension-mismatch` | The declared dimension disagrees with the payload. |
+| `vectors/unreadable` | The payload is not a matrix this Engine can parse. |
+| `vectors/dimension-mismatch` | The declared shape disagrees with the payload's length, or with the section index. |
+| `vectors/operation-mismatch` | The matrix describes operations other than the ones being served. |
 
 ### `archive` — the transport archive
 

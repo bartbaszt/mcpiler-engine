@@ -142,6 +142,7 @@ public sealed class RuntimeBoundaryTests
         "MCPiler.Engine.Manifest.Loading",
         "MCPiler.Engine.Manifest.Canonical",
         "MCPiler.Engine.Manifest.Sealing",
+        "MCPiler.Engine.Search.Hybrid",
     ];
 
     [Fact]
