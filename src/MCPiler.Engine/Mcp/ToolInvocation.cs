@@ -21,11 +21,12 @@ namespace MCPiler.Engine.Mcp;
 /// rendered answer, which is what keeps two transports from disagreeing about any of it.
 /// </para>
 /// <para>
-/// Order is the substance. Resolution before validation, validation before execution, and
-/// nothing reaches an upstream that has not passed both. Validating after compilation would
-/// mean an argument the advertised schema forbids could still have been serialized, and
+/// Order is the substance. Resolution, then exposure, then validation, then execution, and
+/// nothing reaches an upstream that has not passed all three. Validating after compilation
+/// would mean an argument the advertised schema forbids could still have been serialized;
 /// resolving after validating would mean a name the surface does not advertise could be
-/// measured against a schema.
+/// measured against a schema; and checking exposure after validating would let the shape of a
+/// refusal reveal whether an excluded operation exists.
 /// </para>
 /// <para>
 /// A step of this pipeline reaches nowhere a direct call could not. There is one path to an
@@ -80,6 +81,17 @@ internal static class ToolInvocation
         if (advertised.Operation is null)
         {
             return new ToolOutcome(NotInvocable(tool), IsError: true);
+        }
+
+        if (!ExposureGate.Permits(mount, surface, advertised.Operation, InvocationPath.Direct))
+        {
+            // The advertised listing said yes and the exposure table said no. On a started
+            // mount the two agree, because a Manifest whose declared tool set disagrees with
+            // the set its exposure produces is refused before anything listens. This arm is
+            // therefore unreachable today and is still the authority: the listing is derived,
+            // the table is authored, and when they disagree the authored one decides. The
+            // Navigator reaches this method by the other path with no listing behind it at all.
+            return new ToolOutcome(UnknownTool(tool), IsError: true);
         }
 
         if (Validate(advertised, arguments) is { } rejected)

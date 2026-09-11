@@ -143,6 +143,78 @@ public sealed class ToolsCallTests : IDisposable
     }
 
     [Fact]
+    public async Task An_operation_excluded_from_one_surface_still_runs_on_another()
+    {
+        List<string> received = [];
+
+        await using var upstream = await Recording(received, 200, "application/json", """{"id":"p-7"}""");
+        await using var engine = await ServeAsync(upstream.Address);
+
+        using var excluded = await McpHttpSession.OpenAsync(engine.At("api/read"), Token);
+        var refused = await excluded.CallAsync("get-pet", """{"petId":"p-7"}""", 2, Token);
+
+        Assert.Contains("\"isError\":true", refused.Payload, StringComparison.Ordinal);
+        Assert.Equal("No tool named 'get-pet' is available here.", Text(refused));
+        Assert.Empty(received);
+
+        // The same operation, the same Manifest, the same process. Exclusion is a property of
+        // the surface a call was addressed to, not of the operation.
+        using var serving = await McpHttpSession.OpenAsync(engine.At("api/full"), Token);
+        var served = await serving.CallAsync("get-pet", """{"petId":"p-7"}""", 2, Token);
+
+        Assert.DoesNotContain("\"isError\"", served.Payload, StringComparison.Ordinal);
+        Assert.Equal(["GET /pets/p-7"], received);
+    }
+
+    [Fact]
+    public async Task An_operation_exposed_only_to_the_navigator_is_unlisted_and_refused_directly()
+    {
+        List<string> received = [];
+
+        await using var upstream = await Recording(received, 200, "application/json", "[]");
+        await using var engine = await ServeAsync(upstream.Address);
+        using var session = await McpHttpSession.OpenAsync(engine.At("api/full"), Token);
+
+        var listed = await session.RequestAsync("tools/list", 2, Token);
+
+        // Both halves, because "absent from the listing" is worth nothing as an assertion
+        // against a listing that failed or came back empty.
+        Assert.Contains("list-pets", listed.Payload, StringComparison.Ordinal);
+        Assert.DoesNotContain("quiet-pet", listed.Payload, StringComparison.Ordinal);
+
+        // Named anyway, which is the whole point: a caller can send a name it never read.
+        var call = await session.CallAsync("quiet-pet", "{}", 3, Token);
+
+        Assert.Contains("\"isError\":true", call.Payload, StringComparison.Ordinal);
+        Assert.Equal("No tool named 'quiet-pet' is available here.", Text(call));
+        Assert.Empty(received);
+    }
+
+    [Fact]
+    public async Task An_excluded_operation_and_an_invented_one_are_refused_identically()
+    {
+        List<string> received = [];
+
+        await using var upstream = await Recording(received, 200, "application/json", "[]");
+        await using var engine = await ServeAsync(upstream.Address);
+        using var session = await McpHttpSession.OpenAsync(engine.At("api/read"), Token);
+
+        // 'get-pet' exists, is bound, and runs on the neighbouring surface. 'get-pet-x' is
+        // nothing at all. A caller able to tell the two answers apart has an oracle for the
+        // catalogue the surface is hiding.
+        var excluded = await session.CallAsync("get-pet", "{}", 2, Token);
+        var invented = await session.CallAsync("get-pet-x", "{}", 3, Token);
+
+        Assert.Equal(
+            excluded.Payload.Replace("\"id\":2", "\"id\":ID", StringComparison.Ordinal),
+            invented.Payload
+                .Replace("\"id\":3", "\"id\":ID", StringComparison.Ordinal)
+                .Replace("get-pet-x", "get-pet", StringComparison.Ordinal));
+
+        Assert.Empty(received);
+    }
+
+    [Fact]
     public async Task An_unsuccessful_upstream_status_is_not_a_tool_error()
     {
         List<string> received = [];
