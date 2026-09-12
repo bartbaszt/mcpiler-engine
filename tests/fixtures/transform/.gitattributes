@@ -1,0 +1,4 @@
+# This corpus is duplicated byte for byte into the MCPiler Platform tree, where a test asserts
+# the two copies are identical. End-of-line normalization on either side would make that test
+# fail on a fresh checkout and pass in a working tree that happened to be written by a tool.
+* -text

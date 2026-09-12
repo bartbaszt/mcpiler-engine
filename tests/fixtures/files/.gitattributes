@@ -1,0 +1,4 @@
+# This corpus is duplicated byte for byte into the MCPiler Platform tree, where a test asserts
+# the two copies are identical. Without this the Platform copy stays LF, the Engine copy becomes
+# CRLF on checkout, and the assertion fails on a clone while passing here.
+* -text
