@@ -31,15 +31,20 @@ namespace MCPiler.Engine.Host.Mcp;
 internal static class SdkTranslation
 {
     /// <summary>Maps one catalogue tool onto its protocol definition.</summary>
-    public static Tool Define(CatalogueTool tool)
+    public static Tool Define(CatalogueTool tool, string? negotiatedProtocolRevision)
     {
         ArgumentNullException.ThrowIfNull(tool);
+
+        string? outputSchema = tool.ResolveOutputSchemaJson(negotiatedProtocolRevision);
 
         return new Tool
         {
             Name = tool.Name,
             Description = tool.Description,
-            InputSchema = JsonDocument.Parse(tool.InputSchemaJson).RootElement.Clone(),
+            InputSchema = JsonSerializer.Deserialize<JsonElement>(tool.InputSchemaJson),
+            OutputSchema = outputSchema is null
+                ? null
+                : JsonSerializer.Deserialize<JsonElement>(outputSchema),
             Annotations = new ToolAnnotations
             {
                 Title = tool.Title,
@@ -52,7 +57,9 @@ internal static class SdkTranslation
     }
 
     /// <summary>Maps every tool of one surface, preserving advertisement order.</summary>
-    public static IReadOnlyList<Tool> Define(MountedSurface surface)
+    public static IReadOnlyList<Tool> Define(
+        MountedSurface surface,
+        string? negotiatedProtocolRevision)
     {
         ArgumentNullException.ThrowIfNull(surface);
 
@@ -60,7 +67,7 @@ internal static class SdkTranslation
 
         foreach (CatalogueTool tool in surface.Tools)
         {
-            definitions.Add(Define(tool));
+            definitions.Add(Define(tool, negotiatedProtocolRevision));
         }
 
         return definitions;

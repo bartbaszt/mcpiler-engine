@@ -63,6 +63,7 @@ internal static class ToolInvocation
         MountedSurface surface,
         string tool,
         JsonObject arguments,
+        string? negotiatedProtocolRevision,
         CancellationToken cancellationToken)
     {
         if (surface.Find(tool) is not { } advertised)
@@ -78,7 +79,14 @@ internal static class ToolInvocation
         {
             return Validate(advertised, arguments) is { } malformed
                 ? Task.FromResult(new ToolOutcome(malformed, IsError: true))
-                : NavigatorRuntime.InvokeAsync(executions, mount, surface, tool, arguments, cancellationToken);
+                : NavigatorRuntime.InvokeAsync(
+                    executions,
+                    mount,
+                    surface,
+                    tool,
+                    arguments,
+                    negotiatedProtocolRevision,
+                    cancellationToken);
         }
 
         if (!ExposureGate.Permits(mount, surface, advertised.Operation, InvocationPath.Direct))
@@ -92,7 +100,14 @@ internal static class ToolInvocation
             return Task.FromResult(new ToolOutcome(UnknownTool(tool), IsError: true));
         }
 
-        return RunAsync(executions, mount, advertised, arguments, cancellationToken);
+        return RunAsync(
+            executions,
+            mount,
+            surface,
+            advertised,
+            arguments,
+            negotiatedProtocolRevision,
+            cancellationToken);
     }
 
     /// <summary>
@@ -108,12 +123,15 @@ internal static class ToolInvocation
     internal static async Task<ToolOutcome> RunAsync(
         ExecutionService executions,
         MountedManifest mount,
+        MountedSurface surface,
         CatalogueTool operation,
         JsonObject arguments,
+        string? negotiatedProtocolRevision,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(executions);
         ArgumentNullException.ThrowIfNull(mount);
+        ArgumentNullException.ThrowIfNull(surface);
         ArgumentNullException.ThrowIfNull(operation);
         ArgumentNullException.ThrowIfNull(arguments);
 
@@ -142,7 +160,7 @@ internal static class ToolInvocation
                 cancellationToken)
             .ConfigureAwait(false);
 
-        return Shape(result);
+        return Shape(result, mount, surface, operation, negotiatedProtocolRevision);
     }
 
     /// <summary>
@@ -184,6 +202,65 @@ internal static class ToolInvocation
         return new ToolOutcome(
             result.ResponseBody is null ? NoBody : Encoding.UTF8.GetString(result.ResponseBody),
             IsError: false);
+    }
+
+    /// <summary>
+    /// Adds structured content only when this session was advertised a schema and the payload
+    /// satisfies that exact schema.
+    /// </summary>
+    private static ToolOutcome Shape(
+        EngineExecutionResult result,
+        MountedManifest mount,
+        MountedSurface surface,
+        CatalogueTool operation,
+        string? negotiatedProtocolRevision)
+    {
+        ToolOutcome plain = Shape(result);
+
+        if (plain.IsError
+            || result.ResponseBody is null
+            || result.ResponseFile is not null
+            || operation.ResolveOutputSchemaJson(negotiatedProtocolRevision) is not { } advertisedSchema
+            || !AdvertisementResolver.ProtocolDefinesStructuredContent(negotiatedProtocolRevision))
+        {
+            return plain;
+        }
+
+        JsonDocument payload;
+
+        try
+        {
+            payload = JsonDocument.Parse(result.ResponseBody);
+        }
+        catch (JsonException)
+        {
+            // There is no structured JSON value to advertise. The text carrier remains intact.
+            return plain;
+        }
+
+        using (payload)
+        {
+            JsonElement structured = OutputSchemaEnvelope.Mirror(
+                payload.RootElement,
+                operation.OutputSchemaWrapped);
+            string? schemaLocation = StructuredContentValidator.Validate(structured, advertisedSchema);
+
+            if (schemaLocation is null)
+            {
+                return plain with { StructuredContentJson = structured.GetRawText() };
+            }
+
+            return plain with
+            {
+                Diagnostic = new RuntimeDiagnostic(
+                    StructuredContentValidator.DiagnosticCode,
+                    StructuredContentValidator.DiagnosticMessage,
+                    mount.Path,
+                    surface.Slug,
+                    operation.Operation!,
+                    schemaLocation),
+            };
+        }
     }
 
     /// <summary>

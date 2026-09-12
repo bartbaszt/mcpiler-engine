@@ -43,6 +43,7 @@ internal static class ToolBridge
                 addressed.Surface,
                 request.Params?.Name ?? string.Empty,
                 Arguments(request.Params?.Arguments),
+                request.Server?.NegotiatedProtocolVersion,
                 cancellationToken)
             .ConfigureAwait(false);
 
@@ -52,6 +53,9 @@ internal static class ToolBridge
             // omitting it mean the same thing to a client, and the Studio omits it.
             IsError = outcome.IsError ? true : null,
             Content = [new TextContentBlock { Text = outcome.Text }],
+            StructuredContent = outcome.StructuredContentJson is { } structured
+                ? JsonSerializer.Deserialize<JsonElement>(structured)
+                : null,
         };
     }
 

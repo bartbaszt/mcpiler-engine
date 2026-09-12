@@ -11,7 +11,7 @@ using ModelContextProtocol.Server;
 namespace MCPiler.Engine.Host.Mcp;
 
 /// <summary>
-/// One addressable surface, with its protocol definitions already built.
+/// One addressable surface, with its protocol definitions cached by negotiated revision.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -21,19 +21,22 @@ namespace MCPiler.Engine.Host.Mcp;
 /// one that would accept a path a router had already normalized.
 /// </para>
 /// <para>
-/// Definitions are built here, at mapping time, so a listing enumerates objects that already
-/// exist. Building them per session would make repeated enumeration a repeated rendering, and
-/// byte-identity across enumerations would then rest on the renderer rather than on there
-/// being one set of objects.
+/// Definitions are built once for each revision this route actually negotiates. A listing
+/// therefore enumerates objects that already exist, while the revision-dependent advertisement
+/// decision remains request-scoped. Rebuilding on every listing would make byte-identity rest
+/// on repeated rendering rather than on there being one set of objects.
 /// </para>
 /// </remarks>
 internal sealed class SurfaceEndpoint
 {
+    private readonly Dictionary<string, IReadOnlyList<Tool>> _definitions =
+        new(StringComparer.Ordinal);
+    private readonly object _definitionsGate = new();
+
     internal SurfaceEndpoint(MountedManifest mount, MountedSurface surface)
     {
         Mount = mount;
         Surface = surface;
-        Definitions = SdkTranslation.Define(surface);
     }
 
     /// <summary>The mount this surface belongs to.</summary>
@@ -42,8 +45,22 @@ internal sealed class SurfaceEndpoint
     /// <summary>The surface addressed.</summary>
     public MountedSurface Surface { get; }
 
-    /// <summary>The surface's protocol definitions, in advertisement order.</summary>
-    public IReadOnlyList<Tool> Definitions { get; }
+    /// <summary>Maps the compiled catalogue for one negotiated protocol revision.</summary>
+    public IReadOnlyList<Tool> Definitions(string? negotiatedProtocolRevision)
+    {
+        string key = negotiatedProtocolRevision ?? string.Empty;
+
+        lock (_definitionsGate)
+        {
+            if (!_definitions.TryGetValue(key, out IReadOnlyList<Tool>? definitions))
+            {
+                definitions = SdkTranslation.Define(Surface, negotiatedProtocolRevision);
+                _definitions.Add(key, definitions);
+            }
+
+            return definitions;
+        }
+    }
 }
 
 /// <summary>
@@ -155,8 +172,11 @@ internal static class McpRegistration
 
         EngineExecution execution = context.RequestServices.GetRequiredService<EngineExecution>();
 
-        options.Handlers.ListToolsHandler = (_, _)
-            => ValueTask.FromResult(new ListToolsResult { Tools = [.. addressed.Definitions] });
+        options.Handlers.ListToolsHandler = (request, _)
+            => ValueTask.FromResult(new ListToolsResult
+            {
+                Tools = [.. addressed.Definitions(request.Server?.NegotiatedProtocolVersion)],
+            });
 
         options.Handlers.CallToolHandler = (request, token)
             => ToolBridge.InvokeAsync(addressed, execution, request, token);

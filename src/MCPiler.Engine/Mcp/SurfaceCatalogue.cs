@@ -41,19 +41,26 @@ public static class SurfaceCatalogue
         ArgumentNullException.ThrowIfNull(diagnostics);
 
         SurfaceToolSet tools = ToolSetDeriver.Resolve(manifest, surface, diagnostics);
+        IReadOnlyList<CatalogueTool> projected = ToolSetProjection.Project(
+            tools,
+            manifest.AgentSurface,
+            surface.OutputSchemas);
 
         return new MountedSurface(
             surface.Slug,
             surface.DisplayName,
             surface.IsDefault,
             surface.RequiredScopes,
-            ToolSetProjection.Project(tools),
+            projected,
             ToolSetDeriver.Fingerprint(tools))
         {
             // What the Navigator may reach, derived here for the same reason the listing is:
             // a surface that cannot resolve an identifier should fail to start rather than
             // fail the first caller that asks for one.
-            Navigable = ToolSetProjection.Project(ToolSetDeriver.DeriveNavigable(manifest, surface)),
+            Navigable = ToolSetProjection.Project(
+                ToolSetDeriver.DeriveNavigable(manifest, surface),
+                manifest.AgentSurface,
+                surface.OutputSchemas),
 
             // The declared identity, resolved once here so no transport has to decide what to
             // say when the Manifest leaves a field out.

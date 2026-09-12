@@ -32,17 +32,30 @@ public sealed class EngineExecution : IDisposable
 {
     private readonly UpstreamClientFactory _clients;
     private readonly ExecutionService _executions;
+    private readonly Action<RuntimeDiagnostic>? _diagnostics;
 
-    private EngineExecution(UpstreamClientFactory clients, ExecutionService executions)
+    private EngineExecution(
+        UpstreamClientFactory clients,
+        ExecutionService executions,
+        Action<RuntimeDiagnostic>? diagnostics)
     {
         _clients = clients;
         _executions = executions;
+        _diagnostics = diagnostics;
     }
 
     /// <summary>Assembles the execution machinery for a started runtime.</summary>
     /// <param name="started">A runtime whose every mount is ready.</param>
-    public static EngineExecution Create(RuntimeStartResult started)
-        => Create(started, new OutboundConnectionPolicy());
+    /// <param name="diagnostics">
+    /// Receives operational diagnostics the engine emits instead of failing a call, such as a
+    /// structured-content payload that did not conform to its advertised schema. A sink must
+    /// not throw; a sink that throws is ignored after the outcome was already decided. Sinks
+    /// may be called concurrently and must be thread-safe.
+    /// </param>
+    public static EngineExecution Create(
+        RuntimeStartResult started,
+        Action<RuntimeDiagnostic>? diagnostics = null)
+        => Create(started, new OutboundConnectionPolicy(), diagnostics);
 
     /// <summary>
     /// Assembles the execution machinery over a stated outbound connection policy.
@@ -55,7 +68,15 @@ public sealed class EngineExecution : IDisposable
     /// </remarks>
     /// <param name="started">A runtime whose every mount is ready.</param>
     /// <param name="connections">Which addresses a connection may be opened to.</param>
-    public static EngineExecution Create(RuntimeStartResult started, OutboundConnectionPolicy connections)
+    /// <param name="diagnostics">
+    /// Receives operational diagnostics the engine emits instead of failing a call. A sink
+    /// must not throw; a sink that throws is ignored after the outcome was already decided.
+    /// Sinks may be called concurrently and must be thread-safe.
+    /// </param>
+    public static EngineExecution Create(
+        RuntimeStartResult started,
+        OutboundConnectionPolicy connections,
+        Action<RuntimeDiagnostic>? diagnostics = null)
     {
         ArgumentNullException.ThrowIfNull(started);
         ArgumentNullException.ThrowIfNull(connections);
@@ -74,7 +95,8 @@ public sealed class EngineExecution : IDisposable
             new ExecutionService(
                 new UpstreamSender(clients),
                 new ManifestSecretResolver(new SecretResolutionOptions(started.AllowInlineSecrets)),
-                started.Files));
+                started.Files),
+            diagnostics);
     }
 
     /// <summary>Runs one tool call against one surface of one mount.</summary>
@@ -89,11 +111,12 @@ public sealed class EngineExecution : IDisposable
     /// <param name="tool">The tool name the caller sent, exactly as sent.</param>
     /// <param name="arguments">The arguments the caller sent.</param>
     /// <param name="cancellationToken">The caller's deadline.</param>
-    public Task<ToolOutcome> InvokeAsync(
+    public async Task<ToolOutcome> InvokeAsync(
         MountedManifest mount,
         MountedSurface surface,
         string tool,
         JsonObject arguments,
+        string? negotiatedProtocolRevision,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(mount);
@@ -101,7 +124,32 @@ public sealed class EngineExecution : IDisposable
         ArgumentNullException.ThrowIfNull(tool);
         ArgumentNullException.ThrowIfNull(arguments);
 
-        return ToolInvocation.InvokeAsync(_executions, mount, surface, tool, arguments, cancellationToken);
+        ToolOutcome outcome = await ToolInvocation
+            .InvokeAsync(
+                _executions,
+                mount,
+                surface,
+                tool,
+                arguments,
+                negotiatedProtocolRevision,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        if (outcome.Diagnostic is { } diagnostic)
+        {
+            // The tool outcome is already decided; a sink that throws must not convert
+            // a finished call into an unexplained failure. Sinks are non-throwing by
+            // contract and may be called concurrently, so they must be thread-safe.
+            try
+            {
+                _diagnostics?.Invoke(diagnostic);
+            }
+            catch
+            {
+            }
+        }
+
+        return outcome;
     }
 
     /// <inheritdoc />

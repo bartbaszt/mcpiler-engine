@@ -22,4 +22,15 @@ namespace MCPiler.Engine.Runtime;
 /// </remarks>
 /// <param name="Text">What the caller is told.</param>
 /// <param name="IsError">Whether the call itself failed.</param>
-public sealed record ToolOutcome(string Text, bool IsError);
+public sealed record ToolOutcome(string Text, bool IsError)
+{
+    /// <summary>The structured result as JSON text, when this session was promised one.</summary>
+    /// <remarks>
+    /// Text keeps the library/host seam protocol-neutral and preserves the bytes the library
+    /// validated. The host parses it into the SDK's value type and makes no shaping decision.
+    /// </remarks>
+    public string? StructuredContentJson { get; init; }
+
+    /// <summary>A metadata-only operational finding raised while producing this outcome.</summary>
+    internal RuntimeDiagnostic? Diagnostic { get; init; }
+}

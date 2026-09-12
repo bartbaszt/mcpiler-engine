@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -41,17 +42,26 @@ internal sealed class McpHttpSession : IDisposable
     /// <summary>The protocol revision these tests negotiate.</summary>
     public const string ProtocolVersion = "2025-06-18";
 
+    private const string PerRequestMetadataProtocolVersion = "2026-07-28";
+    private const string ProtocolVersionHeader = "MCP-Protocol-Version";
+    private const string MethodHeader = "Mcp-Method";
+    private const string NameHeader = "Mcp-Name";
     private const string SessionHeader = "Mcp-Session-Id";
 
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(15) };
     private readonly Uri _endpoint;
+    private readonly string _protocolVersion;
 
-    private McpHttpSession(Uri endpoint) => _endpoint = endpoint;
+    private McpHttpSession(Uri endpoint, string protocolVersion)
+    {
+        _endpoint = endpoint;
+        _protocolVersion = protocolVersion;
+    }
 
     /// <summary>The session identifier the server issued, when it issued one.</summary>
     public string? SessionId { get; private set; }
 
-    /// <summary>The initialize result, which is where the server's capabilities travel.</summary>
+    /// <summary>The initialize or server/discover result, which carries server capabilities.</summary>
     public string Handshake { get; private set; } = string.Empty;
 
     /// <summary>Sends one request to <paramref name="endpoint"/> without establishing a session.</summary>
@@ -61,30 +71,49 @@ internal sealed class McpHttpSession : IDisposable
         int id,
         CancellationToken cancellationToken)
     {
-        using McpHttpSession session = new(endpoint);
-        return await session.PostAsync(Request(method, id), cancellationToken);
+        using McpHttpSession session = new(endpoint, ProtocolVersion);
+        return await session.PostAsync(Request(method, id, protocolVersion: null), null, null, cancellationToken);
     }
 
     /// <summary>Initializes a session against <paramref name="endpoint"/>.</summary>
-    public static async Task<McpHttpSession> OpenAsync(Uri endpoint, CancellationToken cancellationToken)
+    public static async Task<McpHttpSession> OpenAsync(
+        Uri endpoint,
+        CancellationToken cancellationToken,
+        string protocolVersion = ProtocolVersion)
     {
-        McpHttpSession session = new(endpoint);
+        McpHttpSession session = new(endpoint, protocolVersion);
 
         try
         {
-            McpExchange initialize = await session.PostAsync(Initialize(), cancellationToken);
-
-            if (initialize.Status != HttpStatusCode.OK)
+            if (string.Equals(protocolVersion, PerRequestMetadataProtocolVersion, StringComparison.Ordinal))
             {
-                throw new InvalidOperationException(
-                    $"initialize was answered with {(int)initialize.Status}: {initialize.Body}");
+                McpExchange discover = await session.PostAsync(
+                    Request("server/discover", 1, protocolVersion),
+                    "server/discover",
+                    null,
+                    cancellationToken);
+
+                EnsureSuccessful("server/discover", discover);
+                session.Handshake = discover.Payload;
+                return session;
             }
 
+            McpExchange initialize = await session.PostAsync(
+                Initialize(protocolVersion),
+                null,
+                null,
+                cancellationToken);
+
+            EnsureSuccessful("initialize", initialize);
             session.Handshake = initialize.Payload;
 
             // A notification carries no identifier and expects no result; the server accepts it
             // and the session is then usable.
-            _ = await session.PostAsync("""{"jsonrpc":"2.0","method":"notifications/initialized"}""", cancellationToken);
+            _ = await session.PostAsync(
+                """{"jsonrpc":"2.0","method":"notifications/initialized"}""",
+                null,
+                null,
+                cancellationToken);
 
             return session;
         }
@@ -97,7 +126,7 @@ internal sealed class McpHttpSession : IDisposable
 
     /// <summary>Sends one request on this session.</summary>
     public Task<McpExchange> RequestAsync(string method, int id, CancellationToken cancellationToken)
-        => PostAsync(Request(method, id), cancellationToken);
+        => PostAsync(Request(method, id, ModernProtocolVersion), method, null, cancellationToken);
 
     /// <summary>Calls a tool on this session with the supplied arguments as JSON text.</summary>
     /// <remarks>
@@ -117,24 +146,48 @@ internal sealed class McpHttpSession : IDisposable
                 + tool
                 + "\",\"arguments\":"
                 + argumentsJson
+                + ModernMetaPrefix
                 + "}}",
+            "tools/call",
+            tool,
             cancellationToken);
 
     public void Dispose() => _http.Dispose();
 
-    private static string Initialize()
+    private static string Initialize(string protocolVersion)
         => "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\""
-            + ProtocolVersion
+            + protocolVersion
             + "\",\"capabilities\":{},\"clientInfo\":{\"name\":\"engine-wire-tests\",\"version\":\"1.0\"}}}";
 
-    private static string Request(string method, int id)
+    private static string Request(string method, int id, string? protocolVersion)
         => "{\"jsonrpc\":\"2.0\",\"id\":"
             + id.ToString(CultureInfo.InvariantCulture)
             + ",\"method\":\""
             + method
-            + "\",\"params\":{}}";
+            + "\",\"params\":{"
+            + Meta(protocolVersion)
+            + "}}";
 
-    private async Task<McpExchange> PostAsync(string body, CancellationToken cancellationToken)
+    private string? ModernProtocolVersion
+        => string.Equals(_protocolVersion, PerRequestMetadataProtocolVersion, StringComparison.Ordinal)
+            ? _protocolVersion
+            : null;
+
+    private string ModernMetaPrefix => ModernProtocolVersion is { } version ? "," + Meta(version) : string.Empty;
+
+    private static string Meta(string? protocolVersion)
+        => protocolVersion is null
+            ? string.Empty
+            : "\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\""
+                + protocolVersion
+                + "\",\"io.modelcontextprotocol/clientInfo\":{\"name\":\"engine-wire-tests\",\"version\":\"1.0\"},"
+                + "\"io.modelcontextprotocol/clientCapabilities\":{}}";
+
+    private async Task<McpExchange> PostAsync(
+        string body,
+        string? method,
+        string? routingName,
+        CancellationToken cancellationToken)
     {
         using HttpRequestMessage request = new(HttpMethod.Post, _endpoint)
         {
@@ -146,6 +199,17 @@ internal sealed class McpHttpSession : IDisposable
         // response looked the way it did.
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+
+        if (ModernProtocolVersion is { } protocolVersion)
+        {
+            request.Headers.Add(ProtocolVersionHeader, protocolVersion);
+            request.Headers.Add(MethodHeader, method);
+
+            if (routingName is not null)
+            {
+                request.Headers.Add(NameHeader, routingName);
+            }
+        }
 
         if (SessionId is { } session)
         {
@@ -166,6 +230,22 @@ internal sealed class McpHttpSession : IDisposable
             response.Content.Headers.ContentType?.MediaType ?? string.Empty,
             text,
             Unframe(text));
+    }
+
+    private static void EnsureSuccessful(string operation, McpExchange exchange)
+    {
+        if (exchange.Status != HttpStatusCode.OK)
+        {
+            throw new InvalidOperationException(
+                $"{operation} was answered with {(int)exchange.Status}: {exchange.Body}");
+        }
+
+        using JsonDocument document = JsonDocument.Parse(exchange.Payload);
+
+        if (document.RootElement.TryGetProperty("error", out JsonElement error))
+        {
+            throw new InvalidOperationException($"{operation} returned a JSON-RPC error: {error.GetRawText()}");
+        }
     }
 
     /// <summary>

@@ -40,15 +40,27 @@ public static class ToolSetProjection
     /// that the day a Manifest does carry one, exactly one place changes.
     /// </remarks>
     /// <param name="tools">The tool set a surface derived.</param>
-    public static IReadOnlyList<CatalogueTool> Project(SurfaceToolSet tools)
+    /// <param name="agentSurface">The operation policies carried by the Manifest.</param>
+    /// <param name="outputSchemasAllowed">The surface capability ceiling.</param>
+    public static IReadOnlyList<CatalogueTool> Project(
+        SurfaceToolSet tools,
+        AgentSurfaceSection agentSurface,
+        bool outputSchemasAllowed)
     {
         ArgumentNullException.ThrowIfNull(tools);
+        ArgumentNullException.ThrowIfNull(agentSurface);
 
         List<CatalogueTool> projected = new(tools.Tools.Count);
 
         foreach (ManifestTool tool in tools.Tools)
         {
             ToolAnnotations annotations = tool.EffectiveAnnotations;
+            AgentOperationEntry? operation = tool.Operation is null
+                ? null
+                : agentSurface.Operation(tool.Operation);
+            (System.Text.Json.Nodes.JsonObject Schema, bool Wrapped)? output = tool.OutputSchema is null
+                ? null
+                : OutputSchemaEnvelope.Shape(tool.OutputSchema.Node);
 
             projected.Add(new CatalogueTool(
                 tool.Name,
@@ -61,6 +73,11 @@ public static class ToolSetProjection
                 annotations.OpenWorld)
             {
                 Operation = tool.Operation,
+                OutputSchemaCandidateJson = output?.Schema.ToJsonString(),
+                OutputSchemaWrapped = output?.Wrapped ?? false,
+                OutputSchemaAdvertisement = operation?.EffectiveOutputSchemaPolicy.Advertise
+                    ?? OutputSchemaAdvertisement.No,
+                OutputSchemasAllowed = outputSchemasAllowed,
             });
         }
 

@@ -143,6 +143,7 @@ public sealed class RuntimeBoundaryTests
         "MCPiler.Engine.Manifest.Canonical",
         "MCPiler.Engine.Manifest.Sealing",
         "MCPiler.Engine.Search.Hybrid",
+        "MCPiler.Engine.Mcp",
         "MCPiler.Engine.Transform",
         "MCPiler.Engine.Compound",
     ];
@@ -241,6 +242,7 @@ public sealed class RuntimeBoundaryTests
     [InlineData("using MCPiler.Engine.Manifest.Derivation;")]
     [InlineData("var findings = MCPiler.Engine.Transform.TransformValidation.Validate(program, ceiling, files);")]
     [InlineData("using MCPiler.Engine.Compound;")]
+    [InlineData("var schema = MCPiler.Engine.Mcp.OutputSchemaEnvelope.Shape(authored);")]
     public void The_containment_assertion_catches_manifest_knowledge_inside_an_adapter(string driver)
     {
         var caught = ProductNamespaces.Any(space => driver.Contains(space, StringComparison.Ordinal));
@@ -271,6 +273,30 @@ public sealed class RuntimeBoundaryTests
                 IsExempt(sibling),
                 $"The exemption '{directory}' also covers '{sibling}', which is a different component.");
         }
+    }
+
+    /// <summary>Protocol-era literals belong in the MCP adapter, never in the Manifest contract.</summary>
+    [Fact]
+    public void Manifest_code_contains_no_protocol_revision_literal()
+    {
+        var revision = new Regex(
+            @"\b20\d{2}-\d{2}-\d{2}\b",
+            RegexOptions.CultureInvariant,
+            TimeSpan.FromSeconds(5));
+        var offenders = LibrarySources()
+            .Where(path => EngineRepository
+                .Relative(path)
+                .StartsWith(ManifestSourceRoot + "/", StringComparison.Ordinal))
+            .SelectMany(path => revision
+                .Matches(File.ReadAllText(path))
+                .Select(match => $"{EngineRepository.Relative(path)} -> {match.Value}"))
+            .ToList();
+
+        Assert.True(
+            offenders.Count == 0,
+            "A protocol revision in Manifest model, loading, validation or derivation would make "
+                + "the persisted contract decide a request-era behavior. Keep revisions in Mcp/. "
+                + $"Offending literals: {string.Join("; ", offenders)}");
     }
 
     /// <summary>

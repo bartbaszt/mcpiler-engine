@@ -87,12 +87,19 @@ internal static class NavigatorRuntime
         MountedSurface surface,
         string tool,
         JsonObject arguments,
+        string? negotiatedProtocolRevision,
         CancellationToken cancellationToken)
         => tool switch
         {
             ManifestTool.NavigatorDiscover => Task.FromResult(Discover(mount, surface, arguments)),
             ManifestTool.NavigatorDescribe => Task.FromResult(Describe(mount, surface, arguments)),
-            ManifestTool.NavigatorInvoke => InvokeOperationAsync(executions, mount, surface, arguments, cancellationToken),
+            ManifestTool.NavigatorInvoke => InvokeOperationAsync(
+                executions,
+                mount,
+                surface,
+                arguments,
+                negotiatedProtocolRevision,
+                cancellationToken),
 
             // The trio is closed and every member is handled above. A fourth name reaching
             // here would have had to be advertised by something, so it is answered the way an
@@ -213,6 +220,7 @@ internal static class NavigatorRuntime
         MountedManifest mount,
         MountedSurface surface,
         JsonObject arguments,
+        string? negotiatedProtocolRevision,
         CancellationToken cancellationToken)
     {
         string named = Text(arguments, OperationArgument) ?? string.Empty;
@@ -226,7 +234,14 @@ internal static class NavigatorRuntime
             ? (JsonObject)declared.DeepClone()
             : [];
 
-        return ToolInvocation.RunAsync(executions, mount, operation, supplied, cancellationToken);
+        return ToolInvocation.RunAsync(
+            executions,
+            mount,
+            surface,
+            operation,
+            supplied,
+            negotiatedProtocolRevision,
+            cancellationToken);
     }
 
     /// <summary>

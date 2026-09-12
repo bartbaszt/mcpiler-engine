@@ -23,7 +23,7 @@ public sealed class ToolSetProjectionTests
     [Fact]
     public void Order_is_the_derived_order()
     {
-        IReadOnlyList<CatalogueTool> projected = ToolSetProjection.Project(new SurfaceToolSet(
+        IReadOnlyList<CatalogueTool> projected = Project(new SurfaceToolSet(
         [
             new ManifestTool("zebra", "Last alphabetically, first in exposure order."),
             new ManifestTool("alpha", "First alphabetically, second in exposure order."),
@@ -44,7 +44,7 @@ public sealed class ToolSetProjectionTests
     {
         JsonNode schema = JsonNode.Parse("""{"type":"object","properties":{"b":{"type":"string"},"a":{"type":"integer"}}}""")!;
 
-        CatalogueTool projected = Assert.Single(ToolSetProjection.Project(new SurfaceToolSet(
+        CatalogueTool projected = Assert.Single(Project(new SurfaceToolSet(
         [
             new ManifestTool("tool", "A tool.", ManifestSchema.From(schema)),
         ])));
@@ -66,7 +66,7 @@ public sealed class ToolSetProjectionTests
     [Fact]
     public void An_absent_schema_constrains_nothing()
     {
-        CatalogueTool projected = Assert.Single(ToolSetProjection.Project(new SurfaceToolSet(
+        CatalogueTool projected = Assert.Single(Project(new SurfaceToolSet(
         [
             new ManifestTool("tool", "A tool."),
         ])));
@@ -78,7 +78,7 @@ public sealed class ToolSetProjectionTests
     [Fact]
     public void Annotations_are_carried_including_the_absent_ones()
     {
-        IReadOnlyList<CatalogueTool> projected = ToolSetProjection.Project(new SurfaceToolSet(
+        IReadOnlyList<CatalogueTool> projected = Project(new SurfaceToolSet(
         [
             new ManifestTool(
                 "declared",
@@ -104,7 +104,7 @@ public sealed class ToolSetProjectionTests
     [Fact]
     public void The_title_is_the_name()
     {
-        CatalogueTool projected = Assert.Single(ToolSetProjection.Project(new SurfaceToolSet(
+        CatalogueTool projected = Assert.Single(Project(new SurfaceToolSet(
         [
             new ManifestTool("list-pets", "Lists pets."),
         ])));
@@ -119,4 +119,7 @@ public sealed class ToolSetProjectionTests
             yield return tool.Name;
         }
     }
+
+    private static IReadOnlyList<CatalogueTool> Project(SurfaceToolSet tools)
+        => ToolSetProjection.Project(tools, new AgentSurfaceSection(), outputSchemasAllowed: false);
 }

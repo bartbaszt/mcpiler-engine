@@ -102,7 +102,13 @@ public static class HostCommands
 
         // Outlives the application deliberately: the pool it owns is closed after the
         // listener has stopped accepting, never by whichever container teardown ran first.
-        using EngineExecution execution = EngineExecution.Create(result);
+        using EngineExecution execution = EngineExecution.Create(
+            result,
+            diagnostic =>
+            {
+                progress?.WriteLine(diagnostic);
+                progress?.Flush();
+            });
 
         await using WebApplication app = EngineWebHost.Build(result, binding.Listener, execution);
 

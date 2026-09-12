@@ -72,7 +72,8 @@ internal sealed class ServedEngine : IAsyncDisposable
     public static async Task<ServedEngine> StartAsync(
         RuntimeOptions options,
         CancellationToken cancellationToken,
-        OutboundConnectionPolicy? connections = null)
+        OutboundConnectionPolicy? connections = null,
+        Action<RuntimeDiagnostic>? diagnostics = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -85,7 +86,10 @@ internal sealed class ServedEngine : IAsyncDisposable
                 + string.Join("; ", started.Refusals.Select(refusal => refusal.Code + " " + refusal.Message)));
         }
 
-        EngineExecution execution = EngineExecution.Create(started, connections ?? Permissive());
+        EngineExecution execution = EngineExecution.Create(
+            started,
+            connections ?? Permissive(),
+            diagnostics);
 
         WebApplication app = EngineWebHost.Build(
             started,

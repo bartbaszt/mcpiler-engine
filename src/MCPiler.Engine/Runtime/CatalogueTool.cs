@@ -1,3 +1,6 @@
+using MCPiler.Engine.Manifest.Model;
+using MCPiler.Engine.Mcp;
+
 namespace MCPiler.Engine.Runtime;
 
 /// <summary>
@@ -60,4 +63,26 @@ public sealed record CatalogueTool(
     /// </para>
     /// </remarks>
     public string? Operation { get; init; }
+
+    /// <summary>The wire-shaped candidate schema before the session decides whether to advertise it.</summary>
+    internal string? OutputSchemaCandidateJson { get; init; }
+
+    /// <summary>Whether the candidate was wrapped under the synthetic <c>result</c> member.</summary>
+    internal bool OutputSchemaWrapped { get; init; }
+
+    /// <summary>The operation's compiled advertisement mode.</summary>
+    internal OutputSchemaAdvertisement OutputSchemaAdvertisement { get; init; } = OutputSchemaAdvertisement.No;
+
+    /// <summary>The Manifest surface capability, which no operation may widen.</summary>
+    internal bool OutputSchemasAllowed { get; init; }
+
+    /// <summary>Returns the exact output schema this session may receive, or nothing.</summary>
+    public string? ResolveOutputSchemaJson(string? negotiatedProtocolRevision)
+        => AdvertisementResolver.Resolve(
+            OutputSchemaAdvertisement,
+            OutputSchemaCandidateJson is not null,
+            OutputSchemasAllowed,
+            negotiatedProtocolRevision)
+            ? OutputSchemaCandidateJson
+            : null;
 }
