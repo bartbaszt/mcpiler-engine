@@ -6,9 +6,59 @@ namespace MCPiler.Engine.Mcp;
 /// <summary>
 /// Shapes an agent-facing output schema and its value into MCPiler's object-rooted wire envelope.
 /// </summary>
+/// <remarks>
+/// <para>
+/// The pointer rewrite is schema-position-aware: it descends only through positions the JSON
+/// Schema draft 2020-12 vocabulary defines as holding schemas, plus the legacy forms the format
+/// still accepts. A <c>$ref</c>-shaped value inside <c>const</c>, <c>enum</c>, <c>examples</c> or
+/// <c>default</c> is data the schema compares against, and rewriting it would change what the
+/// schema accepts. Unknown members are treated the same way: a position the vocabulary does not
+/// define is left byte for byte rather than guessed at.
+/// </para>
+/// <para>
+/// The vocabulary and its consequences are shared with the Platform implementation through an
+/// authored corpus both suites replay; a traversal change on one side alone breaks byte identity
+/// between the two, which the corpus exists to catch.
+/// </para>
+/// </remarks>
 internal static class OutputSchemaEnvelope
 {
     internal const string ResultProperty = "result";
+
+    /// <summary>Keyword positions whose value is exactly one schema.</summary>
+    private static readonly string[] SingleSchemaKeywords =
+    [
+        "additionalItems",
+        "unevaluatedItems",
+        "contains",
+        "not",
+        "additionalProperties",
+        "unevaluatedProperties",
+        "propertyNames",
+        "contentSchema",
+        "if",
+        "then",
+        "else",
+    ];
+
+    /// <summary>Keyword positions whose value is a list of schemas.</summary>
+    private static readonly string[] SchemaListKeywords =
+        ["allOf", "anyOf", "oneOf", "prefixItems"];
+
+    /// <summary>Keyword positions whose value maps names to schemas.</summary>
+    private static readonly string[] SchemaMapKeywords =
+        ["properties", "patternProperties", "dependentSchemas", "$defs", "definitions"];
+
+    /// <summary>
+    /// Every keyword position the traversal descends through: the two <c>items</c> forms, the
+    /// single-schema positions, the list positions, and the name-map positions.
+    /// </summary>
+    /// <remarks>
+    /// Exposed for the corpus guard, which asserts a shared corpus case exercises each entry,
+    /// so a keyword added to the traversal without a case fails rather than passes silently.
+    /// </remarks>
+    internal static IReadOnlyList<string> TraversalKeywords { get; } =
+        ["items", .. SingleSchemaKeywords, .. SchemaListKeywords, .. SchemaMapKeywords];
 
     /// <summary>
     /// Returns the schema that may be advertised and whether the synthetic result member was added.
@@ -24,14 +74,12 @@ internal static class OutputSchemaEnvelope
             return (root, false);
         }
 
-        RewritePointers(copy);
-
         return (new JsonObject
         {
             ["type"] = "object",
             ["properties"] = new JsonObject
             {
-                [ResultProperty] = copy,
+                [ResultProperty] = RewritePointers(authored),
             },
             ["required"] = new JsonArray(ResultProperty),
         }, true);
@@ -89,43 +137,98 @@ internal static class OutputSchemaEnvelope
         }
     }
 
-    private static void RewritePointers(JsonNode node)
+    /// <summary>
+    /// Rebuilds a schema with every internal JSON Pointer reference under it rebased:
+    /// <c>#</c> becomes <c>#/properties/result</c> and <c>#/...</c> becomes
+    /// <c>#/properties/result/...</c>. Anchor and external references are left as authored.
+    /// </summary>
+    /// <remarks>
+    /// The walk is pure: the authored schema is never mutated, and members are copied in
+    /// document order so a schema that needed no rewriting serializes to the bytes it
+    /// arrived as.
+    /// </remarks>
+    private static JsonNode RewritePointers(JsonNode schema)
     {
-        switch (node)
+        if (schema is not JsonObject document)
         {
-            case JsonObject properties:
-                foreach ((string name, JsonNode? value) in properties.ToArray())
-                {
-                    if (value is null)
-                    {
-                        continue;
-                    }
-
-                    if (name is "$ref" or "$dynamicRef"
-                        && value is JsonValue pointer
-                        && pointer.TryGetValue<string>(out string? reference))
-                    {
-                        properties[name] = RewriteReference(reference);
-                    }
-                    else
-                    {
-                        RewritePointers(value);
-                    }
-                }
-
-                break;
-
-            case JsonArray items:
-                foreach (JsonNode? item in items)
-                {
-                    if (item is not null)
-                    {
-                        RewritePointers(item);
-                    }
-                }
-
-                break;
+            // A boolean schema is a leaf; no reference can live under it.
+            return schema.DeepClone();
         }
+
+        JsonObject rewritten = [];
+
+        foreach ((string keyword, JsonNode? value) in document)
+        {
+            rewritten[keyword] = RewriteMember(keyword, value);
+        }
+
+        return rewritten;
+    }
+
+    private static JsonNode? RewriteMember(string keyword, JsonNode? value)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        if (keyword is "$ref" or "$dynamicRef"
+            && value is JsonValue pointer
+            && pointer.TryGetValue<string>(out string? reference))
+        {
+            return RewriteReference(reference);
+        }
+
+        // The draft 2020-12 single-schema form and the legacy draft-07 tuple form are both
+        // schema positions; neither form's references may dangle inside the envelope.
+        if (string.Equals(keyword, "items", StringComparison.Ordinal))
+        {
+            return value is JsonArray tuple ? RewriteList(tuple) : RewritePointers(value);
+        }
+
+        if (Array.IndexOf(SingleSchemaKeywords, keyword) >= 0)
+        {
+            return RewritePointers(value);
+        }
+
+        if (Array.IndexOf(SchemaListKeywords, keyword) >= 0 && value is JsonArray list)
+        {
+            return RewriteList(list);
+        }
+
+        if (Array.IndexOf(SchemaMapKeywords, keyword) >= 0 && value is JsonObject map)
+        {
+            return RewriteMap(map);
+        }
+
+        // Every other position - const, enum, examples, default, and everything the vocabulary
+        // does not define as a schema - is data. A reference-shaped value there is a literal
+        // the schema compares against, and rewriting it would change what the schema accepts.
+        return value.DeepClone();
+    }
+
+    private static JsonArray RewriteList(JsonArray list)
+    {
+        JsonArray rewritten = [];
+
+        foreach (JsonNode? element in list)
+        {
+            rewritten.Add(element is null ? null : RewritePointers(element));
+        }
+
+        return rewritten;
+    }
+
+    private static JsonObject RewriteMap(JsonObject map)
+    {
+        JsonObject rewritten = [];
+
+        foreach ((string name, JsonNode? member) in map)
+        {
+            rewritten[name] = member is null ? null : RewritePointers(member);
+        }
+
+        return rewritten;
     }
 
     private static string RewriteReference(string reference)

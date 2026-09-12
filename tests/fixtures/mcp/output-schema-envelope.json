@@ -1,0 +1,117 @@
+{
+  "about": "Authored output-schema envelope cases replayed by both implementations. Each case states an authored schema, whether the object-rooted envelope wraps it, and the exact bytes the wire shaping must emit. The expected values are written by hand from the specification, never captured from a run: a corpus generated from one implementation records that implementation's beliefs, and the point of this file is to catch the two disagreeing. The Platform suite asserts this file is byte-identical in both trees.",
+  "cases": [
+    {
+      "name": "an-array-root-is-wrapped-in-the-golden-envelope",
+      "why": "The committed golden for the common case: a non-object root is wrapped once, in one shape, everywhere.",
+      "schema": { "type": "array", "items": { "type": "string" } },
+      "wrapped": true,
+      "expected": { "type": "object", "properties": { "result": { "type": "array", "items": { "type": "string" } } }, "required": ["result"] }
+    },
+    {
+      "name": "an-object-root-is-carried-byte-for-byte",
+      "why": "An object root is carried byte for byte, member order included; the envelope never adds a member it was not asked for.",
+      "schema": { "type": "object", "properties": { "b": { "type": "string" }, "a": { "type": "integer" } }, "required": ["b"] },
+      "wrapped": false,
+      "expected": { "type": "object", "properties": { "b": { "type": "string" }, "a": { "type": "integer" } }, "required": ["b"] }
+    },
+    {
+      "name": "an-object-null-root-collapses-to-object",
+      "why": "A root declared object-or-null is normalized to object: the envelope carries optional objects without wrapping them.",
+      "schema": { "type": ["object", "null"], "properties": {} },
+      "wrapped": false,
+      "expected": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "an-object-union-with-another-type-is-wrapped-not-collapsed",
+      "why": "An object union with a third type is a wrapped root, not a collapsed one; the authored type array survives untouched.",
+      "schema": { "type": ["object", "string", "null"] },
+      "wrapped": true,
+      "expected": { "type": "object", "properties": { "result": { "type": ["object", "string", "null"] } }, "required": ["result"] }
+    },
+    {
+      "name": "a-root-reference-is-rebased-into-the-envelope",
+      "why": "A whole-schema reference to the document root is rebased to the synthetic result member.",
+      "schema": { "$ref": "#" },
+      "wrapped": true,
+      "expected": { "type": "object", "properties": { "result": { "$ref": "#/properties/result" } }, "required": ["result"] }
+    },
+    {
+      "name": "defs-and-dynamic-refs-are-rebased",
+      "why": "Definitions travel inside the envelope with their internal dynamic references rebased to match.",
+      "schema": { "$ref": "#", "$defs": { "node": { "$dynamicRef": "#/$defs/node" } } },
+      "wrapped": true,
+      "expected": { "type": "object", "properties": { "result": { "$ref": "#/properties/result", "$defs": { "node": { "$dynamicRef": "#/properties/result/$defs/node" } } } }, "required": ["result"] }
+    },
+    {
+      "name": "if-then-else-references-are-rebased",
+      "why": "Applicability clauses hold schemas exactly like any other position; their references are rebased with the rest.",
+      "schema": { "if": { "$ref": "#/$defs/a" }, "then": { "$ref": "#/$defs/b" }, "else": { "$ref": "#/$defs/c" }, "$defs": { "a": { "type": "string" }, "b": { "type": "number" }, "c": { "type": "null" } } },
+      "wrapped": true,
+      "expected": { "type": "object", "properties": { "result": { "if": { "$ref": "#/properties/result/$defs/a" }, "then": { "$ref": "#/properties/result/$defs/b" }, "else": { "$ref": "#/properties/result/$defs/c" }, "$defs": { "a": { "type": "string" }, "b": { "type": "number" }, "c": { "type": "null" } } } }, "required": ["result"] }
+    },
+    {
+      "name": "dependentschemas-references-are-rebased",
+      "why": "dependentSchemas maps property names to schemas; the values are schema positions and their references are rebased.",
+      "schema": { "dependentSchemas": { "credit": { "$ref": "#/$defs/needs" } }, "$defs": { "needs": { "required": ["cvv"] } } },
+      "wrapped": true,
+      "expected": { "type": "object", "properties": { "result": { "dependentSchemas": { "credit": { "$ref": "#/properties/result/$defs/needs" } }, "$defs": { "needs": { "required": ["cvv"] } } } }, "required": ["result"] }
+    },
+    {
+      "name": "unevaluated-and-naming-positions-are-rebased",
+      "why": "The unevaluated- and naming- positions are schema positions in draft 2020-12 and are rebased like any other.",
+      "schema": { "unevaluatedItems": { "$ref": "#/$defs/base" }, "unevaluatedProperties": { "$ref": "#/$defs/base" }, "propertyNames": { "$ref": "#/$defs/base" }, "patternProperties": { "^a*": { "$ref": "#/$defs/base" } }, "additionalProperties": { "$ref": "#/$defs/base" }, "$defs": { "base": { "type": "string" } } },
+      "wrapped": true,
+      "expected": { "type": "object", "properties": { "result": { "unevaluatedItems": { "$ref": "#/properties/result/$defs/base" }, "unevaluatedProperties": { "$ref": "#/properties/result/$defs/base" }, "propertyNames": { "$ref": "#/properties/result/$defs/base" }, "patternProperties": { "^a*": { "$ref": "#/properties/result/$defs/base" } }, "additionalProperties": { "$ref": "#/properties/result/$defs/base" }, "$defs": { "base": { "type": "string" } } }}, "required": ["result"] }
+    },
+    {
+      "name": "data-positions-are-never-rebased",
+      "why": "const, enum, examples and default are data the schema compares against, not positions a resolver walks; a reference-shaped value there must survive byte for byte, nested keyword names included.",
+      "schema": { "const": { "$ref": "#/$defs/x" }, "enum": [{ "$ref": "#/$defs/x" }], "examples": [{ "$ref": "#/$defs/x" }], "default": { "properties": { "$ref": "#/$defs/x" } }, "$defs": { "x": { "type": "string" } } },
+      "wrapped": true,
+      "expected": { "type": "object", "properties": { "result": { "const": { "$ref": "#/$defs/x" }, "enum": [{ "$ref": "#/$defs/x" }], "examples": [{ "$ref": "#/$defs/x" }], "default": { "properties": { "$ref": "#/$defs/x" } }, "$defs": { "x": { "type": "string" } } }}, "required": ["result"] }
+    },
+    {
+      "name": "anchor-and-external-references-are-preserved",
+      "why": "Anchor references and external references never resolve inside the envelope and are left exactly as authored.",
+      "schema": { "$anchor": "root", "properties": { "child": { "$dynamicRef": "#root" } }, "$defs": { "node": { "anchor": { "$ref": "#node" }, "external": { "$ref": "https://example.test/schema.json#/node" } } } },
+      "wrapped": true,
+      "expected": { "type": "object", "properties": { "result": { "$anchor": "root", "properties": { "child": { "$dynamicRef": "#root" } }, "$defs": { "node": { "anchor": { "$ref": "#node" }, "external": { "$ref": "https://example.test/schema.json#/node" } } } }}, "required": ["result"] }
+    },
+    {
+      "name": "legacy-tuple-items-are-rebased",
+      "why": "The legacy draft-07 tuple form of items lists one schema per position; both forms are rebased so neither dangles.",
+      "schema": { "items": [{ "$ref": "#/$defs/a" }, { "$ref": "#/$defs/b" }], "$defs": { "a": { "type": "string" }, "b": { "type": "number" } } },
+      "wrapped": true,
+      "expected": { "type": "object", "properties": { "result": { "items": [{ "$ref": "#/properties/result/$defs/a" }, { "$ref": "#/properties/result/$defs/b" }], "$defs": { "a": { "type": "string" }, "b": { "type": "number" } } }}, "required": ["result"] }
+    },
+    {
+      "name": "legacy-positions-are-rebased",
+      "why": "Legacy positions — definitions, additionalItems, contains, not, contentSchema — are schema positions and are rebased.",
+      "schema": { "contains": { "$ref": "#/$defs/x" }, "not": { "$ref": "#/$defs/x" }, "contentSchema": { "$ref": "#/$defs/x" }, "additionalItems": { "$ref": "#/$defs/x" }, "definitions": { "old": { "$ref": "#/$defs/x" } }, "$defs": { "x": { "type": "object" } } },
+      "wrapped": true,
+      "expected": { "type": "object", "properties": { "result": { "contains": { "$ref": "#/properties/result/$defs/x" }, "not": { "$ref": "#/properties/result/$defs/x" }, "contentSchema": { "$ref": "#/properties/result/$defs/x" }, "additionalItems": { "$ref": "#/properties/result/$defs/x" }, "definitions": { "old": { "$ref": "#/properties/result/$defs/x" } }, "$defs": { "x": { "type": "object" } } }}, "required": ["result"] }
+    },
+    {
+      "name": "prefix-and-composition-lists-are-rebased",
+      "why": "Composition lists hold schemas element-wise; every element's references are rebased.",
+      "schema": { "prefixItems": [{ "$ref": "#/$defs/a" }], "allOf": [{ "$ref": "#/$defs/b" }], "anyOf": [{ "$ref": "#/$defs/c" }], "oneOf": [{ "$ref": "#/$defs/d" }], "$defs": { "a": { "type": "string" }, "b": { "type": "integer" }, "c": { "type": "number" }, "d": { "type": "null" } } },
+      "wrapped": true,
+      "expected": { "type": "object", "properties": { "result": { "prefixItems": [{ "$ref": "#/properties/result/$defs/a" }], "allOf": [{ "$ref": "#/properties/result/$defs/b" }], "anyOf": [{ "$ref": "#/properties/result/$defs/c" }], "oneOf": [{ "$ref": "#/properties/result/$defs/d" }], "$defs": { "a": { "type": "string" }, "b": { "type": "integer" }, "c": { "type": "number" }, "d": { "type": "null" } } }}, "required": ["result"] }
+    },
+    {
+      "name": "a-malformed-type-array-is-preserved-inside-the-envelope",
+      "why": "A malformed type array fails closed into the envelope with its bytes preserved; nothing is interpreted, only wrapped.",
+      "schema": { "type": ["object", 1] },
+      "wrapped": true,
+      "expected": { "type": "object", "properties": { "result": { "type": ["object", 1] } }, "required": ["result"] }
+    },
+    {
+      "name": "boolean-subschemas-are-leaves",
+      "why": "Boolean subschemas are leaves: the traversal reaches them and rewrites nothing.",
+      "schema": { "additionalProperties": false, "properties": { "closed": { "type": "boolean" } } },
+      "wrapped": true,
+      "expected": { "type": "object", "properties": { "result": { "additionalProperties": false, "properties": { "closed": { "type": "boolean" } } } }, "required": ["result"] }
+    }
+  ]
+}
