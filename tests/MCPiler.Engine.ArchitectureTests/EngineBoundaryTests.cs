@@ -243,10 +243,12 @@ public sealed class EngineBoundaryTests
             "Microsoft.CodeAnalysis.BannedApiAnalyzers",
             "Microsoft.VisualStudio.Threading.Analyzers",
 
-            // Runtime. The protocol SDK and the JSON Schema evaluator.
+            // Runtime. The protocol SDK, the JSON Schema evaluator, and JOSE token
+            // security for the configured JWKS validation mode.
             "ModelContextProtocol.AspNetCore",
             "ModelContextProtocol.Core",
             "JsonSchema.Net",
+            "Microsoft.IdentityModel.JsonWebTokens",
 
             // Testing.
             "xunit.v3",

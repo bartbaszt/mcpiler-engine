@@ -32,8 +32,56 @@ namespace MCPiler.Engine.Host.Configuration;
 /// is how this process is reached and can change nothing a client is served.
 /// </remarks>
 /// <param name="Runtime">What the library is told.</param>
-/// <param name="Listener">What the listener is told.</param>
-public sealed record HostBinding(RuntimeOptions Runtime, HostListenOptions Listener);
+/// <param name="Listener">How the listener is told to reach this process.</param>
+/// <param name="Authorization">The trusted issuer and how its tokens are validated, or none.</param>
+public sealed record HostBinding(
+    RuntimeOptions Runtime,
+    HostListenOptions Listener,
+    HostAuthorizationOptions? Authorization);
+
+/// <summary>
+/// The authorization configuration this deployable accepts, or the absence of one.
+/// </summary>
+/// <remarks>
+/// <para>
+/// An issuer without a validation mode is refused, and so is a validation mode without an
+/// issuer: the two halves of "validate against the trusted issuer" are one decision, and
+/// accepting half of it would tell an operator the boundary is configured when only the
+/// other half is.
+/// </para>
+/// <para>
+/// Nothing here authorizes a request on its own. The configuration names what to trust; the
+/// per-request decisions — audience binding, scopes — are made against the addressed surface,
+/// which is manifest state.
+/// </para>
+/// </remarks>
+/// <param name="Issuer">The absolute URI of the authorization server this process trusts.</param>
+/// <param name="Validation">How a presented token is validated against the issuer.</param>
+/// <param name="IntrospectionEndpoint">Overrides RFC 8414 discovery of the RFC 7662 endpoint.</param>
+/// <param name="JwksUri">Overrides the issuer metadata's <c>jwks_uri</c>.</param>
+public sealed record HostAuthorizationOptions(
+    string Issuer,
+    HostTokenValidation Validation,
+    string? IntrospectionEndpoint = null,
+    string? JwksUri = null)
+{
+    /// <summary>
+    /// The configuration for a process that trusts no issuer, which serves mounts that declare
+    /// no surface scope and refuses mounts that do.
+    /// </summary>
+    public static HostAuthorizationOptions None { get; } =
+        new(string.Empty, (HostTokenValidation)(-1));
+}
+
+/// <summary>How a presented token is validated against the trusted issuer.</summary>
+public enum HostTokenValidation
+{
+    /// <summary>Remote RFC 7662 introspection; the response's <c>active</c> flag decides.</summary>
+    Introspection = 0,
+
+    /// <summary>Local signature and lifetime validation against the issuer's published keys.</summary>
+    Jwks = 1,
+}
 
 public static class HostConfiguration
 {
@@ -61,6 +109,29 @@ public static class HostConfiguration
     /// <summary>Key naming a directory this process serves, which the file store must sit outside.</summary>
     public const string ServedContentRootKey = "served-content-root";
 
+    /// <summary>Key naming the authorization server issuer this process trusts.</summary>
+    /// <remarks>
+    /// An absolute http or https URI. Required exactly when a mounted Manifest declares a surface
+    /// scope; the pairing with <see cref="TokenValidationKey"/> is both-or-neither.
+    /// </remarks>
+    public const string IssuerKey = "issuer";
+
+    /// <summary>Key selecting how a presented token is validated against the trusted issuer.</summary>
+    /// <remarks>
+    /// <c>introspection</c> (RFC 7662, endpoint discovered from RFC 8414 metadata unless
+    /// <see cref="IntrospectionEndpointKey"/> overrides it) or <c>jwks</c> (local signature
+    /// validation against the issuer's published keys unless <see cref="JwksUriKey"/> overrides
+    /// it). Required when <see cref="IssuerKey"/> is set; both values narrow to the same
+    /// byte-exact audience binding.
+    /// </remarks>
+    public const string TokenValidationKey = "token-validation";
+
+    /// <summary>Key naming the RFC 7662 introspection endpoint, overriding RFC 8414 discovery.</summary>
+    public const string IntrospectionEndpointKey = "introspection-endpoint";
+
+    /// <summary>Key naming the issuer's JWKS URI, overriding the <c>jwks_uri</c> in its published metadata.</summary>
+    public const string JwksUriKey = "jwks-uri";
+
     private static readonly string[] Simple =
     [
         FileStoreRootKey,
@@ -69,6 +140,10 @@ public static class HostConfiguration
         RequireSealedKey,
         AllowInlineSecretsKey,
         ServedContentRootKey,
+        IssuerKey,
+        TokenValidationKey,
+        IntrospectionEndpointKey,
+        JwksUriKey,
     ];
 
     /// <summary>Every key this deployable accepts, excluding the two prefixed families.</summary>
@@ -100,6 +175,10 @@ public static class HostConfiguration
         HostTransport transport = HostTransport.Http;
         bool requireSealed = false;
         bool allowInlineSecrets = false;
+        string? issuer = null;
+        HostTokenValidation? validation = null;
+        string? introspectionEndpoint = null;
+        string? jwksUri = null;
 
         foreach ((string key, string value) in settings)
         {
@@ -135,6 +214,18 @@ public static class HostConfiguration
                 case TransportKey:
                     transport = Transport(key, value, rejected);
                     break;
+                case IssuerKey:
+                    issuer = UriSetting(key, value, rejected);
+                    break;
+                case TokenValidationKey:
+                    validation = Validation(key, value, rejected);
+                    break;
+                case IntrospectionEndpointKey:
+                    introspectionEndpoint = UriSetting(key, value, rejected);
+                    break;
+                case JwksUriKey:
+                    jwksUri = UriSetting(key, value, rejected);
+                    break;
                 default:
                     rejected.Add($"'{key}' is not a setting this host accepts. It accepts {string.Join(", ", Simple)}, '{MountNarrowingPrefix}{{prefix}}:{{bound}}' and '{FloorPrefix}{{bound}}'.");
                     break;
@@ -145,6 +236,9 @@ public static class HostConfiguration
         {
             rejected.Add($"'{FileStoreRootKey}' is required. Issued file handles need somewhere to keep their content.");
         }
+
+        HostAuthorizationOptions? authorization = BindAuthorization(
+            issuer, validation, introspectionEndpoint, jwksUri, rejected);
 
         if (rejected.Count > 0)
         {
@@ -168,9 +262,94 @@ public static class HostConfiguration
             ServedContentRoots = served,
         };
 
-        binding = new HostBinding(options, new HostListenOptions(listen, transport));
+        binding = new HostBinding(options, new HostListenOptions(listen, transport), authorization);
         refusals = [];
         return true;
+    }
+
+    /// <summary>
+    /// Binds the issuer and validation-mode pair, refusing the halves separately.
+    /// </summary>
+    /// <remarks>
+    /// The pairing is both-or-neither, and so is each override: an introspection endpoint with
+    /// JWKS validation names an address nothing would read, and a JWKS URI with introspection
+    /// validation names keys nothing would fetch. A half-configured boundary is worse than an
+    /// absent one, because the startup refusal for a scope-declaring mount will name a
+    /// configured issuer that still validates nothing.
+    /// </remarks>
+    private static HostAuthorizationOptions? BindAuthorization(
+        string? issuer,
+        HostTokenValidation? validation,
+        string? introspectionEndpoint,
+        string? jwksUri,
+        List<string> rejected)
+    {
+        if (issuer is null && validation is null)
+        {
+            if (introspectionEndpoint is not null || jwksUri is not null)
+            {
+                rejected.Add($"'{IssuerKey}' is required with '{TokenValidationKey}'. An endpoint or a key set with no issuer to trust validates nothing.");
+            }
+
+            return null;
+        }
+
+        if (issuer is null)
+        {
+            rejected.Add($"'{TokenValidationKey}' was given without '{IssuerKey}'. Name the issuer whose tokens the mode validates.");
+            return null;
+        }
+
+        if (validation is not { } mode)
+        {
+            rejected.Add($"'{IssuerKey}' was given without '{TokenValidationKey}'. Choose 'introspection' or 'jwks'.");
+            return null;
+        }
+
+        if (mode is HostTokenValidation.Introspection && jwksUri is not null)
+        {
+            rejected.Add($"'{JwksUriKey}' names keys nothing reads: '{TokenValidationKey}' is 'introspection'. Remove it, or select 'jwks'.");
+        }
+
+        if (mode is HostTokenValidation.Jwks && introspectionEndpoint is not null)
+        {
+            rejected.Add($"'{IntrospectionEndpointKey}' names an endpoint nothing calls: '{TokenValidationKey}' is 'jwks'. Remove it, or select 'introspection'.");
+        }
+
+        return new HostAuthorizationOptions(issuer, mode, introspectionEndpoint, jwksUri);
+    }
+
+    /// <summary>
+    /// Reads an absolute http or https URI, the shape every address an authorization boundary
+    /// fetches or compares has to have.
+    /// </summary>
+    private static string? UriSetting(string key, string value, List<string> rejected)
+    {
+        if (Uri.TryCreate(value, UriKind.Absolute, out Uri? address)
+            && (string.Equals(address.Scheme, Uri.UriSchemeHttp, StringComparison.Ordinal)
+                || string.Equals(address.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal)))
+        {
+            return value;
+        }
+
+        rejected.Add($"'{key}' was given '{value}', which is not an absolute http or https address.");
+        return null;
+    }
+
+    private static HostTokenValidation? Validation(string key, string value, List<string> rejected)
+    {
+        if (string.Equals(value, "introspection", StringComparison.Ordinal))
+        {
+            return HostTokenValidation.Introspection;
+        }
+
+        if (string.Equals(value, "jwks", StringComparison.Ordinal))
+        {
+            return HostTokenValidation.Jwks;
+        }
+
+        rejected.Add($"'{key}' was given '{value}'. Choose 'introspection' or 'jwks'.");
+        return null;
     }
 
     /// <summary>

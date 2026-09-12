@@ -30,9 +30,14 @@
     negotiation, session handling and error shapes are the SDK's; what to advertise and what
     an invocation means stay on the other side of the line, which is why the library needs
     no protocol package at all.
+
+    Token security is referenced here for the same reason: the configured JWKS validation
+    mode is a property of the deployable's authorization boundary, and the library's seam
+    stays free of JOSE types.
   -->
   <ItemGroup>
     <PackageReference Include="ModelContextProtocol.AspNetCore" />
+    <PackageReference Include="Microsoft.IdentityModel.JsonWebTokens" />
   </ItemGroup>
 
   <ItemGroup>

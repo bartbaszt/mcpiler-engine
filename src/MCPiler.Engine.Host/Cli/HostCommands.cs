@@ -110,7 +110,7 @@ public static class HostCommands
                 progress?.Flush();
             });
 
-        await using WebApplication app = EngineWebHost.Build(result, binding.Listener, execution);
+        await using WebApplication app = EngineWebHost.Build(result, binding, execution);
 
         await app.StartAsync(cancellationToken).ConfigureAwait(false);
         await app.WaitForShutdownAsync(cancellationToken).ConfigureAwait(false);

@@ -69,11 +69,17 @@ internal sealed class ServedEngine : IAsyncDisposable
     public static OutboundConnectionPolicy Permissive() => new(static _ => false);
 
     /// <summary>Starts a host for <paramref name="options"/>, which must not be refused.</summary>
+    /// <param name="options">What the library is told.</param>
+    /// <param name="cancellationToken">Cancels startup.</param>
+    /// <param name="connections">The outbound policy, permissive unless a test asks otherwise.</param>
+    /// <param name="diagnostics">Where operational diagnostics are reported.</param>
+    /// <param name="authorization">The authorization configuration, or none for mounts that require none.</param>
     public static async Task<ServedEngine> StartAsync(
         RuntimeOptions options,
         CancellationToken cancellationToken,
         OutboundConnectionPolicy? connections = null,
-        Action<RuntimeDiagnostic>? diagnostics = null)
+        Action<RuntimeDiagnostic>? diagnostics = null,
+        HostAuthorizationOptions? authorization = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -93,7 +99,10 @@ internal sealed class ServedEngine : IAsyncDisposable
 
         WebApplication app = EngineWebHost.Build(
             started,
-            new HostListenOptions("http://127.0.0.1:0", HostTransport.Http),
+            new HostBinding(
+                options,
+                new HostListenOptions("http://127.0.0.1:0", HostTransport.Http),
+                authorization),
             execution);
 
         try

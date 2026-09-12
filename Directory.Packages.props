@@ -43,6 +43,15 @@
       than by comparison.
     -->
     <PackageVersion Include="JsonSchema.Net" Version="9.4.0" />
+
+    <!--
+      Runtime as of the authorization boundary. JWKS validation needs a token security
+      library: signature and lifetime checking that is maintained against the JOSE
+      ecosystem rather than reimplemented here. MIT licensed. Used only by the host
+      deployable's configured token-validation mode; introspection mode ships without
+      reaching it.
+    -->
+    <PackageVersion Include="Microsoft.IdentityModel.JsonWebTokens" Version="8.22.0" />
   </ItemGroup>
 
   <ItemGroup Label="Testing">
