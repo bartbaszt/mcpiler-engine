@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Text.Json.Nodes;
 
 namespace MCPiler.Engine.Transform;
@@ -29,30 +30,74 @@ internal static class TransformValidation
     /// <param name="document">The program as it appears in the manifest.</param>
     /// <param name="ceiling">The manifest policy's transform ceiling.</param>
     /// <param name="fileArguments">The agent argument names declared as file slots.</param>
+    /// <param name="expected">The direction the member carrying this program is read in.</param>
     /// <returns>Every reason the program is refused; empty when it is valid.</returns>
     internal static IReadOnlyList<TransformFinding> Validate(
         JsonObject document,
         TransformCeilingValues ceiling,
-        IReadOnlySet<string> fileArguments)
+        IReadOnlySet<string> fileArguments,
+        TransformDirection expected)
+    {
+        _ = TryAccept(document, ceiling, fileArguments, expected, out _, out IReadOnlyList<TransformFinding> findings);
+        return findings;
+    }
+
+    /// <summary>
+    /// Validates one program document and yields it when nothing refuses it.
+    /// </summary>
+    /// <remarks>
+    /// The accepted program comes back from the same call that accepted it. A second read to
+    /// obtain it would be a second parse of the same bytes, and the thing that runs would no
+    /// longer be, by construction, the thing that passed.
+    /// </remarks>
+    internal static bool TryAccept(
+        JsonObject document,
+        TransformCeilingValues ceiling,
+        IReadOnlySet<string> fileArguments,
+        TransformDirection expected,
+        [NotNullWhen(true)] out TransformProgram? program,
+        out IReadOnlyList<TransformFinding> findings)
     {
         ArgumentNullException.ThrowIfNull(document);
         ArgumentNullException.ThrowIfNull(ceiling);
         ArgumentNullException.ThrowIfNull(fileArguments);
 
-        (TransformProgram? program, IReadOnlyList<TransformFinding> parsed) =
+        (TransformProgram? parsedProgram, IReadOnlyList<TransformFinding> parsed) =
             TransformProgramReader.Read(document);
 
-        if (program is null)
+        if (parsedProgram is null)
         {
-            return parsed;
+            program = null;
+            findings = parsed;
+            return false;
         }
 
-        List<TransformFinding> findings = [.. parsed];
+        List<TransformFinding> collected = [.. parsed];
 
-        PointerValidation.Validate(program, findings);
-        BoundsValidation.Validate(program, ceiling, findings);
-        ExclusionValidation.Validate(program, fileArguments, findings);
+        if (parsedProgram.Direction != expected)
+        {
+            collected.Add(new TransformFinding(
+                TransformCodes.DirectionMismatch,
+                $"The program declares the {Name(parsedProgram.Direction)} direction but occupies the " +
+                $"{Name(expected)} member, so its pointers were measured against the wrong roots."));
+        }
 
-        return findings;
+        PointerValidation.Validate(parsedProgram, collected);
+        BoundsValidation.Validate(parsedProgram, ceiling, collected);
+        ExclusionValidation.Validate(parsedProgram, fileArguments, collected);
+
+        findings = collected;
+
+        if (collected.Count > 0)
+        {
+            program = null;
+            return false;
+        }
+
+        program = parsedProgram;
+        return true;
     }
+
+    private static string Name(TransformDirection direction)
+        => direction == TransformDirection.Input ? "input" : "output";
 }

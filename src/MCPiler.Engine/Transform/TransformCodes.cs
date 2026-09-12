@@ -1,7 +1,7 @@
 namespace MCPiler.Engine.Transform;
 
 /// <summary>
-/// The machine-readable reasons Tier-1 transform validation refuses a program.
+/// The machine-readable reasons a transformation program is refused or aborted.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -13,8 +13,15 @@ namespace MCPiler.Engine.Transform;
 /// disagree silently.
 /// </para>
 /// <para>
-/// Only the Tier-1 codes appear here. The runtime limit codes belong to the evaluator and
-/// arrive with it; a code declared before anything can emit it is a contract nothing honours.
+/// Both halves live here: the load-time codes Tier 1 produces and the codes the evaluator
+/// aborts with. Two of them belong to both halves, because a template pattern and a file
+/// handle are checked statically and again while running — and one condition with two names
+/// is exactly what this type exists to prevent.
+/// </para>
+/// <para>
+/// Every code an evaluator emits is declared. The alternative, a string literal at the
+/// throwing site, produces codes nothing enumerates, which is how a caller ends up matching
+/// on an identifier no list admits exists.
 /// </para>
 /// </remarks>
 internal static class TransformCodes
@@ -55,6 +62,44 @@ internal static class TransformCodes
     /// <summary>A program writes the content type, which the request compiler owns.</summary>
     internal const string ContentTypeReserved = "E_CONTENT_TYPE_RESERVED";
 
+    /// <summary>
+    /// A program declares a direction other than the one the member it occupies is read in.
+    /// </summary>
+    /// <remarks>
+    /// The pointer-root gate is keyed off the declared direction, so a program sitting in the
+    /// wrong member is measured against the wrong set of roots. That makes the gate
+    /// meaningless rather than merely wrong, which is why this is refused at load instead of
+    /// being tolerated as an authoring slip.
+    /// </remarks>
+    internal const string DirectionMismatch = "E_DIRECTION_MISMATCH";
+
+    /// <summary>The evaluation executed more steps than the effective step limit allows.</summary>
+    internal const string LimitSteps = "E_LIMIT_STEPS";
+
+    /// <summary>The evaluation materialized more nodes than the effective node limit allows.</summary>
+    internal const string LimitNodes = "E_LIMIT_NODES";
+
+    /// <summary>The working document nested deeper than the effective depth limit allows.</summary>
+    internal const string LimitDepth = "E_LIMIT_DEPTH";
+
+    /// <summary>The produced document is larger than the effective output-size limit allows.</summary>
+    internal const string LimitOutputBytes = "E_LIMIT_OUTPUT_BYTES";
+
+    /// <summary>The evaluation iterated more items than the effective fan-out limit allows.</summary>
+    internal const string LimitFanout = "E_LIMIT_FANOUT";
+
+    /// <summary>A step declaring <c>onMissing: error</c> found nothing at its source.</summary>
+    internal const string MissingSource = "E_MISSING_SOURCE";
+
+    /// <summary>A <c>convert</c> step met a value the target type cannot represent.</summary>
+    internal const string ConvertFailed = "E_CONVERT_FAILED";
+
+    /// <summary>
+    /// A step failed for a reason the vocabulary does not name — a source of the wrong JSON
+    /// kind, or a target path that addresses no writable container.
+    /// </summary>
+    internal const string StepFailed = "E_STEP_FAILED";
+
     /// <summary>Every code this build can emit, for the guard that each one is reachable.</summary>
     internal static IReadOnlySet<string> All { get; } = new HashSet<string>(StringComparer.Ordinal)
     {
@@ -70,6 +115,15 @@ internal static class TransformCodes
         StepLimit,
         FileHandle,
         ContentTypeReserved,
+        DirectionMismatch,
+        LimitSteps,
+        LimitNodes,
+        LimitDepth,
+        LimitOutputBytes,
+        LimitFanout,
+        MissingSource,
+        ConvertFailed,
+        StepFailed,
     };
 }
 

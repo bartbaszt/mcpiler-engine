@@ -377,6 +377,20 @@ declared as an RFC 6901 pointer parameter, named `source` and `target`; a step
 never computes its own location. `mapArray` requires `maxItems` and `mapObject`
 requires `maxEntries`.
 
+A program is read in the direction the member carrying it is read in, and the
+declared `direction` must agree. The pointer-root rule is keyed off the declared
+direction, so a program sitting in the wrong member is measured against the wrong
+roots; that makes the rule meaningless rather than merely wrong, and it is
+refused.
+
+In the input direction the document is the agent-facing arguments with the
+request part selectors overlaid at its root: a `source` reads an argument the
+upstream never declared, and a `target` writes `/path`, `/query`, `/headers`,
+`/cookies`, `/body` or `/parts`. In the output direction the document is
+`/status`, `/headers` — one value per header — and `/body`, parsed as JSON when
+it parses and carried as text when it does not. A response preserved as a file
+reference is never transformed.
+
 Inside `mapArray` and `mapObject` the nested steps address the iterated item as
 their document root. An item has no request parts, so a pointer rooted at a part
 selector is refused there.
@@ -403,8 +417,37 @@ Program codes:
 | `E_STEP_LIMIT` | The static worst-case step count exceeds the effective limit. |
 | `E_STATIC_DEPTH` | The static worst-case nesting depth exceeds the effective limit. |
 | `E_STATIC_FANOUT` | The static worst-case array fan-out exceeds the effective limit. |
-| `E_FILE_HANDLE` | A program constructs a file handle or coerces a file argument. |
+| `E_FILE_HANDLE` | A program constructs a file handle, coerces a file argument, or moves a value that is not a handle through `fileRef`. |
 | `E_CONTENT_TYPE_RESERVED` | A program writes the content type. |
+| `E_DIRECTION_MISMATCH` | The declared direction is not the one the member carrying the program is read in. |
+| `E_LIMIT_STEPS` | The evaluation executed more steps than the effective limit allows. |
+| `E_LIMIT_NODES` | The evaluation materialized more nodes than the effective limit allows. |
+| `E_LIMIT_DEPTH` | The working document nested deeper than the effective limit allows. |
+| `E_LIMIT_OUTPUT_BYTES` | The produced document is larger than the effective limit allows. |
+| `E_LIMIT_FANOUT` | The evaluation iterated more items than the effective limit allows. |
+| `E_MISSING_SOURCE` | A step declaring `onMissing: error` found nothing at its source. |
+| `E_CONVERT_FAILED` | A `convert` step met a value the target type cannot represent. |
+| `E_STEP_FAILED` | A step failed for a reason the vocabulary does not name: a source of the wrong JSON kind, or a target that addresses no writable container. |
+
+The first eleven refuse a manifest at load. The rest abort one evaluation, and
+every one of them names the top-level step index and the operation that raised
+it; only `E_LIMIT_OUTPUT_BYTES` names no step, because the size of the produced
+document belongs to the program rather than to any one step. An abort yields no
+document, so a partially applied result is never presented as a complete one.
+
+The bounds are enforced while running, against the effective limits, and
+independently of the static estimate. The estimate proves a program could stay
+inside its bounds; it has no access to the document, so only the runtime check
+proves that it did. A transformation never raises an execution limit the policy
+declares: an output program's `maxOutputBytes` is additionally narrowed to the
+policy's response size limit, and the response ceiling itself is applied to the
+decoded bytes before any output program runs.
+
+Evaluation is a pure function of the program, the document and the effective
+limits. Every comparison and conversion is invariant-culture, values travel as
+JSON nodes so a number's token survives a program that merely moves it, and
+member order is the order the steps wrote in. There is no clock, no randomness,
+no ambient identifier and no registration point where one could be added.
 
 Shape inference and dry-run evidence are the producer's. A manifest carrying
 neither is complete; their absence is not a defect in the artifact.

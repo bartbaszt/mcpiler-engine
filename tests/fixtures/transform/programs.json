@@ -1,0 +1,593 @@
+{
+  "about": "Authored transformation programs replayed by both implementations. Each case states a program, the document it runs against, and either the document it must produce or the abort it must raise. The expected values are written by hand from the specification, never captured from a run: a corpus generated from one implementation records that implementation's beliefs, and the point of this file is to catch the two disagreeing.",
+  "defaults": {
+    "limits": {
+      "maxSteps": 64,
+      "maxDepth": 32,
+      "maxNodes": 8192,
+      "maxOutputBytes": 262144,
+      "maxArrayFanout": 1024
+    }
+  },
+  "cases": [
+    {
+      "name": "passthrough-with-no-steps-is-the-identity",
+      "why": "A declared transformation that does nothing must compile the same request as no transformation at all, tokens included.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": []
+      },
+      "document": { "count": 1.0, "scale": 1e3, "big": 9007199254740993, "name": "pico" },
+      "output": { "count": 1.0, "scale": 1e3, "big": 9007199254740993, "name": "pico" }
+    },
+    {
+      "name": "an-empty-base-starts-from-nothing",
+      "why": "base:empty discards the incoming document instead of merging onto it.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "empty",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "setConstant", "target": "/query/fixed", "value": "yes" }
+        ]
+      },
+      "document": { "name": "pico" },
+      "output": { "query": { "fixed": "yes" } }
+    },
+    {
+      "name": "copy-leaves-the-source-in-place",
+      "why": "copy duplicates; only move removes.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "copy", "source": "/name", "target": "/query/name", "onMissing": "skip" }
+        ]
+      },
+      "document": { "name": "pico" },
+      "output": { "name": "pico", "query": { "name": "pico" } }
+    },
+    {
+      "name": "move-removes-the-source",
+      "why": "The agent-facing member must not survive into the request twice.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "move", "source": "/name", "target": "/query/name", "onMissing": "skip" }
+        ]
+      },
+      "document": { "name": "pico", "keep": true },
+      "output": { "keep": true, "query": { "name": "pico" } }
+    },
+    {
+      "name": "omit-removes-a-member-and-tolerates-an-absent-one",
+      "why": "Omitting what is not there is not an error; it is already omitted.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "omit", "target": "/secret" },
+          { "op": "omit", "target": "/never" }
+        ]
+      },
+      "document": { "secret": "s", "keep": 1 },
+      "output": { "keep": 1 }
+    },
+    {
+      "name": "pick-projects-only-the-named-members",
+      "why": "A member that is absent from the source is absent from the projection rather than null.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "pick", "source": "/profile", "members": ["a", "c", "missing"], "target": "/body/profile", "onMissing": "skip" }
+        ]
+      },
+      "document": { "profile": { "a": 1, "b": 2, "c": 3 } },
+      "output": { "profile": { "a": 1, "b": 2, "c": 3 }, "body": { "profile": { "a": 1, "c": 3 } } }
+    },
+    {
+      "name": "nest-wraps-a-value-under-a-name",
+      "why": "The name is a member name, not a pointer; it is escaped rather than parsed.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "nest", "source": "/name", "name": "wrapped", "target": "/body", "onMissing": "skip" }
+        ]
+      },
+      "document": { "name": "pico" },
+      "output": { "name": "pico", "body": { "wrapped": "pico" } }
+    },
+    {
+      "name": "flatten-promotes-members-one-level",
+      "why": "Each member is written individually, so an existing sibling at the target survives.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "setConstant", "target": "/query/kept", "value": "k" },
+          { "op": "flatten", "source": "/profile", "target": "/query", "onMissing": "skip" }
+        ]
+      },
+      "document": { "profile": { "a": 1, "b": 2 } },
+      "output": { "profile": { "a": 1, "b": 2 }, "query": { "kept": "k", "a": 1, "b": 2 } }
+    },
+    {
+      "name": "flattenArray-concatenates-one-level-only",
+      "why": "A non-array element is carried through rather than dropped, and a doubly nested array is not flattened twice.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "flattenArray", "source": "/groups", "target": "/body/ids", "onMissing": "skip" }
+        ]
+      },
+      "document": { "groups": [[1, 2], 3, [[4]]] },
+      "output": { "groups": [[1, 2], 3, [[4]]], "body": { "ids": [1, 2, 3, [4]] } }
+    },
+    {
+      "name": "merge-lets-a-later-source-win",
+      "why": "Sources are applied in declaration order, so the conflict rule is stated rather than incidental.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "merge", "sources": ["/a", "/b"], "target": "/body", "onMissing": "skip" }
+        ]
+      },
+      "document": { "a": { "x": 1, "y": 1 }, "b": { "y": 2, "z": 2 } },
+      "output": { "a": { "x": 1, "y": 1 }, "b": { "y": 2, "z": 2 }, "body": { "x": 1, "y": 2, "z": 2 } }
+    },
+    {
+      "name": "merge-ignores-a-source-that-is-not-an-object",
+      "why": "With onMissing other than error, a scalar source contributes nothing instead of aborting.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "merge", "sources": ["/a", "/scalar"], "target": "/body", "onMissing": "skip" }
+        ]
+      },
+      "document": { "a": { "x": 1 }, "scalar": 7 },
+      "output": { "a": { "x": 1 }, "scalar": 7, "body": { "x": 1 } }
+    },
+    {
+      "name": "setConstant-writes-a-composite-value",
+      "why": "The declared value is cloned, so the program document is not aliased into the output.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "setConstant", "target": "/body/flags", "value": { "on": true, "list": [1, 2] } }
+        ]
+      },
+      "document": {},
+      "output": { "body": { "flags": { "on": true, "list": [1, 2] } } }
+    },
+    {
+      "name": "default-writes-only-where-nothing-is-there",
+      "why": "An existing value, including a falsy one, is not a missing value.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "default", "target": "/query/present", "value": "fallback" },
+          { "op": "default", "target": "/query/zero", "value": "fallback" },
+          { "op": "default", "target": "/query/absent", "value": "fallback" }
+        ]
+      },
+      "document": { "query": { "present": "kept", "zero": 0 } },
+      "output": { "query": { "present": "kept", "zero": 0, "absent": "fallback" } }
+    },
+    {
+      "name": "convert-reads-and-writes-invariant-text",
+      "why": "A decimal point is a decimal point on every host; a comma would make the same program mean two things.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "convert", "source": "/fraction", "target": "/query/fraction", "to": "string", "onMissing": "skip" },
+          { "op": "convert", "source": "/text", "target": "/query/parsed", "to": "number", "onMissing": "skip" },
+          { "op": "convert", "source": "/yes", "target": "/query/yes", "to": "boolean", "onMissing": "skip" }
+        ]
+      },
+      "document": { "fraction": 1.5, "text": "2.25", "yes": "true" },
+      "output": { "fraction": 1.5, "text": "2.25", "yes": "true", "query": { "fraction": "1.5", "parsed": 2.25, "yes": true } }
+    },
+    {
+      "name": "template-renders-literal-text-and-bound-placeholders",
+      "why": "The only substitution is a declared name; nothing else in the pattern is interpreted.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          {
+            "op": "template",
+            "target": "/query/label",
+            "pattern": "user:{who}/rank:{rank}",
+            "arguments": [
+              { "name": "who", "pointer": "/name" },
+              { "name": "rank", "pointer": "/rank" }
+            ],
+            "onMissing": "skip"
+          }
+        ]
+      },
+      "document": { "name": "pico", "rank": 3 },
+      "output": { "name": "pico", "rank": 3, "query": { "label": "user:pico/rank:3" } }
+    },
+    {
+      "name": "coalesce-takes-the-first-source-that-resolves",
+      "why": "Order is the rule, and a source that is absent is skipped rather than written as null.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "coalesce", "sources": ["/absent", "/second", "/third"], "target": "/query/pick" }
+        ]
+      },
+      "document": { "second": "b", "third": "c" },
+      "output": { "second": "b", "third": "c", "query": { "pick": "b" } }
+    },
+    {
+      "name": "coalesce-writes-nothing-when-no-source-resolves",
+      "why": "An absent result is absent, not null: a null would serialize into the request.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "coalesce", "sources": ["/absent", "/gone"], "target": "/query/pick" }
+        ]
+      },
+      "document": { "kept": 1 },
+      "output": { "kept": 1 }
+    },
+    {
+      "name": "enumMap-matches-on-the-serialized-value",
+      "why": "Equality is over the JSON value, so a string 1 does not match a number 1.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          {
+            "op": "enumMap",
+            "source": "/state",
+            "target": "/query/state",
+            "mappings": [
+              { "from": "open", "to": 1 },
+              { "from": "closed", "to": 2 }
+            ],
+            "onMissing": "skip"
+          },
+          {
+            "op": "enumMap",
+            "source": "/other",
+            "target": "/query/other",
+            "mappings": [
+              { "from": 1, "to": "one" }
+            ],
+            "onMissing": "skip"
+          }
+        ]
+      },
+      "document": { "state": "closed", "other": "1" },
+      "output": { "state": "closed", "other": "1", "query": { "state": 2 } }
+    },
+    {
+      "name": "mapArray-applies-nested-steps-to-each-item",
+      "why": "A nested step addresses the item, and the bound truncates rather than aborting.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          {
+            "op": "mapArray",
+            "source": "/rows",
+            "target": "/body/rows",
+            "maxItems": 2,
+            "onMissing": "skip",
+            "steps": [
+              { "op": "move", "source": "/raw", "target": "/value", "onMissing": "skip" }
+            ]
+          }
+        ]
+      },
+      "document": { "rows": [{ "raw": 1 }, { "raw": 2 }, { "raw": 3 }] },
+      "output": { "rows": [{ "raw": 1 }, { "raw": 2 }, { "raw": 3 }], "body": { "rows": [{ "value": 1 }, { "value": 2 }] } }
+    },
+    {
+      "name": "mapObject-keeps-the-keys-and-rewrites-the-values",
+      "why": "Iteration is over values; the key set is the source's, in the source's order.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          {
+            "op": "mapObject",
+            "source": "/entries",
+            "target": "/body/entries",
+            "maxEntries": 10,
+            "onMissing": "skip",
+            "steps": [
+              { "op": "setConstant", "target": "/seen", "value": true }
+            ]
+          }
+        ]
+      },
+      "document": { "entries": { "b": { "n": 1 }, "a": { "n": 2 } } },
+      "output": { "entries": { "b": { "n": 1 }, "a": { "n": 2 } }, "body": { "entries": { "b": { "n": 1, "seen": true }, "a": { "n": 2, "seen": true } } } }
+    },
+    {
+      "name": "limitArray-truncates-without-iterating",
+      "why": "Truncation is a copy of a prefix, so the items are unchanged.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "limitArray", "source": "/ids", "target": "/query/ids", "maxItems": 3, "onMissing": "skip" }
+        ]
+      },
+      "document": { "ids": [1, 2, 3, 4, 5] },
+      "output": { "ids": [1, 2, 3, 4, 5], "query": { "ids": [1, 2, 3] } }
+    },
+    {
+      "name": "when-runs-the-then-branch-on-a-closed-predicate",
+      "why": "The condition is an object with a declared operator; a string would be an expression language.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          {
+            "op": "when",
+            "condition": { "gte": 18, "pointer": "/age" },
+            "steps": [
+              { "op": "setConstant", "target": "/query/tier", "value": "adult" }
+            ],
+            "elseSteps": [
+              { "op": "setConstant", "target": "/query/tier", "value": "minor" }
+            ]
+          }
+        ]
+      },
+      "document": { "age": 21 },
+      "output": { "age": 21, "query": { "tier": "adult" } }
+    },
+    {
+      "name": "when-runs-the-else-branch-and-composes-predicates",
+      "why": "not, and, in and exists compose without any operator outside the closed set.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          {
+            "op": "when",
+            "condition": {
+              "and": [
+                { "exists": "/state" },
+                { "not": { "in": ["open", "new"], "pointer": "/state" } }
+              ]
+            },
+            "steps": [
+              { "op": "setConstant", "target": "/query/closed", "value": true }
+            ],
+            "elseSteps": [
+              { "op": "setConstant", "target": "/query/closed", "value": false }
+            ]
+          }
+        ]
+      },
+      "document": { "state": "open" },
+      "output": { "state": "open", "query": { "closed": false } }
+    },
+    {
+      "name": "onMissing-null-writes-a-null-and-skip-writes-nothing",
+      "why": "The three missing-source policies are distinguishable, and only one of them produces a member.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "copy", "source": "/absent", "target": "/query/nulled", "onMissing": "null" },
+          { "op": "copy", "source": "/absent", "target": "/query/skipped", "onMissing": "skip" }
+        ]
+      },
+      "document": {},
+      "output": { "query": { "nulled": null } }
+    },
+    {
+      "name": "onMissing-error-aborts-and-names-the-step",
+      "why": "A caller has to be told which step failed, not merely that one did.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "copy", "source": "/present", "target": "/query/present", "onMissing": "skip" },
+          { "op": "copy", "source": "/absent", "target": "/query/absent", "onMissing": "error" }
+        ]
+      },
+      "document": { "present": 1 },
+      "abort": { "code": "E_MISSING_SOURCE", "step": 1 }
+    },
+    {
+      "name": "convert-refuses-a-value-it-cannot-represent",
+      "why": "A failed conversion aborts rather than producing an invented value.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "convert", "source": "/name", "target": "/query/name", "to": "number", "onMissing": "skip" }
+        ]
+      },
+      "document": { "name": "pico" },
+      "abort": { "code": "E_CONVERT_FAILED", "step": 0 }
+    },
+    {
+      "name": "a-source-of-the-wrong-kind-aborts-the-step",
+      "why": "pick over a scalar is a defect in the program, not a value to coerce.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "pick", "source": "/name", "members": ["a"], "target": "/body/x", "onMissing": "skip" }
+        ]
+      },
+      "document": { "name": "pico" },
+      "abort": { "code": "E_STEP_FAILED", "step": 0 }
+    },
+    {
+      "name": "fileRef-refuses-a-value-that-is-not-a-handle",
+      "why": "fileRef moves an identifier the caller already holds; it does not name a file from text.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "fileRef", "source": "/upload", "target": "/parts/file", "onMissing": "skip" }
+        ]
+      },
+      "document": { "upload": "definitely not a handle" },
+      "abort": { "code": "E_FILE_HANDLE", "step": 0 }
+    },
+    {
+      "name": "the-step-limit-stops-the-evaluation",
+      "why": "The bound is on executed steps, so the abort names the step that could not run.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 1, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "setConstant", "target": "/query/a", "value": 1 },
+          { "op": "setConstant", "target": "/query/b", "value": 2 }
+        ]
+      },
+      "document": {},
+      "abort": { "code": "E_LIMIT_STEPS", "step": 1 }
+    },
+    {
+      "name": "the-node-limit-stops-the-evaluation",
+      "why": "Nodes are counted while running, not estimated, because the estimate cannot see the document.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 1, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "copy", "source": "/name", "target": "/query/name", "onMissing": "skip" }
+        ]
+      },
+      "document": { "name": "pico" },
+      "abort": { "code": "E_LIMIT_NODES", "step": 0 }
+    },
+    {
+      "name": "the-depth-limit-stops-the-evaluation",
+      "why": "Depth is measured over the document the step produced.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 2, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "setConstant", "target": "/query/deep/deeper", "value": 1 }
+        ]
+      },
+      "document": {},
+      "abort": { "code": "E_LIMIT_DEPTH", "step": 0 }
+    },
+    {
+      "name": "the-fanout-limit-stops-the-evaluation",
+      "why": "Iterated items are counted across the whole evaluation, not per step.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 262144, "maxArrayFanout": 1 },
+        "steps": [
+          {
+            "op": "mapArray",
+            "source": "/rows",
+            "target": "/body/rows",
+            "maxItems": 4,
+            "onMissing": "skip",
+            "steps": [
+              { "op": "setConstant", "target": "/seen", "value": true }
+            ]
+          }
+        ]
+      },
+      "document": { "rows": [{ "n": 1 }, { "n": 2 }, { "n": 3 }, { "n": 4 }] },
+      "abort": { "code": "E_LIMIT_FANOUT", "step": 0 }
+    },
+    {
+      "name": "the-output-size-limit-stops-the-evaluation",
+      "why": "The produced document is what the bound names, so the abort belongs to the program rather than to a step.",
+      "program": {
+        "transformVersion": 1,
+        "direction": "input",
+        "base": "passthrough",
+        "limits": { "maxSteps": 64, "maxDepth": 32, "maxNodes": 8192, "maxOutputBytes": 8, "maxArrayFanout": 1024 },
+        "steps": [
+          { "op": "setConstant", "target": "/query/padding", "value": "0123456789abcdef0123456789abcdef" }
+        ]
+      },
+      "document": {},
+      "abort": { "code": "E_LIMIT_OUTPUT_BYTES" }
+    }
+  ]
+}

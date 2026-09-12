@@ -1,3 +1,5 @@
+using System.Text.Json.Nodes;
+
 namespace MCPiler.Engine.Manifest.Model;
 
 /// <summary>
@@ -73,6 +75,26 @@ public static class ManifestBindingDispatcher
     /// </remarks>
     public static IReadOnlyList<string> CredentialRefsOf(ManifestBinding? binding)
         => TryResolveHttp(binding)?.CredentialRef ?? [];
+
+    /// <summary>
+    /// Returns the program that maps agent arguments onto the request, or <c>null</c> when the
+    /// binding declares none.
+    /// </summary>
+    /// <remarks>
+    /// A program is carried as JSON because its grammar is a separate versioned contract with
+    /// its own validator and its own diagnostic codes. It is resolved here, with everything
+    /// else about a binding's shape, so nothing outside this type has to know that a
+    /// transformation is a wrapper rather than a kind.
+    /// </remarks>
+    public static JsonObject? TryResolveInputProgram(ManifestBinding? binding)
+        => binding is TransformedHttpBinding transformed ? transformed.InputProgram : null;
+
+    /// <summary>
+    /// Returns the program that maps the response onto the agent-facing value, or <c>null</c>
+    /// when the binding declares none.
+    /// </summary>
+    public static JsonObject? TryResolveOutputProgram(ManifestBinding? binding)
+        => binding is TransformedHttpBinding transformed ? transformed.OutputProgram : null;
 
     /// <summary>
     /// Returns the workflow steps <paramref name="binding"/> runs, or <c>null</c> when it is

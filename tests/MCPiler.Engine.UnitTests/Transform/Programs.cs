@@ -65,20 +65,38 @@ internal static class Programs
 
     /// <summary>Validates a document against the default ceiling and no file slots.</summary>
     internal static IReadOnlyList<TransformFinding> Validate(JsonObject document)
-        => TransformValidation.Validate(document, Ceiling, NoFiles);
+        => TransformValidation.Validate(document, Ceiling, NoFiles, Declared(document));
 
     /// <summary>Validates a document against a stated ceiling.</summary>
     internal static IReadOnlyList<TransformFinding> Validate(
         JsonObject document,
         TransformCeilingValues ceiling)
-        => TransformValidation.Validate(document, ceiling, NoFiles);
+        => TransformValidation.Validate(document, ceiling, NoFiles, Declared(document));
 
     /// <summary>Validates a document for an operation whose named arguments are file slots.</summary>
     internal static IReadOnlyList<TransformFinding> Validate(JsonObject document, params string[] files)
         => TransformValidation.Validate(
             document,
             Ceiling,
-            new HashSet<string>(files, StringComparer.Ordinal));
+            new HashSet<string>(files, StringComparer.Ordinal),
+            Declared(document));
+
+    /// <summary>Validates a document as the member named by <paramref name="expected"/>.</summary>
+    internal static IReadOnlyList<TransformFinding> Validate(
+        JsonObject document,
+        TransformDirection expected)
+        => TransformValidation.Validate(document, Ceiling, NoFiles, expected);
+
+    /// <summary>
+    /// The direction a document declares, so a case about something else is read in its own
+    /// direction rather than being refused for occupying the wrong member.
+    /// </summary>
+    private static TransformDirection Declared(JsonObject document)
+        => document["direction"] is JsonValue value
+            && value.TryGetValue(out string? text)
+            && string.Equals(text, "output", StringComparison.Ordinal)
+                ? TransformDirection.Output
+                : TransformDirection.Input;
 
     /// <summary>The single finding, asserting there is exactly one.</summary>
     internal static TransformFinding Only(IReadOnlyList<TransformFinding> findings)

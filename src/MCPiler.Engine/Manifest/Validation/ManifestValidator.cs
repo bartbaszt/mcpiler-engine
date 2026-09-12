@@ -80,9 +80,9 @@ public static class ManifestValidator
             IReadOnlySet<string> files = ExclusionValidation.FileArguments(operation.InputSchema?.Object);
             string binding = JsonPointer.Build("operations", Segment(index), "binding");
 
-            foreach ((string member, JsonObject program) in ProgramsOf(operation.Binding))
+            foreach ((string member, JsonObject program, TransformDirection direction) in ProgramsOf(operation.Binding))
             {
-                foreach (TransformFinding finding in TransformValidation.Validate(program, ceiling, files))
+                foreach (TransformFinding finding in TransformValidation.Validate(program, ceiling, files, direction))
                 {
                     diagnostics.Add(new ManifestDiagnostic(
                         ManifestDiagnosticCodes.TransformInvalid,
@@ -117,19 +117,20 @@ public static class ManifestValidator
     /// in it. A slash inside a reference token is escaped, so a path written as text arrives as
     /// a single member name nobody declared and the diagnostic points nowhere.
     /// </remarks>
-    private static IEnumerable<(string Pointer, JsonObject Program)> ProgramsOf(ManifestBinding binding)
+    private static IEnumerable<(string Pointer, JsonObject Program, TransformDirection Direction)> ProgramsOf(
+        ManifestBinding binding)
     {
         switch (binding)
         {
             case TransformedHttpBinding transformed:
                 if (transformed.InputProgram is { } input)
                 {
-                    yield return (JsonPointer.Build("inputProgram"), input);
+                    yield return (JsonPointer.Build("inputProgram"), input, TransformDirection.Input);
                 }
 
                 if (transformed.OutputProgram is { } output)
                 {
-                    yield return (JsonPointer.Build("outputProgram"), output);
+                    yield return (JsonPointer.Build("outputProgram"), output, TransformDirection.Output);
                 }
 
                 break;
@@ -141,13 +142,17 @@ public static class ManifestValidator
                     {
                         yield return (
                             JsonPointer.Build("steps", Segment(index), "inputProgram"),
-                            step);
+                            step,
+                            TransformDirection.Input);
                     }
                 }
 
                 if (compound.OutputSelection?.OutputProgram is { } selection)
                 {
-                    yield return (JsonPointer.Build("outputSelection", "outputProgram"), selection);
+                    yield return (
+                        JsonPointer.Build("outputSelection", "outputProgram"),
+                        selection,
+                        TransformDirection.Output);
                 }
 
                 break;

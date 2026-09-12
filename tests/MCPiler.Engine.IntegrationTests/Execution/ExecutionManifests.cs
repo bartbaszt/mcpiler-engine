@@ -25,7 +25,7 @@ internal static class ExecutionManifests
         ExecutionLimits? limits = null,
         IReadOnlyList<string>? allowedOrigins = null,
         ManifestOperation? operation = null,
-        HttpBinding? binding = null,
+        ManifestBinding? binding = null,
         CredentialsSection? credentials = null)
     {
         var declared = operation ?? Operation();

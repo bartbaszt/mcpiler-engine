@@ -108,6 +108,7 @@ public sealed class ExecutionFailureClassificationTests
             [ExecutionFailureKind.None] = "a successful result carries it",
             [ExecutionFailureKind.Compilation] = "ExecutionService refuses an unexposed operation, an unresolvable binding, or a compiler rejection",
             [ExecutionFailureKind.Timeout] = "ExecutionService reports budget expiry on the send and on the body read",
+            [ExecutionFailureKind.Transformation] = "ExecutionService refuses a declared program that Tier 1 rejects or that aborts, in either direction",
         };
 
         var unaccounted = Enum.GetValues<ExecutionFailureKind>()
@@ -121,24 +122,53 @@ public sealed class ExecutionFailureClassificationTests
         Assert.All(producedElsewhere.Keys, kind => Assert.True(Enum.IsDefined(kind)));
     }
 
+    /// <summary>
+    /// The members the compiling host declares too, in its order.
+    /// </summary>
+    /// <remarks>
+    /// Stated as a list so that adding a member is an edit here as well, and a reviewer of
+    /// either repository can see the set the other is expected to carry.
+    /// </remarks>
+    private static readonly ExecutionFailureKind[] Shared =
+    [
+        ExecutionFailureKind.None,
+        ExecutionFailureKind.Compilation,
+        ExecutionFailureKind.Authentication,
+        ExecutionFailureKind.OriginPolicy,
+        ExecutionFailureKind.AddressPolicy,
+        ExecutionFailureKind.RedirectLimit,
+        ExecutionFailureKind.Timeout,
+        ExecutionFailureKind.ResponseSize,
+        ExecutionFailureKind.FileRuntime,
+        ExecutionFailureKind.Transport,
+    ];
+
+    /// <summary>
+    /// The members this implementation declares and the compiling host does not, with why.
+    /// </summary>
+    /// <remarks>
+    /// One entry, and it is structural rather than a dialect: the compiling host evaluates a
+    /// transformation above its execution service, so an abort there never reaches a
+    /// classification at all. Naming the exception explicitly is what keeps the shared list
+    /// above readable as a shared list instead of quietly drifting into two.
+    /// </remarks>
+    private static readonly ExecutionFailureKind[] EngineOnly = [ExecutionFailureKind.Transformation];
+
     [Fact]
-    public void The_declared_set_is_the_one_both_implementations_share()
+    public void The_declared_set_extends_the_one_both_implementations_share()
     {
-        // Stated as a list so that adding a member is an edit here as well, and a reviewer of
-        // either repository can see the set the other is expected to carry.
         Assert.Equal(
-            [
-                ExecutionFailureKind.None,
-                ExecutionFailureKind.Compilation,
-                ExecutionFailureKind.Authentication,
-                ExecutionFailureKind.OriginPolicy,
-                ExecutionFailureKind.AddressPolicy,
-                ExecutionFailureKind.RedirectLimit,
-                ExecutionFailureKind.Timeout,
-                ExecutionFailureKind.ResponseSize,
-                ExecutionFailureKind.FileRuntime,
-                ExecutionFailureKind.Transport,
-            ],
-            Enum.GetValues<ExecutionFailureKind>().ToList());
+            Shared.Concat(EngineOnly).OrderBy(static kind => kind.ToString(), StringComparer.Ordinal),
+            Enum.GetValues<ExecutionFailureKind>().OrderBy(static kind => kind.ToString(), StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void The_shared_members_keep_the_order_both_implementations_declare()
+    {
+        // Order is part of what a reader compares across the two files, so the extension is
+        // asserted to be an insertion rather than a reshuffle.
+        Assert.Equal(
+            Shared,
+            Enum.GetValues<ExecutionFailureKind>().Where(kind => !EngineOnly.Contains(kind)).ToList());
     }
 }

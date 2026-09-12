@@ -17,8 +17,11 @@ namespace MCPiler.Engine.Execution;
 ///
 /// Members are ordered by where in an execution the failure becomes known: before a request is
 /// built, before a connection is attempted, during the exchange, then while handling what came
-/// back. The same members and the same order exist in the compiling host that produced the
-/// manifest, so a reader comparing the two sees one vocabulary rather than two dialects.
+/// back. The compiling host that produced the manifest declares the same vocabulary with one
+/// exception: it has no <see cref="Transformation"/> member, because it evaluates a program
+/// above its execution service rather than inside it, so the abort never reaches a
+/// classification there. Every other member and their order are the same, and a reader
+/// comparing the two sees one vocabulary rather than two dialects.
 /// </remarks>
 public enum ExecutionFailureKind
 {
@@ -30,6 +33,18 @@ public enum ExecutionFailureKind
     /// was contacted.
     /// </summary>
     Compilation,
+
+    /// <summary>
+    /// A transformation program declared on the operation was refused or aborted.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="Compilation"/> because the two send an operator to different
+    /// places: compilation is about the arguments a caller supplied, a transformation is about
+    /// a program the manifest author wrote. An input-direction abort contacted nothing; an
+    /// output-direction abort happened after a complete, in-bounds response arrived, which is
+    /// why a caller is told the program failed rather than that the upstream did.
+    /// </remarks>
+    Transformation,
 
     /// <summary>
     /// A credential the request needs could not be obtained or used: a reference naming a value

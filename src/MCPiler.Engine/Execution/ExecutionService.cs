@@ -2,6 +2,7 @@ using System.Text.Json.Nodes;
 
 using MCPiler.Engine.Execution.Files;
 using MCPiler.Engine.Manifest.Model;
+using MCPiler.Engine.Transform;
 
 namespace MCPiler.Engine.Execution;
 
@@ -132,6 +133,20 @@ public sealed class ExecutionService
                 $"The destination '{baseUri}' is not inside the governing allowed-origin set.");
         }
 
+        // Before a credential is read and before anything is compiled. A program that aborts
+        // must cost nothing observable, and a secret fetched to serve a request that could
+        // never be sent is exactly the cost the origin check above already refuses to pay.
+        if (!TransformStage.TryInput(
+                manifest,
+                entry,
+                operation,
+                request.Arguments,
+                out JsonObject arguments,
+                out string? transformFailure))
+        {
+            return Failed(ExecutionFailureKind.Transformation, transformFailure);
+        }
+
         IReadOnlyList<ResolvedCredential> credentials;
         try
         {
@@ -152,7 +167,7 @@ public sealed class ExecutionService
             compiled = RequestCompiler.Compile(
                 operation,
                 baseUri,
-                request.Arguments,
+                arguments,
                 request.Files,
                 request.FileNames,
                 request.FileMediaTypes);
@@ -171,8 +186,29 @@ public sealed class ExecutionService
             return Failed(ExecutionFailureKind.Compilation, ex.Message);
         }
 
-        return await SendAsync(request, operation, compiled, upstream, origins, limits, cancellationToken)
+        EngineExecutionResult outcome = await SendAsync(
+                request, operation, compiled, upstream, origins, limits, cancellationToken)
             .ConfigureAwait(false);
+
+        // After the exchange, and only for a response that arrived whole and inside the
+        // ceiling. A failed exchange has no body to map, and a body that breached the response
+        // limit was refused before it was ever materialized — transforming it here would hand
+        // back the bytes the ceiling exists to stop.
+        if (!outcome.Succeeded)
+        {
+            return outcome;
+        }
+
+        if (!TransformStage.TryOutput(manifest, entry, outcome, out byte[]? body, out transformFailure))
+        {
+            return outcome with
+            {
+                Failure = ExecutionFailureKind.Transformation,
+                FailureReason = transformFailure,
+            };
+        }
+
+        return ReferenceEquals(body, outcome.ResponseBody) ? outcome : outcome with { ResponseBody = body };
     }
 
     private async Task<EngineExecutionResult> SendAsync(
