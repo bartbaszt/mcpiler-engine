@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 
+using MCPiler.Engine.Compound;
 using MCPiler.Engine.Execution.Files;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Transform;
@@ -30,6 +31,18 @@ public sealed record ExecutionRequest(ManifestDocument Manifest, string Slug, Js
     /// outstanding.
     /// </remarks>
     public string? Scope { get; init; }
+
+    /// <summary>
+    /// A response ceiling for this one execution, which may only narrow the policy's.
+    /// </summary>
+    /// <remarks>
+    /// A workflow's aggregate budget is spent by its steps, and a step told only the policy's
+    /// per-response ceiling would let the sum overrun by a whole response before anyone noticed.
+    /// Stating what is left makes the aggregate a bound on what arrives rather than a total
+    /// checked after it already did. It never widens: the effective limit is the smaller of the
+    /// two, so a caller cannot raise a ceiling the policy compiled.
+    /// </remarks>
+    public long? ResponseSizeLimitBytes { get; init; }
 }
 
 /// <summary>
@@ -91,6 +104,17 @@ public sealed class ExecutionService
         if (entry is null)
         {
             return Failed(ExecutionFailureKind.Compilation, $"No operation is exposed as '{request.Slug}'.");
+        }
+
+        // Before anything single-exchange is resolved. A workflow has no one destination, no
+        // one credential scope and no one response, so every question below is the wrong
+        // question to ask about it — and it is asked of the dispatcher, not of the binding's
+        // type, so this stays the only place that knows a workflow is a possibility.
+        if (ManifestBindingDispatcher.TryResolveCompound(entry.Binding) is { } workflow)
+        {
+            return await CompoundExecutor
+                .ExecuteAsync(this, _files, request, workflow, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         var operationKey = ManifestBindingDispatcher.TryResolveOperationKey(entry.Binding);
@@ -298,7 +322,12 @@ public sealed class ExecutionService
         EngineExecutionResult partial,
         CancellationToken cancellationToken)
     {
-        var limit = limits.UpstreamResponseSizeLimitBytes;
+        // The smaller of the two. A caller may narrow this for its own accounting — a workflow
+        // spending an aggregate budget does — and may never raise what the policy compiled.
+        var limit = request.ResponseSizeLimitBytes is { } requested
+            ? Math.Min(limits.UpstreamResponseSizeLimitBytes, requested)
+            : limits.UpstreamResponseSizeLimitBytes;
+
         var binary = ResponseClassification.IsBinaryResponse(operation, response.StatusCode, response.MediaType);
 
         if (binary && _files is not null)

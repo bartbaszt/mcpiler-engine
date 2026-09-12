@@ -609,6 +609,7 @@ internal static class AgentSurfaceSectionReader
     {
         var elements = context.ObjectArray(parent, member, pointer);
         var mappings = new List<StepInputMapping>(elements.Count);
+        var targets = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var (element, elementPointer) in elements)
         {
@@ -637,6 +638,17 @@ internal static class AgentSurfaceSectionReader
                 context.Error(
                     ManifestDiagnosticCodes.PointerRootNotAllowed,
                     $"'{DiagnosticText.Echo(target)}' does not start at a request scope. Expected one of: {DiagnosticText.List(ManifestPointerRoots.RequestTargets)}.",
+                    SectionReadContext.Child(elementPointer, "target"));
+                continue;
+            }
+
+            // The format defines no merge for two writes to one place, so the second would
+            // silently replace the first and the meaning would depend on declaration order.
+            if (!targets.Add(target))
+            {
+                context.Error(
+                    ManifestDiagnosticCodes.DuplicateMappingTarget,
+                    $"Target '{DiagnosticText.Echo(target)}' is written by more than one mapping.",
                     SectionReadContext.Child(elementPointer, "target"));
                 continue;
             }

@@ -88,6 +88,136 @@ public sealed class ManifestValidatorTests
         Assert.Equal([ManifestDiagnosticCodes.SurfaceOperationUnknown], Codes(manifest));
     }
 
+    // ---- a composition may not widen a perimeter -----------------------------------------
+
+    /// <summary>
+    /// Builds a surface that publishes a workflow over <c>list-pets</c> and <c>list-shops</c>.
+    /// </summary>
+    private static ManifestDocument Composed(
+        OperationExposure workflow,
+        OperationExposure shops,
+        params SurfaceOperation[] extra)
+        => Build(
+            server: new ServerSection(
+                Name: "Example API",
+                Surfaces:
+                [
+                    new ManifestSurface(
+                        "default",
+                        [
+                            new SurfaceOperation("list-pets", OperationExposure.Direct),
+                            new SurfaceOperation("list-shops", shops),
+                            new SurfaceOperation("report", workflow),
+                            .. extra,
+                        ],
+                        IsDefault: true),
+                ]),
+            operations: new OperationsSection([ListPets(), ListShops()]),
+            agentSurface: new AgentSurfaceSection(
+            [
+                Agent("list-pets", new HttpBinding("GET /pets")),
+                Agent("list-shops", new HttpBinding("GET /shops")),
+                new AgentOperationEntry(
+                    Slug: "report",
+                    Name: "report",
+                    Binding: new CompoundBinding(
+                    [
+                        new CompoundStepEntry("a", "list-pets"),
+                        new CompoundStepEntry("b", "list-shops"),
+                    ]),
+                    Kind: AgentOperationKind.Compound),
+            ]));
+
+    [Fact]
+    public void A_workflow_reaching_an_operation_its_surface_excludes_is_refused()
+    {
+        ManifestDocument manifest = Composed(OperationExposure.Direct, OperationExposure.Hidden);
+
+        Assert.Equal([ManifestDiagnosticCodes.CompoundStepExcluded], ErrorCodes(manifest));
+    }
+
+    [Fact]
+    public void The_refusal_names_the_workflow_the_step_and_the_surface()
+    {
+        ManifestDiagnostic refusal = Assert.Single(
+            ManifestValidator.Validate(Composed(OperationExposure.Direct, OperationExposure.Hidden)),
+            static d => d.Code == ManifestDiagnosticCodes.CompoundStepExcluded);
+
+        Assert.Contains("report", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("list-shops", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("step 1", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("'b'", refusal.Message, StringComparison.Ordinal);
+        Assert.Contains("default", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Reachable through the Navigator is still reachable, so the exclusion still binds.
+    /// </summary>
+    [Fact]
+    public void A_workflow_the_surface_reaches_only_through_the_navigator_is_checked_too()
+    {
+        ManifestDocument manifest = Composed(OperationExposure.Navigator, OperationExposure.Hidden);
+
+        Assert.Equal([ManifestDiagnosticCodes.CompoundStepExcluded], ErrorCodes(manifest));
+    }
+
+    /// <summary>
+    /// A workflow the surface itself withholds cannot tunnel from that surface.
+    /// </summary>
+    /// <remarks>
+    /// There is nowhere to invoke it from, so there is no perimeter for it to widen. Refusing
+    /// it anyway would refuse a manifest whose only fault is that one surface publishes neither
+    /// half of a composition the next surface publishes in full.
+    /// </remarks>
+    [Fact]
+    public void A_workflow_the_surface_itself_excludes_is_not_asked_about()
+    {
+        ManifestDocument manifest = Composed(OperationExposure.Hidden, OperationExposure.Hidden);
+
+        Assert.Empty(ErrorCodes(manifest));
+    }
+
+    /// <summary>
+    /// An operation simply absent from a surface was never withheld from it.
+    /// </summary>
+    /// <remarks>
+    /// A surface's operation list is a selection; <c>hidden</c> is the author saying this
+    /// operation was considered for this surface and refused. Treating omission as the same
+    /// statement would mean a workflow could never be assembled from anything its surface does
+    /// not also publish on its own, which no requirement asks for.
+    /// </remarks>
+    [Fact]
+    public void An_operation_absent_from_the_surface_is_not_an_exclusion()
+    {
+        ManifestDocument manifest = Build(
+            server: new ServerSection(
+                Name: "Example API",
+                Surfaces:
+                [
+                    new ManifestSurface(
+                        "default",
+                        [new SurfaceOperation("report", OperationExposure.Direct)],
+                        IsDefault: true),
+                ]),
+            operations: new OperationsSection([ListPets(), ListShops()]),
+            agentSurface: new AgentSurfaceSection(
+            [
+                Agent("list-pets", new HttpBinding("GET /pets")),
+                Agent("list-shops", new HttpBinding("GET /shops")),
+                new AgentOperationEntry(
+                    Slug: "report",
+                    Name: "report",
+                    Binding: new CompoundBinding([new CompoundStepEntry("a", "list-shops")]),
+                    Kind: AgentOperationKind.Compound),
+            ]));
+
+        Assert.Empty(ErrorCodes(manifest));
+    }
+
+    [Fact]
+    public void A_workflow_over_operations_the_surface_publishes_is_accepted()
+        => Assert.Empty(ErrorCodes(Composed(OperationExposure.Direct, OperationExposure.Direct)));
+
     [Fact]
     public void Slug_matching_is_case_sensitive()
     {

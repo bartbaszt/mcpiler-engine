@@ -35,6 +35,7 @@ public static class ManifestValidator
         List<ManifestDiagnostic> diagnostics = [];
 
         ValidateSurfaceOperations(manifest, diagnostics);
+        ValidateCompoundExposure(manifest, diagnostics);
         ValidateBindingOperationKeys(manifest, diagnostics);
         ValidateDestinations(manifest, diagnostics);
         ValidateCredentialIdentity(manifest, diagnostics);
@@ -265,6 +266,64 @@ public static class ManifestValidator
                     "section does not declare.",
                     section: ManifestSectionName.Server,
                     pointer: JsonPointer.Build("surfaces", Segment(surfaceIndex), "operations", Segment(entryIndex), "operation")));
+            }
+        }
+    }
+
+    /// <summary>
+    /// A workflow may not reach an operation the surface that publishes it withholds.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Exposure is per surface, so the question is too: the same workflow may be legitimate on
+    /// one surface and a tunnel on another, and the answer belongs to the surface that
+    /// publishes it rather than to the manifest as a whole. A workflow no surface publishes is
+    /// not asked about at all, because there is nowhere it can be invoked from.
+    /// </para>
+    /// <para>
+    /// Only an explicit exclusion is refused. A surface's operation list is a selection, and an
+    /// operation simply not on it was never considered for that surface; <c>hidden</c> is the
+    /// author stating that this operation was considered and withheld. Refusing an omission as
+    /// well would mean a workflow could never be assembled from anything the surface does not
+    /// also publish individually, which no requirement asks for.
+    /// </para>
+    /// </remarks>
+    private static void ValidateCompoundExposure(ManifestDocument manifest, List<ManifestDiagnostic> diagnostics)
+    {
+        for (int surfaceIndex = 0; surfaceIndex < manifest.Server.Surfaces.Count; surfaceIndex++)
+        {
+            ManifestSurface surface = manifest.Server.Surfaces[surfaceIndex];
+
+            for (int entryIndex = 0; entryIndex < surface.Operations.Count; entryIndex++)
+            {
+                SurfaceOperation published = surface.Operations[entryIndex];
+
+                if (published.Exposure == OperationExposure.Hidden
+                    || manifest.AgentSurface.Operation(published.Operation) is not { } compound
+                    || ManifestBindingDispatcher.TryResolveCompoundSteps(compound.Binding) is not { } steps)
+                {
+                    continue;
+                }
+
+                for (int stepIndex = 0; stepIndex < steps.Count; stepIndex++)
+                {
+                    CompoundStepEntry step = steps[stepIndex];
+
+                    if (surface.ExposureOf(step.Operation) != OperationExposure.Hidden)
+                    {
+                        continue;
+                    }
+
+                    diagnostics.Add(ManifestDiagnostic.Error(
+                        ManifestDiagnosticCodes.CompoundStepExcluded,
+                        string.Create(
+                            CultureInfo.InvariantCulture,
+                            $"Compound operation '{DiagnosticText.Echo(published.Operation)}' reaches operation " +
+                            $"'{DiagnosticText.Echo(step.Operation)}' at step {stepIndex} ('{DiagnosticText.Echo(step.StepId)}'), " +
+                            $"which surface '{DiagnosticText.Echo(surface.Slug)}' excludes. A composition may not widen a perimeter."),
+                        section: ManifestSectionName.Server,
+                        pointer: JsonPointer.Build("surfaces", Segment(surfaceIndex), "operations", Segment(entryIndex), "operation")));
+                }
             }
         }
     }

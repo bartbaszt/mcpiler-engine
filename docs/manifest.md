@@ -350,6 +350,50 @@ Bindings:
   over other operations in this manifest. A step names another operation's slug.
   Nesting is refused. A step may read a previous step's response, never its own.
 
+### Compound workflows
+
+A workflow runs its steps strictly in order, stops at the first failure, and
+retries nothing. Every step goes through the same path a direct invocation of
+that operation takes: origin perimeter, credential scope, redirect and address
+policy, response ceiling, file handling and the step's own transformations. A
+step therefore cannot reach anywhere a direct call could not, and a credential a
+step's own binding does not name is not applied to it.
+
+A mapping writes one value at one pointer. Its source is `argument` (a pointer
+into the call's arguments), `fromStep` with `response` (a pointer into an earlier
+step's response), or `constant`. A source that addresses nothing writes nothing,
+so a mapping mentioning an optional argument does not make it mandatory. Two
+mappings in one list writing the same pointer are refused
+(`binding/duplicate-mapping-target`): the format defines no merge, so one value
+would be discarded and which one would depend on declaration order.
+
+A surface that publishes a workflow must not exclude what the workflow reaches.
+A step naming an operation the same surface marks `hidden` is refused at load
+(`binding/compound-step-excluded`), because the composition would otherwise be a
+tunnel to an operation that surface withheld. An operation simply absent from a
+surface's list is not an exclusion.
+
+Two bounds belong to the workflow rather than to any step. `maxTotalResponseBytes`
+is the aggregate across every step and is enforced in addition to each step's own
+response ceiling; `workflowTimeoutSeconds` spans the whole sequence. Both default
+from `policy.compound` and a binding may only narrow them, never raise them.
+
+A workflow that does not complete returns a body of exactly five members: `tool`,
+`failedStepId`, `stage`, `errorCode` and `stepsCompleted`. `stage` is one of
+`plan`, `mapping`, `transformation`, `execution`, `selection` or `workflow`.
+`errorCode` is an execution classification, the same vocabulary a single call
+reports. `stepsCompleted` names the steps that actually ran, because a workflow
+is one invocation to its caller and several requests to the network, and a
+timeout is never reported as a partial success.
+
+Files cross between steps only as handles. A step whose response is binary is
+stored rather than materialized, and its response `/body` carries the handle
+identifier. A later mapping may move that identifier into the step that consumes
+it, where the bytes are attached to the outgoing request and nowhere else; what
+the caller receives is the handle. Only an identifier the workflow itself issued
+is treated as a reference, so a caller's own sixty-four hexadecimal characters
+stay the text they were.
+
 ### Transformation programs
 
 A transformation program is a separate versioned contract carried inside a
@@ -673,6 +717,8 @@ The following codes are always warnings; every other code is an error:
 | `binding/compound-nested` | A compound step references another compound operation. |
 | `binding/duplicate-step-id` | Two steps in one workflow share an id. |
 | `binding/step-reference-unknown` | A mapping reads a step that does not precede it. |
+| `binding/duplicate-mapping-target` | Two mappings in one list write to the same pointer. |
+| `binding/compound-step-excluded` | A workflow reaches an operation its surface excludes. |
 | `binding/compound-binding-version-unsupported` | An unsupported `bindingVersion`. |
 | `binding/type-unknown` | A binding type outside the vocabulary. |
 | `binding/transform-invalid` | A transformation program is not a valid program. |

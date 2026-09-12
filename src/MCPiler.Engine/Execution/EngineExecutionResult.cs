@@ -1,3 +1,5 @@
+using System.Text.Json.Nodes;
+
 namespace MCPiler.Engine.Execution;
 
 /// <summary>The outcome of one execution, successful or not.</summary>
@@ -37,6 +39,18 @@ public sealed record EngineExecutionResult
 
     /// <summary>A human-readable explanation of the failure, or null on success.</summary>
     public string? FailureReason { get; init; }
+
+    /// <summary>
+    /// A structured description of the failure, for the failures that have one.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="FailureReason"/> because the two have opposite contracts. The
+    /// reason is prose and rewording it breaks nothing; this is a document whose member names
+    /// and values a caller may branch on, and changing one is a versioning event. A workflow
+    /// produces one, naming which step failed and how far it got; a single exchange has nothing
+    /// to say that the classification and the reason do not already say.
+    /// </remarks>
+    public JsonNode? FailureDetail { get; init; }
 
     /// <summary>What kind of failure occurred, or <see cref="ExecutionFailureKind.None"/>.</summary>
     public ExecutionFailureKind Failure { get; init; } = ExecutionFailureKind.None;

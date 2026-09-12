@@ -885,57 +885,11 @@ internal static class TransformEvaluator
 
     // ---- pointer mechanics ---------------------------------------------------------------
 
-    private static string Join(string target, string name)
-        => target + "/" + name.Replace("~", "~0", StringComparison.Ordinal).Replace("/", "~1", StringComparison.Ordinal);
+    private static string Join(string target, string name) => JsonPointerNodes.Join(target, name);
 
-    private static string[] Segments(string pointer)
-        => pointer.Length == 0
-            ? []
-            : [.. pointer[1..]
-                .Split('/')
-                .Select(static segment => segment
-                    .Replace("~1", "/", StringComparison.Ordinal)
-                    .Replace("~0", "~", StringComparison.Ordinal))];
+    private static string[] Segments(string pointer) => JsonPointerNodes.Segments(pointer);
 
-    /// <summary>Resolves a pointer, returning null when it addresses nothing.</summary>
-    /// <remarks>
-    /// A JSON null is nothing. An object member holding null and an array element holding null
-    /// resolve the same way, because a caller asking whether a value is there gets one answer
-    /// regardless of which container it sits in.
-    /// </remarks>
-    private static JsonNode? Read(JsonNode root, string pointer)
-    {
-        JsonNode current = root;
-
-        foreach (string segment in Segments(pointer))
-        {
-            switch (current)
-            {
-                case JsonObject members:
-                    if (!members.TryGetPropertyValue(segment, out JsonNode? next) || next is null)
-                    {
-                        return null;
-                    }
-
-                    current = next;
-                    break;
-
-                case JsonArray array when int.TryParse(segment, NumberStyles.None, CultureInfo.InvariantCulture, out int at):
-                    if (at < 0 || at >= array.Count || array[at] is not { } element)
-                    {
-                        return null;
-                    }
-
-                    current = element;
-                    break;
-
-                default:
-                    return null;
-            }
-        }
-
-        return current;
-    }
+    private static JsonNode? Read(JsonNode root, string pointer) => JsonPointerNodes.Read(root, pointer);
 
     /// <summary>
     /// Writes through the holder so the empty pointer replaces the working document.
@@ -957,70 +911,10 @@ internal static class TransformEvaluator
             return;
         }
 
-        JsonNode current = root.Node;
-
-        for (int index = 0; index < segments.Length - 1; index++)
+        if (!JsonPointerNodes.TryWrite(root.Node, pointer, value, state.Touch, out string? failure))
         {
-            string segment = segments[index];
-            state.Touch();
-
-            switch (current)
-            {
-                case JsonObject members:
-                    if (!members.TryGetPropertyValue(segment, out JsonNode? child) || child is null)
-                    {
-                        child = new JsonObject();
-                        members[segment] = child;
-                        state.Touch();
-                    }
-
-                    current = child;
-                    break;
-
-                case JsonArray array
-                    when int.TryParse(segment, NumberStyles.None, CultureInfo.InvariantCulture, out int at)
-                        && at >= 0
-                        && at < array.Count
-                        && array[at] is { } element:
-                    current = element;
-                    break;
-
-                default:
-                    throw new StepFailure(
-                        TransformCodes.StepFailed,
-                        $"The target path '{pointer}' cannot be created: '{segment}' does not address a container.");
-            }
+            throw new StepFailure(TransformCodes.StepFailed, failure!);
         }
-
-        string leaf = segments[^1];
-        state.Touch();
-
-        if (current is JsonObject target)
-        {
-            target[leaf] = value;
-            return;
-        }
-
-        if (current is JsonArray sequence
-            && int.TryParse(leaf, NumberStyles.None, CultureInfo.InvariantCulture, out int position)
-            && position >= 0
-            && position <= sequence.Count)
-        {
-            if (position == sequence.Count)
-            {
-                sequence.Add(value);
-            }
-            else
-            {
-                sequence[position] = value;
-            }
-
-            return;
-        }
-
-        throw new StepFailure(
-            TransformCodes.StepFailed,
-            $"The target path '{pointer}' does not address a writable container.");
     }
 
     private static void Remove(JsonNode root, string pointer, EvaluationState state)

@@ -97,11 +97,24 @@ public static class ManifestBindingDispatcher
         => binding is TransformedHttpBinding transformed ? transformed.OutputProgram : null;
 
     /// <summary>
+    /// Returns the workflow <paramref name="binding"/> runs, or <c>null</c> when it runs none.
+    /// </summary>
+    /// <remarks>
+    /// The whole workflow rather than only its steps, because a caller that executes one also
+    /// needs its bounds, its failure policy and its output selection. Resolving the steps here
+    /// and the bounds with a local <c>binding is CompoundBinding</c> test somewhere else would
+    /// reintroduce exactly the split this seam exists to prevent: two answers about what a
+    /// binding is, given by two pieces of code that are not obliged to agree.
+    /// </remarks>
+    public static CompoundBinding? TryResolveCompound(ManifestBinding? binding)
+        => binding as CompoundBinding;
+
+    /// <summary>
     /// Returns the workflow steps <paramref name="binding"/> runs, or <c>null</c> when it is
     /// not a compound binding.
     /// </summary>
     public static IReadOnlyList<CompoundStepEntry>? TryResolveCompoundSteps(ManifestBinding? binding)
-        => binding is CompoundBinding compound ? compound.Steps : null;
+        => TryResolveCompound(binding)?.Steps;
 
     /// <summary>
     /// Returns the operation kind <paramref name="binding"/> implies.

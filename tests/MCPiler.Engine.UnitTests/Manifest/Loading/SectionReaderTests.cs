@@ -1310,6 +1310,80 @@ public sealed class SectionReaderTests
         Assert.Contains(ManifestDiagnosticCodes.DuplicateStepId, ErrorCodes, StringComparer.Ordinal);
     }
 
+    [Fact]
+    public void AgentSurface_refuses_two_mappings_writing_one_target()
+    {
+        // No merge is defined, so the second write silently replaces the first and the
+        // workflow's meaning would depend on the order the mappings happen to be listed in.
+        SectionReader.ReadAgentSurface(
+            Json(
+                """
+                {
+                  "operations": [
+                    { "slug": "leaf", "name": "Leaf", "binding": { "type": "http", "operation": "GET /a" } },
+                    { "slug": "a", "kind": "compound", "name": "A",
+                      "binding": { "type": "compound", "steps": [
+                        { "stepId": "s", "operation": "leaf", "inputMappings": [
+                            { "target": "/query/q", "constant": "one" },
+                            { "target": "/query/q", "constant": "two" }
+                        ] }
+                      ] } }
+                  ]
+                }
+                """),
+            _diagnostics);
+
+        Assert.Contains(ManifestDiagnosticCodes.DuplicateMappingTarget, ErrorCodes, StringComparer.Ordinal);
+    }
+
+    [Fact]
+    public void AgentSurface_refuses_two_output_entries_writing_one_target()
+    {
+        SectionReader.ReadAgentSurface(
+            Json(
+                """
+                {
+                  "operations": [
+                    { "slug": "leaf", "name": "Leaf", "binding": { "type": "http", "operation": "GET /a" } },
+                    { "slug": "a", "kind": "compound", "name": "A",
+                      "binding": { "type": "compound",
+                        "steps": [ { "stepId": "s", "operation": "leaf", "inputMappings": [] } ],
+                        "outputSelection": { "entries": [
+                            { "target": "/id", "fromStep": "s", "response": "/body/id" },
+                            { "target": "/id", "fromStep": "s", "response": "/status" }
+                        ] } } }
+                  ]
+                }
+                """),
+            _diagnostics);
+
+        Assert.Contains(ManifestDiagnosticCodes.DuplicateMappingTarget, ErrorCodes, StringComparer.Ordinal);
+    }
+
+    [Fact]
+    public void AgentSurface_accepts_two_mappings_writing_two_targets()
+    {
+        SectionReader.ReadAgentSurface(
+            Json(
+                """
+                {
+                  "operations": [
+                    { "slug": "leaf", "name": "Leaf", "binding": { "type": "http", "operation": "GET /a" } },
+                    { "slug": "a", "kind": "compound", "name": "A",
+                      "binding": { "type": "compound", "steps": [
+                        { "stepId": "s", "operation": "leaf", "inputMappings": [
+                            { "target": "/query/q", "constant": "one" },
+                            { "target": "/query/r", "constant": "two" }
+                        ] }
+                      ] } }
+                  ]
+                }
+                """),
+            _diagnostics);
+
+        Assert.DoesNotContain(ManifestDiagnosticCodes.DuplicateMappingTarget, ErrorCodes, StringComparer.Ordinal);
+    }
+
     [Theory]
     [InlineData("self")]
     [InlineData("later")]

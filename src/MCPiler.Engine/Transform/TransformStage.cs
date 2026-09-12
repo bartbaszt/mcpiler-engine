@@ -149,6 +149,70 @@ internal static class TransformStage
         return true;
     }
 
+    /// <summary>
+    /// Applies a program to a part-scoped document that a caller has already assembled.
+    /// </summary>
+    /// <remarks>
+    /// A compound step's request is built from its mappings rather than from an argument
+    /// object, so there is nothing to translate on the way in. The gate is the same one an
+    /// operation's own program passes: validated again here against the same ceiling, because
+    /// a program that runs because something else is believed to have checked it is a program
+    /// nothing checked.
+    /// </remarks>
+    /// <returns>False when the program is refused or aborts.</returns>
+    internal static bool TryApply(
+        ManifestDocument manifest,
+        JsonObject program,
+        IReadOnlySet<string> slots,
+        TransformDirection direction,
+        JsonObject document,
+        out JsonObject produced,
+        [NotNullWhen(false)] out string? failure)
+    {
+        ArgumentNullException.ThrowIfNull(manifest);
+        ArgumentNullException.ThrowIfNull(program);
+        ArgumentNullException.ThrowIfNull(slots);
+        ArgumentNullException.ThrowIfNull(document);
+
+        produced = document;
+        TransformCeilingValues ceiling = direction == TransformDirection.Output
+            ? Bounded(Ceiling(manifest.Policy), manifest.Policy)
+            : Ceiling(manifest.Policy);
+
+        if (!TransformValidation.TryAccept(
+                program,
+                ceiling,
+                slots,
+                direction,
+                out TransformProgram? accepted,
+                out IReadOnlyList<TransformFinding> findings))
+        {
+            failure = Refused(Name(direction), findings);
+            return false;
+        }
+
+        TransformEvaluation evaluation = TransformEvaluator.Evaluate(accepted, document, ceiling);
+
+        if (!evaluation.Succeeded)
+        {
+            failure = $"The {Name(direction)} transformation failed: {evaluation.Describe()}";
+            return false;
+        }
+
+        if (evaluation.Output is not JsonObject result)
+        {
+            failure = $"The {Name(direction)} transformation did not produce an object document.";
+            return false;
+        }
+
+        produced = result;
+        failure = null;
+        return true;
+    }
+
+    private static string Name(TransformDirection direction)
+        => direction == TransformDirection.Output ? "output" : "input";
+
     /// <summary>The manifest policy's transform ceiling as five plain numbers.</summary>
     private static TransformCeilingValues Ceiling(PolicySection policy)
     {

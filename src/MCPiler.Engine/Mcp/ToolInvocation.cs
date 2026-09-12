@@ -167,7 +167,13 @@ internal static class ToolInvocation
 
         if (!result.Succeeded)
         {
-            return new ToolOutcome(result.FailureReason ?? Unexplained(result.Failure), IsError: true);
+            // A structured description wins where there is one. A workflow's failure has parts
+            // a caller has to react to — which step, how far it got — and a sentence carrying
+            // them would be a contract written as prose, which is a contract nobody can rely on
+            // and everybody breaks by rewording.
+            return result.FailureDetail is { } detail
+                ? new ToolOutcome(detail.ToJsonString(), IsError: true)
+                : new ToolOutcome(result.FailureReason ?? Unexplained(result.Failure), IsError: true);
         }
 
         if (result.ResponseFile is { } stored)

@@ -179,10 +179,19 @@ internal static class PartsDocument
 
     /// <summary>Builds the output-direction document from what the exchange observed.</summary>
     /// <remarks>
+    /// <para>
     /// One value per header, because a program addresses <c>/headers/name</c> and a list there
     /// would make every such pointer mean something different depending on the response. The
     /// body is parsed when it parses and carried as text when it does not, so a program over a
     /// non-JSON body still sees the payload rather than nothing.
+    /// </para>
+    /// <para>
+    /// A stored binary response puts its handle at the body, not its bytes. That is what lets a
+    /// later compound step consume the payload without it ever being materialized into anything
+    /// a caller can read: the reader addresses <c>/body</c> either way and receives an opaque
+    /// identifier where the payload was too large to be a value. Reading the bytes back in
+    /// would undo the only reason the handle exists.
+    /// </para>
     /// </remarks>
     internal static JsonObject Response(EngineExecutionResult result)
     {
@@ -203,7 +212,11 @@ internal static class PartsDocument
 
         JsonNode? body = null;
 
-        if (result.ResponseBody is { Length: > 0 } bytes)
+        if (result.ResponseFile is { } stored)
+        {
+            body = stored.Id;
+        }
+        else if (result.ResponseBody is { Length: > 0 } bytes)
         {
             string text = Encoding.UTF8.GetString(bytes);
 

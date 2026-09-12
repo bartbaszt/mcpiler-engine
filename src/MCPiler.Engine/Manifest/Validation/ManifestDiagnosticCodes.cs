@@ -158,6 +158,24 @@ public static class ManifestDiagnosticCodes
     /// </summary>
     public const string StepReferenceUnknown = "binding/step-reference-unknown";
 
+    /// <summary>Two mappings in one list write to the same pointer.</summary>
+    /// <remarks>
+    /// The format defines no merge, so one of the two values is discarded and which one depends
+    /// on declaration order. A workflow whose request changes when its mappings are reordered
+    /// has no single meaning, and the author cannot see which half was dropped.
+    /// </remarks>
+    public const string DuplicateMappingTarget = "binding/duplicate-mapping-target";
+
+    /// <summary>
+    /// A compound step reaches an operation the surface exposing the compound excludes.
+    /// </summary>
+    /// <remarks>
+    /// The exclusion is the perimeter, and a composition may not widen one. Without this the
+    /// compound is a tunnel: an operation withheld from a surface is reachable from that
+    /// surface by naming the workflow that contains it.
+    /// </remarks>
+    public const string CompoundStepExcluded = "binding/compound-step-excluded";
+
     /// <summary>A compound binding declares an unsupported binding grammar version.</summary>
     public const string CompoundBindingVersionUnsupported = "binding/compound-binding-version-unsupported";
 
@@ -428,6 +446,8 @@ public static class ManifestDiagnosticCodes
         CompoundStepUnknownOperation,
         CompoundNested,
         DuplicateStepId,
+        DuplicateMappingTarget,
+        CompoundStepExcluded,
         StepReferenceUnknown,
         CompoundBindingVersionUnsupported,
         BindingTypeUnknown,
