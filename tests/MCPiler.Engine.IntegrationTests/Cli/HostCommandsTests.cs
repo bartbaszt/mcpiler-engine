@@ -260,6 +260,19 @@ public sealed class HostCommandsTests : IDisposable
         Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
     }
 
+    [Fact]
+    public void A_shutdown_deadline_reports_the_abandoned_count_and_tool_names()
+    {
+        using var progress = new StringWriter();
+
+        HostCommands.ReportDrain(progress, new DrainReport(["list-pets", "get-pet"]));
+
+        string output = progress.ToString();
+        Assert.Contains("abandoned 2 invocation(s)", output, StringComparison.Ordinal);
+        Assert.Contains("list-pets", output, StringComparison.Ordinal);
+        Assert.Contains("get-pet", output, StringComparison.Ordinal);
+    }
+
     private static async Task<FileHandleReference> IssueAsync(string root, string payload, TimeSpan? lifetime = null)
     {
         var store = new FileHandleStore(FileHandleStoreOptions.For(root) with

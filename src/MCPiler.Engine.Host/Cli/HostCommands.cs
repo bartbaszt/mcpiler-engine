@@ -123,20 +123,54 @@ public static class HostCommands
                 progress?.WriteLine(diagnostic);
                 progress?.Flush();
             });
+        using DrainCoordinator drain = new();
 
         if (binding.Listener.Transport is HostTransport.Stdio)
         {
-            await StdioTransport.RunAsync(result, execution, cancellationToken).ConfigureAwait(false);
+            DrainReport drainReport = await StdioTransport
+                .RunAsync(result, execution, drain, binding.Lifecycle.DrainTimeout, cancellationToken)
+                .ConfigureAwait(false);
+            ReportDrain(progress, drainReport);
         }
         else
         {
-            await using WebApplication app = EngineWebHost.Build(result, binding, execution);
+            await using WebApplication app = EngineWebHost.Build(result, binding, execution, drain);
 
             await app.StartAsync(cancellationToken).ConfigureAwait(false);
-            await app.WaitForShutdownAsync(cancellationToken).ConfigureAwait(false);
+            await WaitForStoppingAsync(app, cancellationToken).ConfigureAwait(false);
+
+            DrainReport drainReport = await drain
+                .ShutdownAsync(app, binding.Lifecycle.DrainTimeout)
+                .ConfigureAwait(false);
+            ReportDrain(progress, drainReport);
         }
 
         return new CommandOutcome(ExitCodes.Success, string.Empty);
+    }
+
+    private static async Task WaitForStoppingAsync(
+        WebApplication app,
+        CancellationToken cancellationToken)
+    {
+        Task applicationStopping = Task.Delay(
+            Timeout.InfiniteTimeSpan,
+            app.Lifetime.ApplicationStopping);
+        Task externalStopping = Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+
+        _ = await Task.WhenAny(applicationStopping, externalStopping).ConfigureAwait(false);
+    }
+
+    internal static void ReportDrain(TextWriter? progress, DrainReport report)
+    {
+        if (report.Completed)
+        {
+            return;
+        }
+
+        progress?.WriteLine(
+            $"shutdown: abandoned {report.AbandonedTools.Count} invocation(s): "
+            + string.Join(", ", report.AbandonedTools));
+        progress?.Flush();
     }
 
     private static CommandOutcome Inspect(CommandLineResult parsed, string identity)

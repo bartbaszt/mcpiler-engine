@@ -185,7 +185,8 @@ internal static class McpRegistration
                 context.Request.Path.Value ?? "/"));
 
         EngineExecution execution = context.RequestServices.GetRequiredService<EngineExecution>();
-        ConfigureSurface(options, addressed, execution);
+        DrainCoordinator drain = context.RequestServices.GetRequiredService<DrainCoordinator>();
+        ConfigureSurface(options, addressed, execution, drain);
 
         return Task.CompletedTask;
     }
@@ -201,11 +202,13 @@ internal static class McpRegistration
     internal static void ConfigureSurface(
         McpServerOptions options,
         SurfaceEndpoint addressed,
-        EngineExecution execution)
+        EngineExecution execution,
+        DrainCoordinator drain)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(addressed);
         ArgumentNullException.ThrowIfNull(execution);
+        ArgumentNullException.ThrowIfNull(drain);
 
         ServerIdentity identity = addressed.Surface.Identity;
 
@@ -227,6 +230,6 @@ internal static class McpRegistration
             });
 
         options.Handlers.CallToolHandler = (request, token)
-            => ToolBridge.InvokeAsync(addressed, execution, request, token);
+            => ToolBridge.InvokeAsync(addressed, execution, drain, request, token);
     }
 }

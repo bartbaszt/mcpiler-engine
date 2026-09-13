@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
+using MCPiler.Engine.Host.Hosting;
 using MCPiler.Engine.Runtime;
 
 using ModelContextProtocol.Protocol;
@@ -30,34 +31,50 @@ internal static class ToolBridge
     public static async ValueTask<CallToolResult> InvokeAsync(
         SurfaceEndpoint addressed,
         EngineExecution execution,
+        DrainCoordinator drain,
         RequestContext<CallToolRequestParams> request,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(addressed);
         ArgumentNullException.ThrowIfNull(execution);
+        ArgumentNullException.ThrowIfNull(drain);
         ArgumentNullException.ThrowIfNull(request);
 
-        ToolOutcome outcome = await execution
-            .InvokeAsync(
-                addressed.Mount,
-                addressed.Surface,
-                addressed.ResourceIdentity,
-                request.Params?.Name ?? string.Empty,
-                Arguments(request.Params?.Arguments),
-                request.Server?.NegotiatedProtocolVersion,
-                cancellationToken)
-            .ConfigureAwait(false);
+        string tool = request.Params?.Name ?? string.Empty;
 
-        return new CallToolResult
+        if (!drain.TryEnter(tool, cancellationToken, out DrainCoordinator.InvocationLease? lease))
         {
-            // Set only when the call failed. A result carrying 'isError: false' and one
-            // omitting it mean the same thing to a client, and the Studio omits it.
-            IsError = outcome.IsError ? true : null,
-            Content = [new TextContentBlock { Text = outcome.Text }],
-            StructuredContent = outcome.StructuredContentJson is { } structured
-                ? JsonSerializer.Deserialize<JsonElement>(structured)
-                : null,
-        };
+            return new CallToolResult
+            {
+                IsError = true,
+                Content = [new TextContentBlock { Text = "Host shutdown is draining; this invocation was not accepted." }],
+            };
+        }
+
+        using (DrainCoordinator.InvocationLease admitted = lease!)
+        {
+            ToolOutcome outcome = await execution
+                .InvokeAsync(
+                    addressed.Mount,
+                    addressed.Surface,
+                    addressed.ResourceIdentity,
+                    tool,
+                    Arguments(request.Params?.Arguments),
+                    request.Server?.NegotiatedProtocolVersion,
+                    admitted.CancellationToken)
+                .ConfigureAwait(false);
+
+            return new CallToolResult
+            {
+                // Set only when the call failed. A result carrying 'isError: false' and one
+                // omitting it mean the same thing to a client, and the Studio omits it.
+                IsError = outcome.IsError ? true : null,
+                Content = [new TextContentBlock { Text = outcome.Text }],
+                StructuredContent = outcome.StructuredContentJson is { } structured
+                    ? JsonSerializer.Deserialize<JsonElement>(structured)
+                    : null,
+            };
+        }
     }
 
     /// <summary>Rebuilds the protocol's argument map as one object.</summary>

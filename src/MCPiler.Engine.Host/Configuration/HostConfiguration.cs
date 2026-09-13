@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 
 using MCPiler.Engine.Runtime;
 
@@ -37,7 +38,29 @@ namespace MCPiler.Engine.Host.Configuration;
 public sealed record HostBinding(
     RuntimeOptions Runtime,
     HostListenOptions Listener,
-    HostAuthorizationOptions? Authorization);
+    HostAuthorizationOptions? Authorization,
+    HostLifecycleOptions Lifecycle)
+{
+    /// <summary>Creates a binding with the product's lifecycle defaults.</summary>
+    public HostBinding(
+        RuntimeOptions runtime,
+        HostListenOptions listener,
+        HostAuthorizationOptions? authorization)
+        : this(runtime, listener, authorization, HostLifecycleOptions.Default)
+    {
+    }
+}
+
+/// <summary>Host-only lifecycle settings that do not alter Manifest behavior.</summary>
+/// <param name="DrainTimeout">How long shutdown lets admitted tool invocations finish.</param>
+public sealed record HostLifecycleOptions(TimeSpan DrainTimeout)
+{
+    /// <summary>The default drain window, matching the default whole-exchange budget.</summary>
+    public static readonly TimeSpan DefaultDrainTimeout = TimeSpan.FromSeconds(100);
+
+    /// <summary>The lifecycle settings used when the operator supplies none.</summary>
+    public static HostLifecycleOptions Default { get; } = new(DefaultDrainTimeout);
+}
 
 /// <summary>
 /// The authorization configuration this deployable accepts, or the absence of one.
@@ -132,6 +155,9 @@ public static class HostConfiguration
     /// <summary>Key naming the issuer's JWKS URI, overriding the <c>jwks_uri</c> in its published metadata.</summary>
     public const string JwksUriKey = "jwks-uri";
 
+    /// <summary>Host-only shutdown drain window, in positive whole seconds.</summary>
+    public const string DrainTimeoutSecondsKey = "drain-timeout-seconds";
+
     private static readonly string[] Simple =
     [
         FileStoreRootKey,
@@ -144,6 +170,7 @@ public static class HostConfiguration
         TokenValidationKey,
         IntrospectionEndpointKey,
         JwksUriKey,
+        DrainTimeoutSecondsKey,
     ];
 
     /// <summary>Every key this deployable accepts, excluding the two prefixed families.</summary>
@@ -179,6 +206,7 @@ public static class HostConfiguration
         HostTokenValidation? validation = null;
         string? introspectionEndpoint = null;
         string? jwksUri = null;
+        TimeSpan drainTimeout = HostLifecycleOptions.DefaultDrainTimeout;
 
         foreach ((string key, string value) in settings)
         {
@@ -226,6 +254,9 @@ public static class HostConfiguration
                 case JwksUriKey:
                     jwksUri = UriSetting(key, value, rejected);
                     break;
+                case DrainTimeoutSecondsKey:
+                    drainTimeout = PositiveWholeSeconds(key, value, rejected);
+                    break;
                 default:
                     rejected.Add($"'{key}' is not a setting this host accepts. It accepts {string.Join(", ", Simple)}, '{MountNarrowingPrefix}{{prefix}}:{{bound}}' and '{FloorPrefix}{{bound}}'.");
                     break;
@@ -262,7 +293,11 @@ public static class HostConfiguration
             ServedContentRoots = served,
         };
 
-        binding = new HostBinding(options, new HostListenOptions(listen, transport), authorization);
+        binding = new HostBinding(
+            options,
+            new HostListenOptions(listen, transport),
+            authorization,
+            new HostLifecycleOptions(drainTimeout));
         refusals = [];
         return true;
     }
@@ -425,5 +460,17 @@ public static class HostConfiguration
 
         rejected.Add($"'{key}' was given '{value}', which is not true or false.");
         return false;
+    }
+
+    private static TimeSpan PositiveWholeSeconds(string key, string value, List<string> rejected)
+    {
+        if (int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out int seconds)
+            && seconds > 0)
+        {
+            return TimeSpan.FromSeconds(seconds);
+        }
+
+        rejected.Add($"'{key}' was given '{value}', which is not a positive whole number of seconds.");
+        return HostLifecycleOptions.DefaultDrainTimeout;
     }
 }

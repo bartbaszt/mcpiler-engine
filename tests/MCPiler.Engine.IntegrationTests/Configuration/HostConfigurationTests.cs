@@ -22,6 +22,50 @@ namespace MCPiler.Engine.IntegrationTests.Configuration;
 public sealed class HostConfigurationTests
 {
     [Fact]
+    public void The_shutdown_drain_window_defaults_to_one_hundred_seconds()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+        };
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. settings], out HostBinding? binding, out _));
+        Assert.Equal(TimeSpan.FromSeconds(100), binding!.Lifecycle.DrainTimeout);
+    }
+
+    [Fact]
+    public void The_shutdown_drain_window_can_be_narrowed_in_whole_seconds()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.DrainTimeoutSecondsKey] = "2",
+        };
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. settings], out HostBinding? binding, out _));
+        Assert.Equal(TimeSpan.FromSeconds(2), binding!.Lifecycle.DrainTimeout);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    [InlineData("1.5")]
+    [InlineData("later")]
+    public void The_shutdown_drain_window_refuses_non_positive_or_non_whole_values(string value)
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.DrainTimeoutSecondsKey] = value,
+        };
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
+        string refusal = Assert.Single(refusals);
+        Assert.Contains(HostConfiguration.DrainTimeoutSecondsKey, refusal, StringComparison.Ordinal);
+        Assert.Contains("positive whole number of seconds", refusal, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void An_unrecognized_setting_is_refused_by_name_and_the_message_lists_what_is_accepted()
     {
         Dictionary<string, string> settings = new(StringComparer.Ordinal)

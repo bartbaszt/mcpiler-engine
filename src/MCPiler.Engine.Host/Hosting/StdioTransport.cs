@@ -36,7 +36,22 @@ internal static class StdioTransport
         RuntimeStartResult started,
         EngineExecution execution,
         CancellationToken cancellationToken)
-        => RunCoreAsync(started, execution, input: null, output: null, cancellationToken);
+        => RunCoreAsync(
+            started,
+            execution,
+            new DrainCoordinator(),
+            input: null,
+            output: null,
+            cancellationToken);
+
+    /// <summary>Runs the production transport with the process drain coordinator.</summary>
+    internal static Task<DrainReport> RunAsync(
+        RuntimeStartResult started,
+        EngineExecution execution,
+        DrainCoordinator drain,
+        TimeSpan drainTimeout,
+        CancellationToken cancellationToken)
+        => RunDrainingAsync(started, execution, drain, drainTimeout, cancellationToken);
 
     /// <summary>Runs the same SDK transport on explicit streams for wire-level tests.</summary>
     internal static Task RunAsync(
@@ -49,7 +64,13 @@ internal static class StdioTransport
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
 
-        return RunCoreAsync(started, execution, input, output, cancellationToken);
+        return RunCoreAsync(
+            started,
+            execution,
+            new DrainCoordinator(),
+            input,
+            output,
+            cancellationToken);
     }
 
     /// <summary>Selects the only surface stdio can address.</summary>
@@ -95,12 +116,14 @@ internal static class StdioTransport
     private static async Task RunCoreAsync(
         RuntimeStartResult started,
         EngineExecution execution,
+        DrainCoordinator drain,
         Stream? input,
         Stream? output,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(started);
         ArgumentNullException.ThrowIfNull(execution);
+        ArgumentNullException.ThrowIfNull(drain);
 
         if (!TrySelectSurface(started, out SurfaceEndpoint? endpoint, out string? refusal))
         {
@@ -114,7 +137,7 @@ internal static class StdioTransport
         builder.Logging.ClearProviders();
 
         IMcpServerBuilder server = builder.Services
-            .AddMcpServer(options => McpRegistration.ConfigureSurface(options, endpoint!, execution));
+            .AddMcpServer(options => McpRegistration.ConfigureSurface(options, endpoint!, execution, drain));
 
         if (input is null)
         {
@@ -127,5 +150,51 @@ internal static class StdioTransport
 
         using IHost host = builder.Build();
         await host.RunAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<DrainReport> RunDrainingAsync(
+        RuntimeStartResult started,
+        EngineExecution execution,
+        DrainCoordinator drain,
+        TimeSpan drainTimeout,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(started);
+        ArgumentNullException.ThrowIfNull(execution);
+        ArgumentNullException.ThrowIfNull(drain);
+
+        if (!TrySelectSurface(started, out SurfaceEndpoint? endpoint, out string? refusal))
+        {
+            throw new InvalidOperationException(refusal);
+        }
+
+        HostApplicationBuilder builder = Microsoft.Extensions.Hosting.Host.CreateApplicationBuilder();
+        builder.Logging.ClearProviders();
+
+        builder.Services
+            .AddMcpServer(options => McpRegistration.ConfigureSurface(options, endpoint!, execution, drain))
+            .WithStdioServerTransport();
+
+        using IHost host = builder.Build();
+        IHostApplicationLifetime lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>();
+
+        await host.StartAsync(cancellationToken).ConfigureAwait(false);
+        await WaitForStoppingAsync(lifetime, cancellationToken).ConfigureAwait(false);
+
+        DrainReport report = await drain.DrainAsync(drainTimeout).ConfigureAwait(false);
+        await host.StopAsync(CancellationToken.None).ConfigureAwait(false);
+        return report;
+    }
+
+    private static async Task WaitForStoppingAsync(
+        IHostApplicationLifetime lifetime,
+        CancellationToken cancellationToken)
+    {
+        Task applicationStopping = Task.Delay(
+            Timeout.InfiniteTimeSpan,
+            lifetime.ApplicationStopping);
+        Task externalStopping = Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+
+        _ = await Task.WhenAny(applicationStopping, externalStopping).ConfigureAwait(false);
     }
 }

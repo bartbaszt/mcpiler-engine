@@ -7,6 +7,7 @@ using MCPiler.Engine.Runtime;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -51,10 +52,19 @@ public static class EngineWebHost
         RuntimeStartResult started,
         HostBinding binding,
         EngineExecution execution)
+        => Build(started, binding, execution, new DrainCoordinator());
+
+    /// <summary>Builds the listener with the lifecycle coordinator owned by the command runner.</summary>
+    internal static WebApplication Build(
+        RuntimeStartResult started,
+        HostBinding binding,
+        EngineExecution execution,
+        DrainCoordinator drain)
     {
         ArgumentNullException.ThrowIfNull(started);
         ArgumentNullException.ThrowIfNull(binding);
         ArgumentNullException.ThrowIfNull(execution);
+        ArgumentNullException.ThrowIfNull(drain);
 
         if (!started.Started)
         {
@@ -94,6 +104,7 @@ public static class EngineWebHost
         builder.WebHost.UseUrls(binding.Listener.Listen);
 
         builder.Services.AddSingleton(execution);
+        builder.Services.AddSingleton(drain);
 
         McpRegistration.AddEngineMcp(builder.Services);
 
@@ -123,6 +134,20 @@ public static class EngineWebHost
 
         WebApplication app = builder.Build();
 
+        // Closing admission is distinct from closing the socket. During the drain window health
+        // remains observable, while every new product request is refused immediately instead of
+        // entering behind work that was already admitted.
+        app.Use(async (context, next) =>
+        {
+            if (drain.IsDraining && !HealthEndpoints.IsHealthPath(context.Request.Path))
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                return;
+            }
+
+            await next(context).ConfigureAwait(false);
+        });
+
         if (MountAuthorizationSetup.IsConfigured(binding.Authorization))
         {
             app.UseAuthentication();
@@ -131,6 +156,7 @@ public static class EngineWebHost
 
         McpRegistration.MapMounts(app, mounts);
         FileTransferEndpoints.Map(app, mounts);
+        HealthEndpoints.Map(app, binding.Runtime.FileStoreRoot, drain);
 
         return app;
     }

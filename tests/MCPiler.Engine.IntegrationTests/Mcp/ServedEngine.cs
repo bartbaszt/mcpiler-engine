@@ -44,13 +44,20 @@ internal sealed class ServedEngine : IAsyncDisposable
 
     private readonly WebApplication _app;
     private readonly EngineExecution _execution;
+    private readonly DrainCoordinator _drain;
 
-    private ServedEngine(WebApplication app, Uri address, RuntimeStartResult started, EngineExecution execution)
+    private ServedEngine(
+        WebApplication app,
+        Uri address,
+        RuntimeStartResult started,
+        EngineExecution execution,
+        DrainCoordinator drain)
     {
         _app = app;
         Address = address;
         Started = started;
         _execution = execution;
+        _drain = drain;
     }
 
     /// <summary>The address the listener bound.</summary>
@@ -58,6 +65,9 @@ internal sealed class ServedEngine : IAsyncDisposable
 
     /// <summary>What startup produced, so a test can compare a listing against it.</summary>
     public RuntimeStartResult Started { get; }
+
+    /// <summary>The same drain coordinator the running listener uses.</summary>
+    public DrainCoordinator Drain => _drain;
 
     /// <summary>
     /// An outbound policy that judges no address.
@@ -98,6 +108,7 @@ internal sealed class ServedEngine : IAsyncDisposable
             started,
             connections ?? Permissive(),
             diagnostics);
+        var drain = new DrainCoordinator();
 
         WebApplication app = EngineWebHost.Build(
             started,
@@ -105,7 +116,8 @@ internal sealed class ServedEngine : IAsyncDisposable
                 options,
                 new HostListenOptions("http://127.0.0.1:0", HostTransport.Http),
                 authorization),
-            execution);
+            execution,
+            drain);
 
         if (loggerProvider is not null)
         {
@@ -120,6 +132,7 @@ internal sealed class ServedEngine : IAsyncDisposable
         {
             execution.Dispose();
             await app.DisposeAsync();
+            drain.Dispose();
             throw;
         }
 
@@ -130,12 +143,13 @@ internal sealed class ServedEngine : IAsyncDisposable
                 : throw new InvalidOperationException(
                     $"Expected exactly one bound address, found {app.Urls.Count}: {string.Join(", ", app.Urls)}.");
 
-            return new ServedEngine(app, new Uri(bound, UriKind.Absolute), started, execution);
+            return new ServedEngine(app, new Uri(bound, UriKind.Absolute), started, execution, drain);
         }
         catch
         {
             execution.Dispose();
             await StopQuietlyAsync(app);
+            drain.Dispose();
             throw;
         }
     }
@@ -149,6 +163,7 @@ internal sealed class ServedEngine : IAsyncDisposable
         // abort a call that was still in flight and report it as a transport fault.
         await StopQuietlyAsync(_app);
         _execution.Dispose();
+        _drain.Dispose();
     }
 
     private static async Task StopQuietlyAsync(WebApplication app)
