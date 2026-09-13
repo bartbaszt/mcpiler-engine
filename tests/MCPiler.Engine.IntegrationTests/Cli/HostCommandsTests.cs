@@ -65,6 +65,32 @@ public sealed class HostCommandsTests : IDisposable
     }
 
     [Fact]
+    public async Task Serve_with_a_file_store_but_no_manifest_mount_is_refused_by_name()
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            ["serve", "--file-store-root", Store()],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
+        Assert.Contains("--mount", outcome.Output, StringComparison.Ordinal);
+        Assert.Contains("Manifest", outcome.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Default_serve_with_no_options_names_the_missing_manifest_mount()
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            ["serve"],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
+        Assert.Contains("--mount", outcome.Output, StringComparison.Ordinal);
+        Assert.Contains("Manifest", outcome.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task An_unknown_verb_prints_what_the_host_can_do()
     {
         CommandOutcome outcome = await HostCommands.RunAsync(["deploy"], Identity, TestContext.Current.CancellationToken);

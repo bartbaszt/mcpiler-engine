@@ -111,6 +111,23 @@ public sealed class HostConfigurationTests
     }
 
     [Fact]
+    public void A_master_key_is_not_a_host_setting_because_engine_persists_no_protected_secret_material()
+    {
+        const string key = "master-key";
+
+        Assert.DoesNotContain(key, HostConfiguration.AcceptedKeys, StringComparer.Ordinal);
+
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [key] = "verification-only",
+        };
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
+        Assert.Contains(refusals, message => message.Contains($"'{key}'", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void A_file_store_root_is_required_because_an_issued_handle_needs_somewhere_to_live()
     {
         Assert.False(HostConfiguration.TryBind(Mounts(), [.. Empty()], out _, out IReadOnlyList<string> refusals));

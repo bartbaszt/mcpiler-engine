@@ -1,0 +1,13 @@
+**
+
+!Dockerfile
+!.editorconfig
+!global.json
+!Directory.Build.props
+!Directory.Packages.props
+!BannedSymbols.txt
+!src/
+!src/**
+
+src/**/bin/
+src/**/obj/

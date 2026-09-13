@@ -81,7 +81,12 @@ public static class HostCommands
         TextWriter? progress,
         CancellationToken cancellationToken)
     {
-        if (!Bind(parsed, out HostBinding? binding, out CommandOutcome? refused))
+        if (!HasManifestMount(parsed, out CommandOutcome? refused))
+        {
+            return refused;
+        }
+
+        if (!Bind(parsed, out HostBinding? binding, out refused))
         {
             return refused;
         }
@@ -175,7 +180,12 @@ public static class HostCommands
 
     private static CommandOutcome Inspect(CommandLineResult parsed, string identity)
     {
-        if (!Bind(parsed, out HostBinding? binding, out CommandOutcome? refused))
+        if (!HasManifestMount(parsed, out CommandOutcome? refused))
+        {
+            return refused;
+        }
+
+        if (!Bind(parsed, out HostBinding? binding, out refused))
         {
             return refused;
         }
@@ -317,6 +327,21 @@ public static class HostCommands
 
         binding = null!;
         refused = new CommandOutcome(ExitCodes.Configuration, text.ToString());
+        return false;
+    }
+
+    private static bool HasManifestMount(CommandLineResult parsed, out CommandOutcome refused)
+    {
+        if (parsed.Mounts.Count > 0)
+        {
+            refused = null!;
+            return true;
+        }
+
+        refused = new CommandOutcome(
+            ExitCodes.Configuration,
+            "At least one '--mount <prefix>=<dir>' is required. Engine serves configured Manifest mounts and does not start with an empty surface."
+                + Environment.NewLine);
         return false;
     }
 }
