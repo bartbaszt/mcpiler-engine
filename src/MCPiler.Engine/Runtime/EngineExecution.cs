@@ -32,19 +32,16 @@ namespace MCPiler.Engine.Runtime;
 /// </remarks>
 public sealed class EngineExecution : IDisposable
 {
-    private readonly UpstreamClientFactory _clients;
-    private readonly ExecutionService _executions;
+    private readonly IReadOnlyDictionary<MountedManifest, MountExecution> _mounts;
     private readonly FileHandleStore _files;
     private readonly Action<RuntimeDiagnostic>? _diagnostics;
 
     private EngineExecution(
-        UpstreamClientFactory clients,
-        ExecutionService executions,
+        IReadOnlyDictionary<MountedManifest, MountExecution> mounts,
         FileHandleStore files,
         Action<RuntimeDiagnostic>? diagnostics)
     {
-        _clients = clients;
-        _executions = executions;
+        _mounts = mounts;
         _files = files;
         _diagnostics = diagnostics;
     }
@@ -93,16 +90,35 @@ public sealed class EngineExecution : IDisposable
                 + "reached here has already ignored a refusal.");
         }
 
-        UpstreamClientFactory clients = new(connections);
+        Dictionary<MountedManifest, MountExecution> mounts = [];
 
-        return new EngineExecution(
-            clients,
-            new ExecutionService(
-                new UpstreamSender(clients),
-                new ManifestSecretResolver(new SecretResolutionOptions(started.AllowInlineSecrets)),
-                started.Files),
-            started.Files,
-            diagnostics);
+        try
+        {
+            foreach (MountedManifest mount in started.Mounts)
+            {
+                // A connector owns its connection pool and concurrency budget. Two mounts with
+                // byte-identical limits must still receive distinct factories; otherwise one
+                // mount could occupy the other's MaxConnectionsPerServer slots.
+                UpstreamClientFactory clients = new(connections);
+                ExecutionService executions = new(
+                    new UpstreamSender(clients),
+                    new ManifestSecretResolver(new SecretResolutionOptions(started.AllowInlineSecrets)),
+                    started.Files);
+
+                mounts.Add(mount, new MountExecution(clients, executions));
+            }
+
+            return new EngineExecution(mounts, started.Files, diagnostics);
+        }
+        catch
+        {
+            foreach (MountExecution mount in mounts.Values)
+            {
+                mount.Dispose();
+            }
+
+            throw;
+        }
     }
 
     /// <summary>
@@ -221,9 +237,15 @@ public sealed class EngineExecution : IDisposable
         ArgumentNullException.ThrowIfNull(tool);
         ArgumentNullException.ThrowIfNull(arguments);
 
+        if (!_mounts.TryGetValue(mount, out MountExecution? mounted))
+        {
+            throw new InvalidOperationException(
+                "The invocation names a Manifest that is not mounted in this execution runtime.");
+        }
+
         ToolOutcome outcome = await ToolInvocation
             .InvokeAsync(
-                _executions,
+                mounted.Executions,
                 mount,
                 surface,
                 invocationScope,
@@ -251,5 +273,21 @@ public sealed class EngineExecution : IDisposable
     }
 
     /// <inheritdoc />
-    public void Dispose() => _clients.Dispose();
+    public void Dispose()
+    {
+        foreach (MountExecution mount in _mounts.Values)
+        {
+            mount.Dispose();
+        }
+    }
+
+    /// <summary>The outbound execution state one independent mount owns.</summary>
+    private sealed class MountExecution(
+        UpstreamClientFactory clients,
+        ExecutionService executions) : IDisposable
+    {
+        public ExecutionService Executions { get; } = executions;
+
+        public void Dispose() => clients.Dispose();
+    }
 }

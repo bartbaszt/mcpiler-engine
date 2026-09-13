@@ -63,11 +63,13 @@ public static class EngineWebHost
                 + "reached here has already ignored a refusal.");
         }
 
+        MountSet mounts = MountSet.From(started);
+
         // The authorization pairing is a startup fact, not a request-time surprise. A mount
         // that requires a token exists and the process trusts no issuer: refusing here
         // names the mount, and an operator debugs their deployment rather than a client
         // that can only ever see a 401.
-        StartupRefusal? unconfigured = AuthorizationRefusal.Find(started.Mounts, binding.Authorization);
+        StartupRefusal? unconfigured = AuthorizationRefusal.Find(mounts.Mounts, binding.Authorization);
 
         if (unconfigured is not null)
         {
@@ -127,8 +129,8 @@ public static class EngineWebHost
             app.UseMiddleware<MountAuthorizationMiddleware>();
         }
 
-        McpRegistration.MapMounts(app, started.Mounts);
-        FileTransferEndpoints.Map(app, started.Mounts);
+        McpRegistration.MapMounts(app, mounts);
+        FileTransferEndpoints.Map(app, mounts);
 
         return app;
     }

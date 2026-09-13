@@ -1,3 +1,4 @@
+using MCPiler.Engine.Host.Hosting;
 using MCPiler.Engine.Host.Mcp;
 using MCPiler.Engine.Runtime;
 
@@ -12,23 +13,14 @@ internal static class FileTransferEndpoints
     private const string UploadSuffix = "/files/upload";
     private const string DownloadSuffix = "/files/{capability}";
 
-    public static void Map(WebApplication app, IReadOnlyList<MountedManifest> mounts)
+    public static void Map(WebApplication app, MountSet mounts)
     {
         ArgumentNullException.ThrowIfNull(app);
         ArgumentNullException.ThrowIfNull(mounts);
 
-        foreach (MountedManifest mount in mounts)
+        foreach (MountedSurfaceAddress address in mounts.Addresses)
         {
-            foreach (MountedSurface surface in mount.Surfaces)
-            {
-                string qualified = mount.Prefix + "/" + surface.Slug;
-                MapSurface(app, qualified, mount, surface);
-
-                if (surface.IsDefault)
-                {
-                    MapSurface(app, mount.Prefix, mount, surface);
-                }
-            }
+            MapSurface(app, address.Path, address.Mount, address.Surface);
         }
     }
 

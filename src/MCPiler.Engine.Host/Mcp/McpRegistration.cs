@@ -1,3 +1,4 @@
+using MCPiler.Engine.Host.Hosting;
 using MCPiler.Engine.Runtime;
 
 using Microsoft.AspNetCore.Builder;
@@ -120,25 +121,18 @@ internal static class McpRegistration
     }
 
     /// <summary>Maps every surface of every mount, and nothing else.</summary>
-    public static void MapMounts(WebApplication app, IReadOnlyList<MountedManifest> mounts)
+    public static void MapMounts(WebApplication app, MountSet mounts)
     {
         ArgumentNullException.ThrowIfNull(app);
         ArgumentNullException.ThrowIfNull(mounts);
 
-        foreach (MountedManifest mount in mounts)
+        foreach (MountedSurfaceAddress address in mounts.Addresses)
         {
-            foreach (MountedSurface surface in mount.Surfaces)
-            {
-                string qualifiedPath = mount.Prefix + "/" + surface.Slug;
-                app.MapMcp(qualifiedPath).WithMetadata(
-                    new SurfaceEndpoint(mount, surface, ResourceIdentity(app, qualifiedPath)));
-
-                if (surface.IsDefault)
-                {
-                    app.MapMcp(mount.Prefix).WithMetadata(
-                        new SurfaceEndpoint(mount, surface, ResourceIdentity(app, mount.Prefix)));
-                }
-            }
+            app.MapMcp(address.Path).WithMetadata(
+                new SurfaceEndpoint(
+                    address.Mount,
+                    address.Surface,
+                    ResourceIdentity(app, address.Path)));
         }
     }
 

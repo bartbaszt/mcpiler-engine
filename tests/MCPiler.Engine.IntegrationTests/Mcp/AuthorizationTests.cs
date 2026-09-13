@@ -168,29 +168,58 @@ public sealed class AuthorizationTests : IDisposable
     }
 
     [Fact]
-    public async Task A_token_for_another_mount_is_refused_identically_to_a_mount_that_does_not_exist()
+    public async Task A_token_for_one_mount_is_refused_by_the_other_in_both_directions()
     {
         await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(active: true, Token);
         await using LoopbackHost upstream = await Upstream();
-        await using ServedEngine engine = await ServeScopedAsync(upstream.Address, authorization.Address);
+        string firstManifest = ServedManifests.Write(
+            _root,
+            "scoped-first-" + Guid.NewGuid().ToString("N"),
+            Manifest(upstream.Address, scoped: true));
+        string secondManifest = ServedManifests.Write(
+            _root,
+            "scoped-second-" + Guid.NewGuid().ToString("N"),
+            Manifest(upstream.Address, scoped: true));
+        string store = Directory.CreateDirectory(
+            Path.Combine(_root, "files-" + Guid.NewGuid().ToString("N"))).FullName;
+
+        await using ServedEngine engine = await ServedEngine.StartAsync(
+            new RuntimeOptions(
+                [
+                    new MountRequest("/first", firstManifest),
+                    new MountRequest("/second", secondManifest),
+                ],
+                store),
+            Token,
+            authorization: new HostAuthorizationOptions(
+                authorization.Address.AbsoluteUri,
+                HostTokenValidation.Introspection));
 
         using HttpClient client = new();
-        string full = $"{engine.Address.Scheme}://{engine.Address.Authority}/api/full";
-        string other = $"{engine.Address.Scheme}://{engine.Address.Authority}/api/other";
+        string first = $"{engine.Address.Scheme}://{engine.Address.Authority}/first/full";
+        string second = $"{engine.Address.Scheme}://{engine.Address.Authority}/second/full";
 
-        using HttpResponseMessage crossSurface = await Authorized(
+        using HttpResponseMessage firstAtSecond = await Authorized(
             client,
-            engine.At("/api/other"),
-            authorization.Mint(full, "tools.invoke"));
+            engine.At("/second/full"),
+            authorization.Mint(first, "tools.invoke"));
+        using HttpResponseMessage secondAtFirst = await Authorized(
+            client,
+            engine.At("/first/full"),
+            authorization.Mint(second, "tools.invoke"));
         using HttpResponseMessage unknownMount = await client.GetAsync(
             new Uri($"{engine.Address.Scheme}://{engine.Address.Authority}/nowhere"),
             Token);
 
-        Assert.Equal(HttpStatusCode.NotFound, crossSurface.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, firstAtSecond.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, secondAtFirst.StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, unknownMount.StatusCode);
         Assert.Equal(
             await unknownMount.Content.ReadAsStringAsync(Token),
-            await crossSurface.Content.ReadAsStringAsync(Token));
+            await firstAtSecond.Content.ReadAsStringAsync(Token));
+        Assert.Equal(
+            await unknownMount.Content.ReadAsStringAsync(Token),
+            await secondAtFirst.Content.ReadAsStringAsync(Token));
         Assert.Empty(unknownMount.Headers.WwwAuthenticate);
     }
 

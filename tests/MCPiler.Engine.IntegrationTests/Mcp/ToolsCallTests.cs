@@ -270,6 +270,68 @@ public sealed class ToolsCallTests : IDisposable
         Assert.Equal(["GET /pets?status=available"], received);
     }
 
+    [Fact]
+    public async Task Saturating_one_mounts_concurrency_does_not_delay_another_mount()
+    {
+        var firstArrived = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        int arrivals = 0;
+
+        await using LoopbackHost upstream = await LoopbackHost.StartAsync(
+            async context =>
+            {
+                int arrival = Interlocked.Increment(ref arrivals);
+
+                if (arrival == 1)
+                {
+                    firstArrived.TrySetResult(true);
+                    await releaseFirst.Task.WaitAsync(context.RequestAborted);
+                }
+
+                context.Response.StatusCode = 200;
+                context.Response.ContentType = "application/json";
+                await context.Response.Body.WriteAsync("[]"u8.ToArray(), context.RequestAborted);
+            },
+            Token);
+
+        await using ServedEngine engine = await ServeTwoAsync(upstream.Address, concurrency: 1);
+        using McpHttpSession first = await McpHttpSession.OpenAsync(engine.At("first/full"), Token);
+        using McpHttpSession second = await McpHttpSession.OpenAsync(engine.At("second/full"), Token);
+
+        Task<McpExchange> firstCall = first.CallAsync(
+            "list-pets",
+            """{"status":"available"}""",
+            2,
+            Token);
+
+        await firstArrived.Task.WaitAsync(TimeSpan.FromSeconds(5), Token);
+
+        Task<McpExchange> secondCall = second.CallAsync(
+            "list-pets",
+            """{"status":"available"}""",
+            2,
+            Token);
+
+        try
+        {
+            Task completed = await Task.WhenAny(secondCall, Task.Delay(TimeSpan.FromSeconds(5), Token));
+            Assert.Same(secondCall, completed);
+
+            McpExchange secondResult = await secondCall;
+            Assert.DoesNotContain("\"isError\"", secondResult.Payload, StringComparison.Ordinal);
+        }
+        finally
+        {
+            // Always let the first connection drain, including when the assertion above proves
+            // the old shared-pool defect by timing out.
+            releaseFirst.TrySetResult(true);
+        }
+
+        McpExchange firstResult = await firstCall;
+        Assert.DoesNotContain("\"isError\"", firstResult.Payload, StringComparison.Ordinal);
+        Assert.Equal(2, Volatile.Read(ref arrivals));
+    }
+
     public void Dispose()
     {
         foreach (string root in _roots)
@@ -336,5 +398,25 @@ public sealed class ToolsCallTests : IDisposable
             new RuntimeOptions([new MountRequest("/api", bundle)], files),
             Token,
             connections);
+    }
+
+    private async Task<ServedEngine> ServeTwoAsync(Uri upstream, int concurrency)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "mcpiler-call-" + Guid.NewGuid().ToString("N"));
+        _roots.Add(root);
+
+        string manifest = ServedManifests.Upstream(upstream, concurrency);
+        string first = ServedManifests.Write(root, "first", manifest);
+        string second = ServedManifests.Write(root, "second", manifest);
+        string files = Directory.CreateDirectory(Path.Combine(root, "files")).FullName;
+
+        return await ServedEngine.StartAsync(
+            new RuntimeOptions(
+                [
+                    new MountRequest("/first", first),
+                    new MountRequest("/second", second),
+                ],
+                files),
+            Token);
     }
 }

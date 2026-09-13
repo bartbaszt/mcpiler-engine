@@ -310,11 +310,19 @@ internal static class ServedManifests
     /// off describes an operation nothing can ever reach, which is a different fixture.
     /// </para>
     /// </remarks>
-    public static string Upstream(Uri address)
+    public static string Upstream(Uri address, int? concurrency = null)
     {
         ArgumentNullException.ThrowIfNull(address);
 
-        return UpstreamTemplate.Replace("{BASE_URL}", address.AbsoluteUri, StringComparison.Ordinal);
+        string limits = concurrency is null
+            ? string.Empty
+            : ", \"limits\": { \"concurrency\": "
+                + concurrency.Value.ToString(CultureInfo.InvariantCulture)
+                + " }";
+
+        return UpstreamTemplate
+            .Replace("{BASE_URL}", address.AbsoluteUri, StringComparison.Ordinal)
+            .Replace("{LIMITS}", limits, StringComparison.Ordinal);
     }
 
     private const string UpstreamTemplate = """
@@ -343,7 +351,7 @@ internal static class ServedManifests
                     ]
                   }
                 },
-                "policy": { "inline": { "baseUrl": "{BASE_URL}" } },
+                "policy": { "inline": { "baseUrl": "{BASE_URL}"{LIMITS} } },
                 "operations": {
                   "inline": {
                     "operations": [
