@@ -166,6 +166,36 @@ public sealed class FileHandleStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task A_failure_after_the_record_write_compensates_record_before_content()
+    {
+        var root = NewRoot();
+        string? issuedId = null;
+
+        var writing = new FileHandleStore(FileHandleStoreOptions.For(root))
+        {
+            RecordWrittenBarrier = (id, _) =>
+            {
+                issuedId = id;
+                Assert.True(File.Exists(Path.Combine(root, id + FileHandleStore.RecordExtension)));
+                Assert.True(File.Exists(Path.Combine(root, id + FileHandleStore.ContentExtension)));
+                throw new InvalidOperationException("failure after durable record write");
+            },
+        };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => Issue(writing, "payload"));
+
+        Assert.NotNull(issuedId);
+
+        var reopened = new FileHandleStore(FileHandleStoreOptions.For(root));
+        Assert.Equal(
+            FileHandleStatus.NotFound,
+            (await reopened.OpenAsync(issuedId!, TestContext.Current.CancellationToken)).Status);
+
+        Assert.Empty(Directory.GetFiles(root, "*" + FileHandleStore.RecordExtension));
+        Assert.Empty(Directory.GetFiles(root, "*" + FileHandleStore.ContentExtension));
+    }
+
+    [Fact]
     public async Task Content_left_by_an_admission_that_never_compensated_is_unreachable_and_reclaimed()
     {
         // A killed process runs no compensation, so this is the state a crash between the two
@@ -284,6 +314,44 @@ public sealed class FileHandleStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task Audit_records_safe_file_metadata_without_capability_or_payload_bytes()
+    {
+        const string Canary = "AUDIT-PAYLOAD-CANARY-6f9e";
+        var audit = new RecordingAudit();
+        var store = Store(out _, audit: audit);
+
+        FileHandleReference reference = await store.IssueAsync(
+            new MemoryStream(Encoding.UTF8.GetBytes(Canary)),
+            "canary.bin",
+            "application/x-canary",
+            "scope-a",
+            TestContext.Current.CancellationToken);
+        string capability = store.WireFormFor(reference.Id);
+
+        FileHandleLookup opened = await store.OpenAsync(reference.Id, TestContext.Current.CancellationToken);
+        await opened.Content!.DisposeAsync();
+
+        FileHandleAuditEvent issued = Assert.Single(
+            audit.Events,
+            static entry => entry.Action == FileHandleAuditAction.Issued);
+        FileHandleAuditEvent redeemed = Assert.Single(
+            audit.Events,
+            static entry => entry.Action == FileHandleAuditAction.Redeemed);
+
+        Assert.Equal(reference.Id, issued.HandleId);
+        Assert.Equal(reference.Length, issued.Length);
+        Assert.Equal(reference.MediaType, issued.MediaType);
+        Assert.Equal(reference.ContentHash, issued.ContentHash);
+        Assert.Equal(reference.Length, redeemed.Length);
+        Assert.Equal(reference.MediaType, redeemed.MediaType);
+        Assert.Equal(reference.ContentHash, redeemed.ContentHash);
+
+        string rendered = string.Join('\n', audit.Events.Select(static entry => entry.ToString()));
+        Assert.DoesNotContain(Canary, rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain(capability, rendered, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Removing_an_unknown_handle_reports_that_rather_than_failing()
     {
         var store = Store(out _);
@@ -338,6 +406,28 @@ public sealed class FileHandleStoreTests : IDisposable
             TestContext.Current.CancellationToken));
 
         Assert.Contains("size limit", failure.Message, StringComparison.Ordinal);
+        Assert.Empty(Directory.GetFiles(root));
+    }
+
+    [Fact]
+    public async Task The_upload_ceiling_stops_reading_before_the_whole_stream_is_retained()
+    {
+        var store = Store(out var root, policy: FilePolicy.Default with { UploadSizeLimitBytes = 1024 });
+        byte[] payload = RandomNumberGenerator.GetBytes(64 * 1024);
+        await using var source = new ChunkedCountingStream(payload, chunkBytes: 256);
+
+        var failure = await Assert.ThrowsAsync<FileRuntimeException>(() => store.IssueAsync(
+            source,
+            "large.bin",
+            "application/octet-stream",
+            "connector-a",
+            TestContext.Current.CancellationToken));
+
+        Assert.Contains("size limit", failure.Message, StringComparison.Ordinal);
+        Assert.True(source.BytesRead > 1024, "The source must cross the configured limit before refusal.");
+        Assert.True(
+            source.BytesRead < payload.Length,
+            $"The store consumed all {payload.Length} bytes before enforcing its {1024}-byte ceiling.");
         Assert.Empty(Directory.GetFiles(root));
     }
 
@@ -695,5 +785,34 @@ public sealed class FileHandleStoreTests : IDisposable
         public List<FileHandleAuditEvent> Events { get; } = [];
 
         public void Record(FileHandleAuditEvent record) => Events.Add(record);
+    }
+
+    private sealed class ChunkedCountingStream(byte[] bytes, int chunkBytes) : MemoryStream(bytes, writable: false)
+    {
+        public long BytesRead { get; private set; }
+
+        public override async ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            int count = await base.ReadAsync(
+                buffer[..Math.Min(buffer.Length, chunkBytes)],
+                cancellationToken);
+            BytesRead += count;
+            return count;
+        }
+
+        public override async Task<int> ReadAsync(
+            byte[] buffer,
+            int offset,
+            int count,
+            CancellationToken cancellationToken)
+        {
+            int read = await base.ReadAsync(
+                buffer.AsMemory(offset, Math.Min(count, chunkBytes)),
+                cancellationToken);
+            BytesRead += read;
+            return read;
+        }
     }
 }

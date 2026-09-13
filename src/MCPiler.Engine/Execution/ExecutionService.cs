@@ -1,7 +1,9 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 using MCPiler.Engine.Compound;
 using MCPiler.Engine.Execution.Files;
+using MCPiler.Engine.Files;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Transform;
 
@@ -13,14 +15,11 @@ namespace MCPiler.Engine.Execution;
 /// <param name="Arguments">The arguments as the caller supplied them.</param>
 public sealed record ExecutionRequest(ManifestDocument Manifest, string Slug, JsonObject Arguments)
 {
-    /// <summary>File payloads by parameter name.</summary>
-    public IReadOnlyDictionary<string, byte[]>? Files { get; init; }
-
-    /// <summary>Declared filenames for those payloads.</summary>
-    public IReadOnlyDictionary<string, string>? FileNames { get; init; }
-
-    /// <summary>Declared media types for those payloads.</summary>
-    public IReadOnlyDictionary<string, string>? FileMediaTypes { get; init; }
+    /// <summary>
+    /// File payloads by agent-facing slot name. The execution owns these sources and disposes
+    /// them before it returns, whatever the outcome.
+    /// </summary>
+    public IReadOnlyDictionary<string, ExecutionFile>? Files { get; init; }
 
     /// <summary>
     /// The scope an issued file handle belongs to, defaulting to the manifest's server name.
@@ -98,6 +97,11 @@ public sealed class ExecutionService
     {
         ArgumentNullException.ThrowIfNull(request);
 
+        // The execution owns every supplied file source from the moment it accepts the request.
+        // Keep the lease ahead of every refusal so an unknown operation, a compilation failure,
+        // cancellation, or a transport failure cannot strand an opened/replayable source.
+        await using var ownedFiles = new ExecutionFileLease(request.Files);
+
         var manifest = request.Manifest;
         var entry = manifest.AgentSurface.Operation(request.Slug);
 
@@ -157,9 +161,22 @@ public sealed class ExecutionService
                 $"The destination '{baseUri}' is not inside the governing allowed-origin set.");
         }
 
-        // Before a credential is read and before anything is compiled. A program that aborts
-        // must cost nothing observable, and a secret fetched to serve a request that could
-        // never be sent is exactly the cost the origin check above already refuses to pay.
+        // Before a credential is read and before anything is compiled. A presented handle is
+        // authorized here against the invocation itself — the same reason a secret is not read
+        // for a request that could never be sent: a refused handle must cost nothing either.
+        if (_files is not null)
+        {
+            (request, string? redemptionFailure) = await RedeemAsync(request, entry, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (redemptionFailure is not null)
+            {
+                return Failed(ExecutionFailureKind.Compilation, redemptionFailure);
+            }
+
+            ownedFiles.Track(request.Files);
+        }
+
         if (!TransformStage.TryInput(
                 manifest,
                 entry,
@@ -192,9 +209,7 @@ public sealed class ExecutionService
                 operation,
                 baseUri,
                 arguments,
-                request.Files,
-                request.FileNames,
-                request.FileMediaTypes);
+                request.Files);
 
             upstream = CredentialApplier.Apply(compiled, credentials);
         }
@@ -344,7 +359,14 @@ public sealed class ExecutionService
                 request.Scope ?? request.Manifest.Server.Name,
                 cancellationToken).ConfigureAwait(false);
 
-            return partial with { ResponseFile = reference };
+            string wireHandle = _files.WireFormFor(reference.Id);
+
+            if (!HandleCodec.IsWireForm(wireHandle))
+            {
+                throw new FileRuntimeException("The stored response has no transferable file capability.");
+            }
+
+            return partial with { ResponseFile = reference, ResponseFileHandle = wireHandle };
         }
 
         var body = await BoundedResponseReader
@@ -404,6 +426,109 @@ public sealed class ExecutionService
         var stem = FileHandleStore.SanitizeFileName(operation.UpstreamId ?? operation.Key);
 
         return $"{stem}.{extension}";
+    }
+
+    /// <summary>
+    /// Redeems every file-slot argument that presents a handle, authorizing each against the
+    /// invocation itself.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A file slot is part of the wire contract, so what a caller may hand it is a wire fact,
+    /// decided before any transformation reads the document. A presented handle is decoded,
+    /// authorized against the invocation's scope and attached to the request; the argument keeps
+    /// its value for the transformation stage to see, where a handle moves by reference.
+    /// </para>
+    /// <para>
+    /// A handle whose scope disagrees is answered exactly as one that never existed, so the
+    /// refusal never confirms which handles exist. The presented form is never echoed anywhere.
+    /// </para>
+    /// </remarks>
+    /// <returns>The request with redemptions attached, and a refusal message, or null.</returns>
+    private async Task<(ExecutionRequest Request, string? Failure)> RedeemAsync(
+        ExecutionRequest request,
+        AgentOperationEntry entry,
+        CancellationToken cancellationToken)
+    {
+        var slots = ExclusionValidation.FileArguments(entry.InputSchema?.Object);
+
+        if (slots.Count == 0)
+        {
+            return (request, null);
+        }
+
+        var files = request.Files is null
+            ? new Dictionary<string, ExecutionFile>(StringComparer.Ordinal)
+            : new Dictionary<string, ExecutionFile>(request.Files, StringComparer.Ordinal);
+        var created = new List<ExecutionFile>();
+
+        foreach (string slot in slots)
+        {
+            if (request.Arguments[slot] is not JsonValue text
+                || text.GetValueKind() != JsonValueKind.String
+                || text.GetValue<string>() is not { } wire
+                || !HandleCodec.IsWireForm(wire))
+            {
+                // A file slot that carries no presented handle is an ordinary argument value,
+                // and the compiler decides what a string in a file slot is worth.
+                continue;
+            }
+
+            var redemption = await RedemptionAuthorization
+                .RedeemAsync(_files!, wire, request.Scope ?? request.Manifest.Server.Name, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (redemption.Succeeded)
+            {
+                files[slot] = redemption.File!;
+                created.Add(redemption.File!);
+
+                continue;
+            }
+
+            foreach (ExecutionFile file in created)
+            {
+                await file.Content.DisposeAsync().ConfigureAwait(false);
+            }
+
+            return (request, redemption.Refusal == FileRedemptionRefusalKind.Expired
+                ? "The presented file reference has expired; obtain a valid reference before invoking."
+                : RedemptionAuthorization.UnknownMessage);
+        }
+
+        return (request with
+        {
+            Files = files,
+        }, null);
+    }
+
+    private sealed class ExecutionFileLease : IAsyncDisposable
+    {
+        private readonly HashSet<ReplayableBodySource> _sources = new(ReferenceEqualityComparer.Instance);
+
+        public ExecutionFileLease(IReadOnlyDictionary<string, ExecutionFile>? files)
+            => Track(files);
+
+        public void Track(IReadOnlyDictionary<string, ExecutionFile>? files)
+        {
+            if (files is null)
+            {
+                return;
+            }
+
+            foreach (ExecutionFile file in files.Values)
+            {
+                _sources.Add(file.Content);
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            foreach (ReplayableBodySource source in _sources)
+            {
+                await source.DisposeAsync().ConfigureAwait(false);
+            }
+        }
     }
 
     private static bool TryResolveBaseUri(

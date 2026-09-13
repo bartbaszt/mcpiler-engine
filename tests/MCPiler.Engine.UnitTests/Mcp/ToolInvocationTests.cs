@@ -1,6 +1,8 @@
 using System.Text.Json.Nodes;
 
 using MCPiler.Engine.Execution;
+using MCPiler.Engine.Execution.Files;
+using MCPiler.Engine.Files;
 using MCPiler.Engine.Mcp;
 using MCPiler.Engine.Runtime;
 
@@ -216,9 +218,11 @@ public sealed class ToolInvocationTests
     [Fact]
     public void A_stored_binary_response_is_rendered_as_a_reference_rather_than_as_bytes()
     {
+        string wireHandle = HandleCodec.NewWire();
         var outcome = ToolInvocation.Shape(new EngineExecutionResult
         {
             StatusCode = 200,
+            ResponseFileHandle = wireHandle,
             ResponseFile = new FileHandleReference(
                 "abc123",
                 "report.pdf",
@@ -232,13 +236,17 @@ public sealed class ToolInvocationTests
                 SignatureVerdict.Match),
         });
 
-        Assert.False(outcome.IsError);
-        Assert.Contains("abc123", outcome.Text, StringComparison.Ordinal);
-        Assert.Contains("application/pdf", outcome.Text, StringComparison.Ordinal);
-        Assert.Contains("2048", outcome.Text, StringComparison.Ordinal);
+        var reference = outcome.Text;
 
-        // The content itself never becomes text.
-        Assert.DoesNotContain("ab/abc123.bin", outcome.Text, StringComparison.Ordinal);
+        Assert.False(outcome.IsError);
+        Assert.Contains("application/pdf", reference, StringComparison.Ordinal);
+        Assert.Contains("2048", reference, StringComparison.Ordinal);
+
+        // The wire handle, and nothing it could be turned into.
+        Assert.Matches(
+            @"Binary response stored as a file reference \(handle '[A-Za-z0-9_\-]{43}', media type "
+            + @"application/pdf, 2048 bytes\)\. The handle expires automatically\.",
+            reference);
     }
 
     [Fact]

@@ -10,6 +10,7 @@ using MCPiler.Engine.Host.Hosting;
 using MCPiler.Engine.Runtime;
 
 using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -79,7 +80,8 @@ internal sealed class ServedEngine : IAsyncDisposable
         CancellationToken cancellationToken,
         OutboundConnectionPolicy? connections = null,
         Action<RuntimeDiagnostic>? diagnostics = null,
-        HostAuthorizationOptions? authorization = null)
+        HostAuthorizationOptions? authorization = null,
+        ILoggerProvider? loggerProvider = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -104,6 +106,11 @@ internal sealed class ServedEngine : IAsyncDisposable
                 new HostListenOptions("http://127.0.0.1:0", HostTransport.Http),
                 authorization),
             execution);
+
+        if (loggerProvider is not null)
+        {
+            app.Services.GetRequiredService<ILoggerFactory>().AddProvider(loggerProvider);
+        }
 
         try
         {

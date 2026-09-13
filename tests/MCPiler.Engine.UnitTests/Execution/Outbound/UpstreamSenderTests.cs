@@ -139,6 +139,34 @@ public sealed class UpstreamSenderTests
         Assert.Equal("application/json", handler.Requests[1].ContentHeaders["Content-Type"].Single());
     }
 
+    [Theory]
+    [InlineData(307)]
+    [InlineData(308)]
+    public async Task A_method_preserving_redirect_reopens_a_streaming_body_for_every_hop(int redirectStatus)
+    {
+        var source = new TrackingSource("streamed-payload"u8.ToArray());
+        var handler = new RecordingHandler(request => request.RequestUri!.PathAndQuery == "/start"
+            ? Redirect(redirectStatus, "https://api.example.com/end")
+            : Ok("ok"));
+        using var clients = new UpstreamClientFactory(_ => handler);
+        var sender = new UpstreamSender(clients);
+
+        await using var response = await sender.SendAsync(
+            new UpstreamRequest
+            {
+                Method = "POST",
+                Uri = new Uri("https://api.example.com/start"),
+                BodySource = source,
+                BodyMediaType = "application/octet-stream",
+            },
+            Policy(AllowApi),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, source.Copies);
+        Assert.Equal("streamed-payload", handler.Requests[0].Body);
+        Assert.Equal(handler.Requests[0].Body, handler.Requests[1].Body);
+    }
+
     [Fact]
     public async Task See_other_rewrites_a_post_to_a_get_and_drops_the_body()
     {
@@ -160,6 +188,32 @@ public sealed class UpstreamSenderTests
 
         // A dropped body must drop its content headers with it. A GET announcing a
         // Content-Type for a body it does not carry describes a request that was not sent.
+        Assert.Empty(handler.Requests[1].ContentHeaders);
+    }
+
+    [Fact]
+    public async Task A_body_dropping_redirect_does_not_open_the_streaming_source_again()
+    {
+        var source = new TrackingSource("streamed-payload"u8.ToArray());
+        var handler = new RecordingHandler(request => request.RequestUri!.PathAndQuery == "/start"
+            ? Redirect(303, "https://api.example.com/end")
+            : Ok("ok"));
+        using var clients = new UpstreamClientFactory(_ => handler);
+        var sender = new UpstreamSender(clients);
+
+        await using var response = await sender.SendAsync(
+            new UpstreamRequest
+            {
+                Method = "POST",
+                Uri = new Uri("https://api.example.com/start"),
+                BodySource = source,
+                BodyMediaType = "application/octet-stream",
+            },
+            Policy(AllowApi),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, source.Copies);
+        Assert.Null(handler.Requests[1].Body);
         Assert.Empty(handler.Requests[1].ContentHeaders);
     }
 
@@ -433,6 +487,21 @@ public sealed class UpstreamSenderTests
             TestContext.Current.CancellationToken);
 
         return Encoding.UTF8.GetString(bytes);
+    }
+
+    private sealed class TrackingSource(byte[] bytes) : ReplayableBodySource
+    {
+        public int Copies { get; private set; }
+
+        public override long? Length => bytes.LongLength;
+
+        public override async ValueTask CopyToAsync(Stream destination, CancellationToken cancellationToken)
+        {
+            Copies++;
+            await destination.WriteAsync(bytes, cancellationToken);
+        }
+
+        public override ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     private sealed record RecordedRequest(

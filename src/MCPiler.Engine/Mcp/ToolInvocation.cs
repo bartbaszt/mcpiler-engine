@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using Json.Schema;
 
 using MCPiler.Engine.Execution;
+using MCPiler.Engine.Files;
 using MCPiler.Engine.Mcp.Navigator;
 using MCPiler.Engine.Runtime;
 
@@ -61,6 +62,7 @@ internal static class ToolInvocation
         ExecutionService executions,
         MountedManifest mount,
         MountedSurface surface,
+        string invocationScope,
         string tool,
         JsonObject arguments,
         string? negotiatedProtocolRevision,
@@ -83,6 +85,7 @@ internal static class ToolInvocation
                     executions,
                     mount,
                     surface,
+                    invocationScope,
                     tool,
                     arguments,
                     negotiatedProtocolRevision,
@@ -104,6 +107,7 @@ internal static class ToolInvocation
             executions,
             mount,
             surface,
+            invocationScope,
             advertised,
             arguments,
             negotiatedProtocolRevision,
@@ -124,6 +128,7 @@ internal static class ToolInvocation
         ExecutionService executions,
         MountedManifest mount,
         MountedSurface surface,
+        string invocationScope,
         CatalogueTool operation,
         JsonObject arguments,
         string? negotiatedProtocolRevision,
@@ -132,6 +137,7 @@ internal static class ToolInvocation
         ArgumentNullException.ThrowIfNull(executions);
         ArgumentNullException.ThrowIfNull(mount);
         ArgumentNullException.ThrowIfNull(surface);
+        ArgumentException.ThrowIfNullOrEmpty(invocationScope);
         ArgumentNullException.ThrowIfNull(operation);
         ArgumentNullException.ThrowIfNull(arguments);
 
@@ -152,10 +158,10 @@ internal static class ToolInvocation
             .ExecuteAsync(
                 new ExecutionRequest(mount.Document, slug, arguments)
                 {
-                    // The mount, because that is the identity a handle has to be scoped to.
-                    // Two Manifests may declare the same server name, and a handle issued
-                    // under a shared scope would be redeemable from the other one.
-                    Scope = mount.Prefix,
+                    // The exact resource context that admitted this invocation. On HTTP the
+                    // host supplies the canonical protected-resource identity, so the bare
+                    // default route and the slug-qualified route do not share capabilities.
+                    Scope = invocationScope,
                 },
                 cancellationToken)
             .ConfigureAwait(false);
@@ -196,7 +202,9 @@ internal static class ToolInvocation
 
         if (result.ResponseFile is { } stored)
         {
-            return new ToolOutcome(StoredResponse(stored), IsError: false);
+            return HandleCodec.IsWireForm(result.ResponseFileHandle)
+                ? new ToolOutcome(StoredResponse(stored, result.ResponseFileHandle!), IsError: false)
+                : new ToolOutcome("The stored binary response has no transferable file capability.", IsError: true);
         }
 
         return new ToolOutcome(
@@ -379,9 +387,17 @@ internal static class ToolInvocation
             CultureInfo.InvariantCulture,
             $"The call failed ({failure}) and the failure carried no explanation.");
 
-    private static string StoredResponse(FileHandleReference stored)
+    /// <summary>
+    /// The text a stored binary response is handed to the caller as, with the handle in its
+    /// wire form.
+    /// </summary>
+    /// <remarks>
+    /// This is the issuance side: the handle is the capability the caller is being given, so the
+    /// wire form — unrelated to the storage location by construction — is what travels.
+    /// </remarks>
+    private static string StoredResponse(FileHandleReference stored, string wireHandle)
         => string.Create(
             CultureInfo.InvariantCulture,
-            $"Binary response stored as a file reference (handle '{stored.Id}', media type "
+            $"Binary response stored as a file reference (handle '{wireHandle}', media type "
             + $"{stored.MediaType}, {stored.Length} bytes). The handle expires automatically.");
 }

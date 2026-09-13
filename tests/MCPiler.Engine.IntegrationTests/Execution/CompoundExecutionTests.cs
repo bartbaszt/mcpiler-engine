@@ -11,6 +11,7 @@ using MCPiler.Engine.Execution;
 using MCPiler.Engine.Execution.Files;
 using MCPiler.Engine.Execution.Outbound;
 using MCPiler.Engine.Execution.Secrets;
+using MCPiler.Engine.Files;
 using MCPiler.Engine.Manifest;
 using MCPiler.Engine.Manifest.Model;
 
@@ -279,7 +280,7 @@ public sealed class CompoundExecutionTests : IDisposable
         // The caller received the handle, and the payload appears nowhere in what it can read.
         string agentVisible = Encoding.UTF8.GetString(result.ResponseBody!);
         Assert.DoesNotContain("a stored payload", agentVisible, StringComparison.Ordinal);
-        Assert.True(FileHandleStore.IsWellFormedId((string?)Body(agentVisible)["file"]));
+        Assert.True(HandleCodec.IsWireForm((string?)Body(agentVisible)["file"]));
     }
 
     [Fact]

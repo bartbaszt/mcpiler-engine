@@ -26,13 +26,11 @@ public static class BodySerializer
     /// Writes the body bytes for the selected media type and reports the media type to send, which
     /// is the selected one for every form except multipart, where it carries the delimiter used.
     /// </summary>
-    public static (byte[] Body, string MediaType) Serialize(
+    public static (byte[]? Body, ReplayableBodySource? BodySource, string MediaType) Serialize(
         string mediaType,
         ManifestMediaType effective,
         JsonNode? value,
-        IReadOnlyDictionary<string, byte[]>? files = null,
-        IReadOnlyDictionary<string, string>? fileNames = null,
-        IReadOnlyDictionary<string, string>? fileMediaTypes = null,
+        IReadOnlyDictionary<string, ExecutionFile>? files = null,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? partHeaderValues = null,
         IBoundaryProvider? boundaryProvider = null)
     {
@@ -40,24 +38,22 @@ public static class BodySerializer
 
         if (normalized == "application/x-www-form-urlencoded")
         {
-            return (FormSerializer.Serialize(value), mediaType);
+            return (FormSerializer.Serialize(value), null, mediaType);
         }
 
         if (normalized.StartsWith("multipart/", StringComparison.Ordinal))
         {
             var provider = boundaryProvider ?? new RandomBoundaryProvider();
 
-            var (body, boundary) = new MultipartSerializer(provider).Serialize(
+            var (body, source, boundary) = new MultipartSerializer(provider).Serialize(
                 effective,
                 value,
-                files ?? new Dictionary<string, byte[]>(StringComparer.Ordinal),
-                fileNames ?? new Dictionary<string, string>(StringComparer.Ordinal),
-                fileMediaTypes ?? new Dictionary<string, string>(StringComparer.Ordinal),
+                files ?? new Dictionary<string, ExecutionFile>(StringComparer.Ordinal),
                 partHeaderValues);
 
             // The delimiter is mandatory here, and it is the one part of the media type the writer
             // rather than the contract decides.
-            return (body, $"{mediaType}; boundary={boundary}");
+            return (body, source, $"{mediaType}; boundary={boundary}");
         }
 
         if (normalized.StartsWith("text/", StringComparison.Ordinal))
@@ -69,26 +65,56 @@ public static class BodySerializer
                 _ => value.ToJsonString(),
             };
 
-            return (Encoding.UTF8.GetBytes(text), mediaType);
+            return (Encoding.UTF8.GetBytes(text), null, mediaType);
         }
 
         if (normalized is "application/json" or "application/octet-stream" or "application/zip" or "application/pdf")
         {
+            if (normalized != "application/json" && FileForRawBody(value, files) is { } file)
+            {
+                return file.Content.BufferedBytes is { } buffered
+                    ? (buffered.ToArray(), null, mediaType)
+                    : (null, file.Content, mediaType);
+            }
+
             // A raw binary type carries its payload as bytes in the arguments rather than as text.
             if (value is JsonValue binary && binary.TryGetValue<byte[]>(out var raw))
             {
-                return (raw, mediaType);
+                return (raw, null, mediaType);
             }
 
-            return (value is null ? [] : Encoding.UTF8.GetBytes(value.ToJsonString()), mediaType);
+            return (value is null ? [] : Encoding.UTF8.GetBytes(value.ToJsonString()), null, mediaType);
         }
 
         if (normalized.EndsWith("+json", StringComparison.Ordinal))
         {
-            return (Encoding.UTF8.GetBytes(value?.ToJsonString() ?? "null"), mediaType);
+            return (Encoding.UTF8.GetBytes(value?.ToJsonString() ?? "null"), null, mediaType);
         }
 
         throw new UnsupportedBodyMediaTypeException(mediaType);
+    }
+
+    private static ExecutionFile? FileForRawBody(
+        JsonNode? value,
+        IReadOnlyDictionary<string, ExecutionFile>? files)
+    {
+        if (files is null || files.Count == 0)
+        {
+            return null;
+        }
+
+        if (files.TryGetValue("body", out ExecutionFile? direct))
+        {
+            return direct;
+        }
+
+        if (value is JsonValue scalar && scalar.TryGetValue(out string? wire) && wire is not null)
+        {
+            return files.Values.FirstOrDefault(
+                file => string.Equals(file.WireHandle, wire, StringComparison.Ordinal));
+        }
+
+        return null;
     }
 
     /// <summary>

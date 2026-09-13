@@ -32,9 +32,7 @@ public static class RequestCompiler
     /// own path and query are appended rather than resolved against it.
     /// </param>
     /// <param name="arguments">Argument values by parameter name, plus an optional <c>body</c> member.</param>
-    /// <param name="files">Raw bytes for file-carrying body members.</param>
-    /// <param name="fileNames">File names for file-carrying body members.</param>
-    /// <param name="fileMediaTypes">Media types for file-carrying body members.</param>
+    /// <param name="files">Replayable file values for file-carrying body members.</param>
 
     /// <param name="boundaryProvider">
     /// Supplies the multipart delimiter. Left null when serving, so each request gets a fresh one.
@@ -43,9 +41,7 @@ public static class RequestCompiler
         ManifestOperation operation,
         Uri baseUri,
         JsonObject arguments,
-        IReadOnlyDictionary<string, byte[]>? files = null,
-        IReadOnlyDictionary<string, string>? fileNames = null,
-        IReadOnlyDictionary<string, string>? fileMediaTypes = null,
+        IReadOnlyDictionary<string, ExecutionFile>? files = null,
         IBoundaryProvider? boundaryProvider = null)
     {
         var decisions = new List<SerializationDecision>();
@@ -172,6 +168,7 @@ public static class RequestCompiler
         var uri = new Uri(url);
 
         byte[]? body = null;
+        ReplayableBodySource? bodySource = null;
         string? bodyMediaType = null;
 
         if (operation.RequestBody is { } requestBody && requestBody.Content.Count > 0)
@@ -181,13 +178,11 @@ public static class RequestCompiler
 
             // The media type to send comes back from the writer, not from the selected key: writing a
             // multipart body decides the mandatory delimiter, and only the writer knows it.
-            (body, bodyMediaType) = BodySerializer.Serialize(
+            (body, bodySource, bodyMediaType) = BodySerializer.Serialize(
                 selected,
                 effective,
                 arguments["body"],
                 files,
-                fileNames,
-                fileMediaTypes,
                 PartHeaders(arguments, effective),
                 boundaryProvider);
 
@@ -209,7 +204,7 @@ public static class RequestCompiler
             headers["Cookie"] = [string.Join("; ", cookies)];
         }
 
-        if (body is not null && bodyMediaType is not null)
+        if ((body is not null || bodySource is not null) && bodyMediaType is not null)
         {
             headers["Content-Type"] = [bodyMediaType];
         }
@@ -224,6 +219,7 @@ public static class RequestCompiler
                 static kv => kv.Value.ToArray(),
                 StringComparer.OrdinalIgnoreCase),
             Body = body,
+            BodySource = bodySource,
             BodyMediaType = bodyMediaType,
             Decisions = decisions,
         };

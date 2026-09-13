@@ -50,6 +50,12 @@ public sealed record CompiledRequest
     /// <summary>The body bytes, or null when the request carries none.</summary>
     public byte[]? Body { get; init; }
 
+    /// <summary>
+    /// A replayable streaming body when request compilation contains file content. This is
+    /// mutually exclusive with <see cref="Body"/>.
+    /// </summary>
+    public ReplayableBodySource? BodySource { get; init; }
+
     /// <summary>The complete media type of the body, parameters included, or null when there is no body.</summary>
     public string? BodyMediaType { get; init; }
 

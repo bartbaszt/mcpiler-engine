@@ -5,6 +5,9 @@ public enum HostTransport
 {
     /// <summary>A network listener speaking MCP over Streamable HTTP.</summary>
     Http,
+
+    /// <summary>A single local MCP session over the process standard streams.</summary>
+    Stdio,
 }
 
 /// <summary>
@@ -33,13 +36,16 @@ public sealed record HostListenOptions(string Listen, HostTransport Transport)
     /// <summary>The transport name accepted for <see cref="HostTransport.Http"/>.</summary>
     public const string HttpTransportName = "http";
 
+    /// <summary>The transport name accepted for <see cref="HostTransport.Stdio"/>.</summary>
+    public const string StdioTransportName = "stdio";
+
     /// <summary>Every transport name this build accepts.</summary>
     /// <remarks>
-    /// A local standard-stream transport is a separate capability with its own obligations,
-    /// and it is absent from this list until it exists. Listing a name this build cannot serve
-    /// would turn a missing capability into a runtime surprise.
+    /// Every name in this list reaches a real transport in this build. Keeping the accepted
+    /// syntax beside the enum prevents the command line from promising a transport the host
+    /// cannot start.
     /// </remarks>
-    public static IReadOnlyList<string> AcceptedTransports { get; } = [HttpTransportName];
+    public static IReadOnlyList<string> AcceptedTransports { get; } = [HttpTransportName, StdioTransportName];
 
     /// <summary>The settings a process is started with when nothing is configured.</summary>
     public static HostListenOptions Default { get; } = new(DefaultListen, HostTransport.Http);

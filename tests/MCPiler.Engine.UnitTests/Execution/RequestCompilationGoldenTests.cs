@@ -316,9 +316,7 @@ public sealed class RequestCompilationGoldenTests
         => Record.Exception(() => RequestCompiler.Compile(
             GoldenCorpus.Operation("bodies-multipart-binary", "POST /multipart"), Api,
             JsonNode.Parse(arguments)!.AsObject(),
-            new Dictionary<string, byte[]> { ["file"] = Encoding.ASCII.GetBytes("%PDF-1.7") },
-            new Dictionary<string, string> { ["file"] = "doc.pdf" },
-            new Dictionary<string, string> { ["file"] = "application/pdf" },
+            MultipartFile(),
             new FixedBoundaryProvider("TEST-BOUNDARY")))!;
 
     [Theory]
@@ -435,15 +433,13 @@ public sealed class RequestCompilationGoldenTests
             GoldenCorpus.Operation("bodies-multipart-binary", "POST /multipart"),
             Api,
             JsonNode.Parse("""{"body":{"meta":"abc","file":"","note":"remember"}}""")!.AsObject(),
-            new Dictionary<string, byte[]> { ["file"] = Encoding.ASCII.GetBytes("%PDF-1.7") },
-            new Dictionary<string, string> { ["file"] = "doc.pdf" },
-            new Dictionary<string, string> { ["file"] = "application/pdf" },
+            MultipartFile(),
             new FixedBoundaryProvider("TEST-BOUNDARY"));
 
         Assert.Equal("multipart/form-data; boundary=TEST-BOUNDARY", compiled.BodyMediaType);
         Assert.Equal(compiled.BodyMediaType, Assert.Single(compiled.Headers["Content-Type"]));
 
-        var body = Encoding.ASCII.GetString(compiled.Body!);
+        var body = Encoding.ASCII.GetString(BodyBytes(compiled));
         Assert.StartsWith("--TEST-BOUNDARY\r\n", body, StringComparison.Ordinal);
         Assert.EndsWith("--TEST-BOUNDARY--\r\n", body, StringComparison.Ordinal);
     }
@@ -457,16 +453,14 @@ public sealed class RequestCompilationGoldenTests
             GoldenCorpus.Operation("bodies-multipart-binary", "POST /multipart"),
             Api,
             JsonNode.Parse("""{"body":{"meta":"abc","file":"","note":"remember"}}""")!.AsObject(),
-            new Dictionary<string, byte[]> { ["file"] = Encoding.ASCII.GetBytes("%PDF-1.7") },
-            new Dictionary<string, string> { ["file"] = "doc.pdf" },
-            new Dictionary<string, string> { ["file"] = "application/pdf" });
+            MultipartFile());
 
         const string prefix = "multipart/form-data; boundary=";
         Assert.StartsWith(prefix, compiled.BodyMediaType, StringComparison.Ordinal);
 
         var declared = compiled.BodyMediaType![prefix.Length..];
         Assert.NotEmpty(declared);
-        Assert.StartsWith($"--{declared}\r\n", Encoding.ASCII.GetString(compiled.Body!), StringComparison.Ordinal);
+        Assert.StartsWith($"--{declared}\r\n", Encoding.ASCII.GetString(BodyBytes(compiled)), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -536,5 +530,20 @@ public sealed class RequestCompilationGoldenTests
         Assert.Equal("https://api.example.com/pets/42", compiled.ExactUrl);
         Assert.Contains(compiled.Headers, kv => kv.Key.Equals("X-Trace", StringComparison.OrdinalIgnoreCase));
         Assert.True(compiled.Decisions.Count >= 2);
+    }
+
+    private static IReadOnlyDictionary<string, ExecutionFile> MultipartFile()
+    {
+        byte[] bytes = Encoding.ASCII.GetBytes("%PDF-1.7");
+        return new Dictionary<string, ExecutionFile>(StringComparer.Ordinal)
+        {
+            ["file"] = new("file", "doc.pdf", "application/pdf", bytes.LongLength, ReplayableBodySource.FromBytes(bytes)),
+        };
+    }
+
+    private static byte[] BodyBytes(CompiledRequest compiled)
+    {
+        Assert.Null(compiled.BodySource);
+        return Assert.IsType<byte[]>(compiled.Body);
     }
 }

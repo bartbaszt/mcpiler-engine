@@ -25,6 +25,9 @@ public sealed record UpstreamRequest
     /// <summary>The body bytes, or null when the request carries none.</summary>
     public byte[]? Body { get; init; }
 
+    /// <summary>A replayable streaming body, mutually exclusive with <see cref="Body"/>.</summary>
+    public ReplayableBodySource? BodySource { get; init; }
+
     /// <summary>The complete media type of the body, parameters included.</summary>
     public string? BodyMediaType { get; init; }
 

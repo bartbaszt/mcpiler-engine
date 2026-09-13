@@ -41,6 +41,7 @@ internal static class ToolBridge
             .InvokeAsync(
                 addressed.Mount,
                 addressed.Surface,
+                addressed.ResourceIdentity,
                 request.Params?.Name ?? string.Empty,
                 Arguments(request.Params?.Arguments),
                 request.Server?.NegotiatedProtocolVersion,

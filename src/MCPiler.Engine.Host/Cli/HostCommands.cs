@@ -94,10 +94,24 @@ public static class HostCommands
             return new CommandOutcome(StartupReport.ExitCode(result), report);
         }
 
+        if (binding.Listener.Transport is HostTransport.Stdio
+            && !StdioTransport.TrySelectSurface(result, out _, out string? stdioRefusal))
+        {
+            return new CommandOutcome(
+                ExitCodes.Configuration,
+                report + stdioRefusal + Environment.NewLine);
+        }
+
         // Reported before the listener opens, not after it closes. Everything that could
         // refuse has already refused, so this line means the mounts an operator configured
         // are the mounts about to answer.
         progress?.Write(report);
+
+        if (binding.Listener.Transport is HostTransport.Stdio)
+        {
+            progress?.WriteLine(StdioTransport.SecurityBoundaryStatement);
+        }
+
         progress?.Flush();
 
         // Outlives the application deliberately: the pool it owns is closed after the
@@ -110,10 +124,17 @@ public static class HostCommands
                 progress?.Flush();
             });
 
-        await using WebApplication app = EngineWebHost.Build(result, binding, execution);
+        if (binding.Listener.Transport is HostTransport.Stdio)
+        {
+            await StdioTransport.RunAsync(result, execution, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            await using WebApplication app = EngineWebHost.Build(result, binding, execution);
 
-        await app.StartAsync(cancellationToken).ConfigureAwait(false);
-        await app.WaitForShutdownAsync(cancellationToken).ConfigureAwait(false);
+            await app.StartAsync(cancellationToken).ConfigureAwait(false);
+            await app.WaitForShutdownAsync(cancellationToken).ConfigureAwait(false);
+        }
 
         return new CommandOutcome(ExitCodes.Success, string.Empty);
     }

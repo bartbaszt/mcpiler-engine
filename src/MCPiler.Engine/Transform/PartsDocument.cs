@@ -212,9 +212,12 @@ internal static class PartsDocument
 
         JsonNode? body = null;
 
-        if (result.ResponseFile is { } stored)
+        if (result.ResponseFile is not null)
         {
-            body = stored.Id;
+            // The wire form, not the storage identifier: the response document is what a mapping
+            // reads and what a caller can reach, so it carries the capability the caller was
+            // given and nothing that names where the payload lives.
+            body = result.ResponseFileHandle;
         }
         else if (result.ResponseBody is { Length: > 0 } bytes)
         {

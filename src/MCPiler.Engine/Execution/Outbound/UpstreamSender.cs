@@ -1,4 +1,5 @@
 using System.Net.Http.Headers;
+using System.Net;
 
 namespace MCPiler.Engine.Execution.Outbound;
 
@@ -127,7 +128,16 @@ public sealed class UpstreamSender : IUpstreamTransport
             message.Headers.TryAddWithoutValidation(name, values);
         }
 
-        if (body?.Body is { } bytes)
+        if (body?.BodySource is { } source)
+        {
+            message.Content = new ReplayableBodyContent(source);
+
+            if (body.BodyMediaType is { } mediaType)
+            {
+                message.Content.Headers.ContentType = MediaTypeHeaderValue.Parse(mediaType);
+            }
+        }
+        else if (body?.Body is { } bytes)
         {
             // A fresh content per hop rather than a reused one: content is single-read, and the
             // previous message owning it has already been released.
@@ -226,7 +236,7 @@ public sealed class UpstreamSender : IUpstreamTransport
     {
         for (var current = exception; current is not null; current = current.InnerException)
         {
-            if (current is AddressPolicyViolationException or HostResolutionException)
+            if (current is AddressPolicyViolationException or HostResolutionException or FileRuntimeException)
             {
                 return current;
             }
@@ -243,6 +253,35 @@ public sealed class UpstreamSender : IUpstreamTransport
         {
             response.Dispose();
             return ValueTask.CompletedTask;
+        }
+    }
+
+    /// <summary>
+    /// Bridges a replayable Engine source into one HTTP hop without taking ownership of the
+    /// source itself. Disposing the message closes only resources opened by that serialization;
+    /// the execution owns the descriptor across body-preserving redirects.
+    /// </summary>
+    private sealed class ReplayableBodyContent(ReplayableBodySource source) : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+            => source.CopyToAsync(stream, CancellationToken.None).AsTask();
+
+        protected override Task SerializeToStreamAsync(
+            Stream stream,
+            TransportContext? context,
+            CancellationToken cancellationToken)
+            => source.CopyToAsync(stream, cancellationToken).AsTask();
+
+        protected override bool TryComputeLength(out long length)
+        {
+            if (source.Length is { } known)
+            {
+                length = known;
+                return true;
+            }
+
+            length = 0;
+            return false;
         }
     }
 }

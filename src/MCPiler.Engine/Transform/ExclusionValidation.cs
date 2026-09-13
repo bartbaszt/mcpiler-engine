@@ -1,6 +1,7 @@
 using System.Text.Json.Nodes;
 
 using MCPiler.Engine.Execution.Files;
+using MCPiler.Engine.Files;
 using MCPiler.Engine.Manifest.Loading;
 using MCPiler.Engine.Manifest.Validation;
 
@@ -146,8 +147,9 @@ internal static class ExclusionValidation
     /// <summary>A literal may not be a file handle.</summary>
     /// <remarks>
     /// Constructing a handle from a literal would let a program reference a file the caller
-    /// never held. The shape is asked of the store that issues handles rather than restated
-    /// here, so the two cannot drift into disagreeing about what a handle is.
+    /// never held. The shape is asked of the store that issues handles and of the codec the wire
+    /// carries them in, rather than restated here, so the three cannot drift into disagreeing
+    /// about what a handle is.
     /// </remarks>
     private static void ValidateConstant(
         JsonNode value,
@@ -159,7 +161,7 @@ internal static class ExclusionValidation
             return;
         }
 
-        if (!FileHandleStore.IsWellFormedId(text))
+        if (!FileHandleStore.IsWellFormedId(text) && !HandleCodec.IsWireForm(text))
         {
             return;
         }

@@ -98,13 +98,27 @@ internal static class GoldenCorpus
         IReadOnlyDictionary<string, string>? fileMediaTypes = null,
         IBoundaryProvider? boundaryProvider = null)
     {
+        IReadOnlyDictionary<string, ExecutionFile>? executionFiles = files is null
+            ? null
+            : files.ToDictionary(
+                static pair => pair.Key,
+                pair => new ExecutionFile(
+                    pair.Key,
+                    fileNames is not null && fileNames.TryGetValue(pair.Key, out string? fileName)
+                        ? fileName
+                        : pair.Key,
+                    fileMediaTypes is not null && fileMediaTypes.TryGetValue(pair.Key, out string? mediaType)
+                        ? mediaType
+                        : string.Empty,
+                    pair.Value.LongLength,
+                    ReplayableBodySource.FromBytes(pair.Value)),
+                StringComparer.Ordinal);
+
         var compiled = RequestCompiler.Compile(
             Operation(stem, key),
             baseUri,
             arguments,
-            files,
-            fileNames,
-            fileMediaTypes,
+            executionFiles,
             boundaryProvider);
 
         return Render(compiled).TrimEnd('\n');
@@ -134,4 +148,5 @@ internal static class GoldenCorpus
 
         return text.ToString();
     }
+
 }

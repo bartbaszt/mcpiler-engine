@@ -36,12 +36,12 @@ internal static class Program
         ArgumentNullException.ThrowIfNull(args);
 
         CommandOutcome outcome = await HostCommands
-            .RunAsync(args, Identity(), CancellationToken.None, Console.Out)
+            .RunAsync(args, Identity(), CancellationToken.None, Console.Error)
             .ConfigureAwait(false);
 
-        // Everything an operator reads goes to standard output, including refusals. A
-        // stream transport will own standard output later; until a verb speaks a protocol
-        // on it, splitting the two would be a distinction nothing consumes.
+        // The serving progress stream is stderr because stdio owns stdout byte-for-byte while
+        // the protocol is active. Returned command output is written only after a command has
+        // completed or refused before serving, so it cannot interleave with protocol frames.
         Console.Out.Write(outcome.Output);
 
         return outcome.ExitCode;

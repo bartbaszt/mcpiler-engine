@@ -15,11 +15,8 @@ public sealed class MultipartSerializerTests
 {
     private const string Boundary = "TEST-BOUNDARY";
 
-    private static readonly IReadOnlyDictionary<string, byte[]> NoFiles =
-        new Dictionary<string, byte[]>(StringComparer.Ordinal);
-
-    private static readonly IReadOnlyDictionary<string, string> NoStrings =
-        new Dictionary<string, string>(StringComparer.Ordinal);
+    private static readonly IReadOnlyDictionary<string, ExecutionFile> NoFiles =
+        new Dictionary<string, ExecutionFile>(StringComparer.Ordinal);
 
     private static ManifestMediaType MediaType(params ManifestEncoding[] encodings)
         => new(
@@ -45,14 +42,31 @@ public sealed class MultipartSerializerTests
         IReadOnlyDictionary<string, string>? fileNames = null,
         IReadOnlyDictionary<string, string>? fileMediaTypes = null,
         IReadOnlyDictionary<string, IReadOnlyDictionary<string, string>>? partHeaderValues = null)
-        => System.Text.Encoding.UTF8.GetString(
-            new MultipartSerializer(new FixedBoundaryProvider(Boundary)).Serialize(
-                mediaType,
-                JsonNode.Parse(bodyJson),
-                files ?? NoFiles,
-                fileNames ?? NoStrings,
-                fileMediaTypes ?? NoStrings,
-                partHeaderValues).Body);
+    {
+        IReadOnlyDictionary<string, ExecutionFile> executionFiles = files is null
+            ? NoFiles
+            : files.ToDictionary(
+                static pair => pair.Key,
+                pair => new ExecutionFile(
+                    pair.Key,
+                    fileNames is not null && fileNames.TryGetValue(pair.Key, out string? fileName)
+                        ? fileName
+                        : pair.Key,
+                    fileMediaTypes is not null && fileMediaTypes.TryGetValue(pair.Key, out string? mediaTypeValue)
+                        ? mediaTypeValue
+                        : string.Empty,
+                    pair.Value.LongLength,
+                    ReplayableBodySource.FromBytes(pair.Value)),
+                StringComparer.Ordinal);
+
+        var written = new MultipartSerializer(new FixedBoundaryProvider(Boundary)).Serialize(
+            mediaType,
+            JsonNode.Parse(bodyJson),
+            executionFiles,
+            partHeaderValues);
+
+        return System.Text.Encoding.UTF8.GetString(Materialize(written.Body, written.BodySource));
+    }
 
     [Fact]
     public void Every_member_becomes_one_part_and_the_body_ends_with_the_closing_delimiter()
@@ -226,13 +240,11 @@ public sealed class MultipartSerializerTests
         var second = new MultipartSerializer(new FixedBoundaryProvider("OTHER")).Serialize(
             MediaType(),
             JsonNode.Parse("""{"a":"x"}"""),
-            NoFiles,
-            NoStrings,
-            NoStrings);
+            NoFiles);
 
         Assert.Equal(
             first.Replace(Boundary, "OTHER", StringComparison.Ordinal),
-            System.Text.Encoding.UTF8.GetString(second.Body));
+            System.Text.Encoding.UTF8.GetString(Materialize(second.Body, second.BodySource)));
     }
 
     [Fact]
@@ -244,13 +256,11 @@ public sealed class MultipartSerializerTests
         var written = new MultipartSerializer(new FixedBoundaryProvider(Boundary)).Serialize(
             MediaType(),
             JsonNode.Parse("""{"a":"x"}"""),
-            NoFiles,
-            NoStrings,
-            NoStrings);
+            NoFiles);
 
         Assert.Equal(Boundary, written.Boundary);
 
-        var body = System.Text.Encoding.UTF8.GetString(written.Body);
+        var body = System.Text.Encoding.UTF8.GetString(Materialize(written.Body, written.BodySource));
         Assert.StartsWith($"--{written.Boundary}\r\n", body, StringComparison.Ordinal);
         Assert.EndsWith($"--{written.Boundary}--\r\n", body, StringComparison.Ordinal);
     }
@@ -262,14 +272,12 @@ public sealed class MultipartSerializerTests
         var written = new MultipartSerializer(new RandomBoundaryProvider()).Serialize(
             MediaType(),
             JsonNode.Parse("""{"a":"x"}"""),
-            NoFiles,
-            NoStrings,
-            NoStrings);
+            NoFiles);
 
         Assert.NotEmpty(written.Boundary);
         Assert.StartsWith(
             $"--{written.Boundary}\r\n",
-            System.Text.Encoding.UTF8.GetString(written.Body),
+            System.Text.Encoding.UTF8.GetString(Materialize(written.Body, written.BodySource)),
             StringComparison.Ordinal);
     }
 
@@ -279,5 +287,88 @@ public sealed class MultipartSerializerTests
         var provider = new RandomBoundaryProvider();
 
         Assert.NotEqual(provider.GetBoundary(), provider.GetBoundary());
+    }
+
+    [Fact]
+    public async Task A_streaming_file_keeps_the_multipart_body_streaming_and_byte_exact()
+    {
+        var source = new TrackingSource("FILE-A"u8.ToArray());
+        var files = new Dictionary<string, ExecutionFile>(StringComparer.Ordinal)
+        {
+            ["doc"] = new("wire-a", "report.bin", "application/octet-stream", 6, source),
+        };
+
+        var written = new MultipartSerializer(new FixedBoundaryProvider(Boundary)).Serialize(
+            MediaType(),
+            JsonNode.Parse("""{"note":"hello","doc":"wire-a"}"""),
+            files);
+
+        Assert.Null(written.Body);
+        ReplayableBodySource streaming = Assert.IsAssignableFrom<ReplayableBodySource>(written.BodySource);
+
+        using MemoryStream output = new();
+        await streaming.CopyToAsync(output, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, source.Copies);
+        Assert.Equal(
+            "--TEST-BOUNDARY\r\n"
+            + "Content-Disposition: form-data; name=\"note\"\r\nContent-Type: text/plain\r\n\r\nhello\r\n"
+            + "--TEST-BOUNDARY\r\n"
+            + "Content-Disposition: form-data; name=\"doc\"; filename=\"report.bin\"\r\n"
+            + "Content-Type: application/octet-stream\r\n\r\nFILE-A\r\n"
+            + "--TEST-BOUNDARY--\r\n",
+            Encoding.UTF8.GetString(output.ToArray()));
+    }
+
+    [Fact]
+    public async Task Multiple_streaming_files_preserve_member_order_without_materializing_either_file()
+    {
+        var first = new TrackingSource("FIRST"u8.ToArray());
+        var second = new TrackingSource("SECOND"u8.ToArray());
+        var files = new Dictionary<string, ExecutionFile>(StringComparer.Ordinal)
+        {
+            ["a"] = new("wire-a", "a.bin", "application/octet-stream", 5, first),
+            ["b"] = new("wire-b", "b.bin", "application/octet-stream", 6, second),
+        };
+
+        var written = new MultipartSerializer(new FixedBoundaryProvider(Boundary)).Serialize(
+            MediaType(),
+            JsonNode.Parse("""{"b":"wire-b","middle":"x","a":"wire-a"}"""),
+            files);
+
+        Assert.Null(written.Body);
+        using MemoryStream output = new();
+        await written.BodySource!.CopyToAsync(output, TestContext.Current.CancellationToken);
+        string body = Encoding.UTF8.GetString(output.ToArray());
+
+        Assert.Equal(1, first.Copies);
+        Assert.Equal(1, second.Copies);
+        Assert.True(body.IndexOf("name=\"b\"", StringComparison.Ordinal)
+            < body.IndexOf("name=\"middle\"", StringComparison.Ordinal));
+        Assert.True(body.IndexOf("name=\"middle\"", StringComparison.Ordinal)
+            < body.IndexOf("name=\"a\"", StringComparison.Ordinal));
+        Assert.Contains("\r\n\r\nSECOND\r\n", body, StringComparison.Ordinal);
+        Assert.Contains("\r\n\r\nFIRST\r\n", body, StringComparison.Ordinal);
+    }
+
+    private sealed class TrackingSource(byte[] bytes) : ReplayableBodySource
+    {
+        public int Copies { get; private set; }
+
+        public override long? Length => bytes.LongLength;
+
+        public override async ValueTask CopyToAsync(Stream destination, CancellationToken cancellationToken)
+        {
+            Copies++;
+            await destination.WriteAsync(bytes, cancellationToken);
+        }
+
+        public override ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private static byte[] Materialize(byte[]? body, ReplayableBodySource? source)
+    {
+        Assert.Null(source);
+        return Assert.IsType<byte[]>(body);
     }
 }

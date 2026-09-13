@@ -1,7 +1,9 @@
 using System.Text.Json.Nodes;
 
 using MCPiler.Engine.Execution;
+using MCPiler.Engine.Execution.Files;
 using MCPiler.Engine.Execution.Outbound;
+using MCPiler.Engine.Files;
 using MCPiler.Engine.Mcp;
 
 namespace MCPiler.Engine.Runtime;
@@ -32,15 +34,18 @@ public sealed class EngineExecution : IDisposable
 {
     private readonly UpstreamClientFactory _clients;
     private readonly ExecutionService _executions;
+    private readonly FileHandleStore _files;
     private readonly Action<RuntimeDiagnostic>? _diagnostics;
 
     private EngineExecution(
         UpstreamClientFactory clients,
         ExecutionService executions,
+        FileHandleStore files,
         Action<RuntimeDiagnostic>? diagnostics)
     {
         _clients = clients;
         _executions = executions;
+        _files = files;
         _diagnostics = diagnostics;
     }
 
@@ -96,7 +101,97 @@ public sealed class EngineExecution : IDisposable
                 new UpstreamSender(clients),
                 new ManifestSecretResolver(new SecretResolutionOptions(started.AllowInlineSecrets)),
                 started.Files),
+            started.Files,
             diagnostics);
+    }
+
+    /// <summary>
+    /// Streams one HTTP-transfer payload into the runtime's file store and issues its opaque
+    /// process-local capability in the exact protected-resource scope supplied by the host.
+    /// </summary>
+    public async Task<RuntimeFileUploadResult> UploadFileAsync(
+        Stream content,
+        string? fileName,
+        string? mediaType,
+        string resourceIdentity,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(content);
+        ArgumentException.ThrowIfNullOrEmpty(resourceIdentity);
+
+        try
+        {
+            FileHandleReference reference = await _files
+                .IssueAsync(content, fileName, mediaType, resourceIdentity, cancellationToken)
+                .ConfigureAwait(false);
+
+            string capability = _files.WireFormFor(reference.Id);
+
+            if (capability.Length == 0)
+            {
+                return RuntimeFileUploadResult.Refused(
+                    "The file was stored but no transfer capability could be issued.");
+            }
+
+            return RuntimeFileUploadResult.Issued(
+                capability,
+                reference.FileName,
+                reference.MediaType,
+                reference.Length);
+        }
+        catch (FileRuntimeException refusal)
+        {
+            return RuntimeFileUploadResult.Refused(refusal.Message);
+        }
+    }
+
+    /// <summary>
+    /// Authorizes and opens one wire capability for a transfer download. Unknown and
+    /// cross-resource values share one result; expiry remains distinct for the owning resource.
+    /// </summary>
+    public async Task<RuntimeFileDownload> OpenFileAsync(
+        string capability,
+        string resourceIdentity,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(capability);
+        ArgumentException.ThrowIfNullOrEmpty(resourceIdentity);
+
+        FileRedemption redemption = await RedemptionAuthorization
+            .RedeemAsync(_files, capability, resourceIdentity, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!redemption.Succeeded || redemption.Reference is not { } reference)
+        {
+            return redemption.Refusal == FileRedemptionRefusalKind.Expired
+                ? RuntimeFileDownload.Expired()
+                : RuntimeFileDownload.Unknown();
+        }
+
+        if (redemption.File is { } descriptor)
+        {
+            await descriptor.Content.DisposeAsync().ConfigureAwait(false);
+        }
+
+        FileHandleLookup opened = await _files
+            .OpenAsync(reference.Id, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (opened.Status == FileHandleStatus.Expired)
+        {
+            return RuntimeFileDownload.Expired();
+        }
+
+        if (opened.Status != FileHandleStatus.Available || opened.Content is not { } content)
+        {
+            return RuntimeFileDownload.Unknown();
+        }
+
+        return RuntimeFileDownload.Available(
+            reference.FileName,
+            reference.MediaType,
+            reference.Length,
+            content);
     }
 
     /// <summary>Runs one tool call against one surface of one mount.</summary>
@@ -114,6 +209,7 @@ public sealed class EngineExecution : IDisposable
     public async Task<ToolOutcome> InvokeAsync(
         MountedManifest mount,
         MountedSurface surface,
+        string invocationScope,
         string tool,
         JsonObject arguments,
         string? negotiatedProtocolRevision,
@@ -121,6 +217,7 @@ public sealed class EngineExecution : IDisposable
     {
         ArgumentNullException.ThrowIfNull(mount);
         ArgumentNullException.ThrowIfNull(surface);
+        ArgumentException.ThrowIfNullOrEmpty(invocationScope);
         ArgumentNullException.ThrowIfNull(tool);
         ArgumentNullException.ThrowIfNull(arguments);
 
@@ -129,6 +226,7 @@ public sealed class EngineExecution : IDisposable
                 _executions,
                 mount,
                 surface,
+                invocationScope,
                 tool,
                 arguments,
                 negotiatedProtocolRevision,

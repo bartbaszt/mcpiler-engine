@@ -473,6 +473,73 @@ public sealed class ExecutionServiceTests : IDisposable
         Assert.Equal(ExecutionFailureKind.Compilation, result.Failure);
     }
 
+    [Fact]
+    public async Task An_early_refusal_disposes_every_supplied_file_source()
+    {
+        var source = new TrackingSource();
+        var service = new ExecutionService(
+            new DelegatingTransport((_, _, _) => throw new InvalidOperationException("transport must not run")),
+            new ManifestSecretResolver());
+
+        var result = await service.ExecuteAsync(
+            WithFile(
+                new ExecutionRequest(
+                    ExecutionManifests.For(new Uri("https://api.example.com")),
+                    "no-such-operation",
+                    []),
+                source),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionFailureKind.Compilation, result.Failure);
+        Assert.Equal(1, source.DisposeCount);
+    }
+
+    [Fact]
+    public async Task A_transport_failure_disposes_every_supplied_file_source()
+    {
+        var source = new TrackingSource();
+        var service = new ExecutionService(
+            new DelegatingTransport((_, _, _) => throw new HttpRequestException("transport failed")),
+            new ManifestSecretResolver());
+
+        var result = await service.ExecuteAsync(
+            WithFile(
+                new ExecutionRequest(
+                    ExecutionManifests.For(new Uri("https://api.example.com")),
+                    ExecutionManifests.Slug,
+                    []),
+                source),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionFailureKind.Transport, result.Failure);
+        Assert.Equal(1, source.DisposeCount);
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_disposes_every_supplied_file_source()
+    {
+        var source = new TrackingSource();
+        using var caller = new CancellationTokenSource();
+        var service = new ExecutionService(
+            new DelegatingTransport((_, _, token) =>
+            {
+                caller.Cancel();
+                throw new OperationCanceledException(token);
+            }),
+            new ManifestSecretResolver());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.ExecuteAsync(
+            WithFile(
+                new ExecutionRequest(
+                    ExecutionManifests.For(new Uri("https://api.example.com")),
+                    ExecutionManifests.Slug,
+                    []),
+                source),
+            caller.Token));
+
+        Assert.Equal(1, source.DisposeCount);
+    }
+
     public void Dispose()
     {
         foreach (var variable in _variables)
@@ -533,5 +600,46 @@ public sealed class ExecutionServiceTests : IDisposable
         Environment.SetEnvironmentVariable(name, value);
         _variables.Add(name);
         return name;
+    }
+
+    private static ExecutionRequest WithFile(ExecutionRequest request, ReplayableBodySource source)
+        => request with
+        {
+            Files = new Dictionary<string, ExecutionFile>(StringComparer.Ordinal)
+            {
+                ["attachment"] = new(
+                    "wire-test",
+                    "payload.bin",
+                    "application/octet-stream",
+                    1,
+                    source),
+            },
+        };
+
+    private sealed class TrackingSource : ReplayableBodySource
+    {
+        public int DisposeCount { get; private set; }
+
+        public override long? Length => 1;
+
+        public override ValueTask CopyToAsync(Stream destination, CancellationToken cancellationToken)
+            => destination.WriteAsync(new byte[] { 1 }, cancellationToken);
+
+        public override ValueTask DisposeAsync()
+        {
+            DisposeCount++;
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class DelegatingTransport(
+        Func<UpstreamRequest, UpstreamSendPolicy, CancellationToken, Task<UpstreamResponse>> send)
+        : IUpstreamTransport
+    {
+        public Task<UpstreamResponse> SendAsync(
+            UpstreamRequest request,
+            UpstreamSendPolicy policy,
+            CancellationToken cancellationToken)
+            => send(request, policy, cancellationToken);
     }
 }

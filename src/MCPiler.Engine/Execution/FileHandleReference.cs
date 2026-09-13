@@ -196,19 +196,25 @@ public enum FileHandleAuditAction
 
 /// <summary>One audit record about a stored payload.</summary>
 /// <remarks>
-/// Carries an identifier, a scope and a reason. Never a filename, never a media type, never a
-/// byte of content: an audit trail that reproduced payload metadata would become a second copy
-/// of the thing whose lifetime the store exists to bound.
+/// Carries the safe metadata the file contract requires: internal reference identity, scope,
+/// length, media type, content hash and outcome. It never carries the wire capability, filename,
+/// or a byte of content.
 /// </remarks>
 /// <param name="Action">What happened.</param>
 /// <param name="HandleId">Which handle it happened to.</param>
 /// <param name="Scope">The owning scope.</param>
 /// <param name="Reason">A short explanation, safe to record.</param>
+/// <param name="Length">The recorded payload length when a metadata record exists.</param>
+/// <param name="MediaType">The recorded media type when a metadata record exists.</param>
+/// <param name="ContentHash">The recorded content hash when a metadata record exists.</param>
 public sealed record FileHandleAuditEvent(
     FileHandleAuditAction Action,
     string HandleId,
     string Scope,
-    string Reason);
+    string Reason,
+    long? Length = null,
+    string? MediaType = null,
+    string? ContentHash = null);
 
 /// <summary>Where the store's audit records go.</summary>
 /// <remarks>

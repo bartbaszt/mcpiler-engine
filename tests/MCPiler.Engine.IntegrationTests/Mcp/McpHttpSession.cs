@@ -51,11 +51,13 @@ internal sealed class McpHttpSession : IDisposable
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(15) };
     private readonly Uri _endpoint;
     private readonly string _protocolVersion;
+    private readonly string? _bearerToken;
 
-    private McpHttpSession(Uri endpoint, string protocolVersion)
+    private McpHttpSession(Uri endpoint, string protocolVersion, string? bearerToken = null)
     {
         _endpoint = endpoint;
         _protocolVersion = protocolVersion;
+        _bearerToken = bearerToken;
     }
 
     /// <summary>The session identifier the server issued, when it issued one.</summary>
@@ -79,9 +81,10 @@ internal sealed class McpHttpSession : IDisposable
     public static async Task<McpHttpSession> OpenAsync(
         Uri endpoint,
         CancellationToken cancellationToken,
-        string protocolVersion = ProtocolVersion)
+        string protocolVersion = ProtocolVersion,
+        string? bearerToken = null)
     {
-        McpHttpSession session = new(endpoint, protocolVersion);
+        McpHttpSession session = new(endpoint, protocolVersion, bearerToken);
 
         try
         {
@@ -199,6 +202,11 @@ internal sealed class McpHttpSession : IDisposable
         // response looked the way it did.
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+
+        if (_bearerToken is not null)
+        {
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _bearerToken);
+        }
 
         if (ModernProtocolVersion is { } protocolVersion)
         {

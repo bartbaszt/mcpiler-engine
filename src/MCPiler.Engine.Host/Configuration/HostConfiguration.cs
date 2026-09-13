@@ -380,6 +380,11 @@ public static class HostConfiguration
             return HostTransport.Http;
         }
 
+        if (string.Equals(value, HostListenOptions.StdioTransportName, StringComparison.Ordinal))
+        {
+            return HostTransport.Stdio;
+        }
+
         rejected.Add($"'{key}' was given '{value}'. This build serves {string.Join(", ", HostListenOptions.AcceptedTransports)}.");
         return HostTransport.Http;
     }

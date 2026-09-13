@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text.Json.Nodes;
 
+using MCPiler.Engine.Files;
+
 namespace MCPiler.Engine.Execution.Files;
 
 /// <summary>
@@ -67,6 +69,8 @@ public sealed class FileHandleStore
     private readonly TimeProvider _clock;
     private readonly IFileContentScanner? _scanner;
     private readonly IFileHandleAuditSink? _audit;
+    private readonly object _indexGate = new();
+    private readonly Dictionary<string, string> _wireIndex = new(StringComparer.Ordinal);
 
     /// <summary>
     /// Creates a store over <paramref name="options"/>, refusing a root it cannot use.
@@ -117,6 +121,18 @@ public sealed class FileHandleStore
     internal Func<string, CancellationToken, Task>? RecordWriteBarrier { get; set; }
 
     /// <summary>
+    /// A hook that runs after the durable record is written but before issuance is published to
+    /// the in-memory index, used to prove compensation removes both halves of the handle.
+    /// </summary>
+    /// <remarks>
+    /// Internal and null in production. This is the first point at which both durable files
+    /// exist, so a failure here is the regression boundary for "record without content" states.
+    /// A process crash at this point is different: both files are coherent and may safely remain
+    /// as an unobserved handle until expiry/reclamation.
+    /// </remarks>
+    internal Func<string, CancellationToken, Task>? RecordWrittenBarrier { get; set; }
+
+    /// <summary>
     /// Admits <paramref name="content"/> and returns the handle that refers to it.
     /// </summary>
     /// <exception cref="FileRuntimeException">
@@ -135,6 +151,7 @@ public sealed class FileHandleStore
 
         var id = NewId();
         var contentPath = Resolve(id + ContentExtension);
+        var recordPath = Resolve(id + RecordExtension);
 
         long length;
         string hash;
@@ -229,22 +246,39 @@ public sealed class FileHandleStore
                 verdict,
                 signature);
 
+            var wireHandle = HandleCodec.NewWire();
+            Remember(wireHandle, reference.Id);
+
             if (RecordWriteBarrier is { } barrier)
             {
                 await barrier(id, cancellationToken).ConfigureAwait(false);
             }
 
             await File.WriteAllTextAsync(
-                Resolve(id + RecordExtension),
+                recordPath,
                 Serialize(reference).ToJsonString(),
                 cancellationToken).ConfigureAwait(false);
+
+            if (RecordWrittenBarrier is { } writtenBarrier)
+            {
+                await writtenBarrier(id, cancellationToken).ConfigureAwait(false);
+            }
+
         }
         catch
         {
-            // Compensation for the one write that has already happened. If this delete fails
-            // too, the content is still unreachable and still reclaimable, which is exactly the
-            // failure state the ordering was chosen to guarantee.
-            Discard(contentPath);
+            Forget(id);
+
+            // Reverse the publication order. If record creation completed (or partially wrote)
+            // before the later failure, remove it before its content so no externally resolvable
+            // record can ever point at bytes already gone. If the record cannot be removed, keep
+            // its content too: the pair is coherent, the capability was never returned, and a
+            // later sweep may reclaim it after expiry.
+            if (TryDiscard(recordPath))
+            {
+                Discard(contentPath);
+            }
+
             throw;
         }
 
@@ -252,7 +286,10 @@ public sealed class FileHandleStore
             FileHandleAuditAction.Issued,
             id,
             scope,
-            $"admitted {length} bytes, scan {reference.ScanVerdict}, signature {reference.SignatureVerdict}"));
+            $"admitted {length} bytes, scan {reference.ScanVerdict}, signature {reference.SignatureVerdict}",
+            reference.Length,
+            reference.MediaType,
+            reference.ContentHash));
 
         return reference;
     }
@@ -295,7 +332,10 @@ public sealed class FileHandleStore
             FileHandleAuditAction.Redeemed,
             record.Id,
             record.Scope,
-            "content opened"));
+            "content opened",
+            record.Length,
+            record.MediaType,
+            record.ContentHash));
 
         return FileHandleLookup.Available(record, content);
     }
@@ -407,11 +447,15 @@ public sealed class FileHandleStore
             if (!File.Exists(Resolve(record.StoragePointer)))
             {
                 Discard(recordPath);
+                Forget(record.Id);
                 _audit?.Record(new FileHandleAuditEvent(
                     FileHandleAuditAction.Removed,
                     record.Id,
                     record.Scope,
-                    "record removed because its content was absent"));
+                    "record removed because its content was absent",
+                    record.Length,
+                    record.MediaType,
+                    record.ContentHash));
                 withoutContent.Add(record.Id);
             }
         }
@@ -460,6 +504,100 @@ public sealed class FileHandleStore
     private bool IsExpired(FileHandleReference record)
         => record.ExpiresAtUtc is { } expiry && expiry <= _clock.GetUtcNow().UtcDateTime;
 
+    /// <summary>
+    /// The wire form the handle named <paramref name="id"/> travels as, or empty when unknown.
+    /// </summary>
+    /// <remarks>
+    /// Known only for capabilities issued by this process. The durable file reference remains
+    /// protocol-independent and carries no wire capability.
+    /// </remarks>
+    public string WireFormFor(string id)
+    {
+        if (!IsWellFormedId(id))
+        {
+            return string.Empty;
+        }
+
+        lock (_indexGate)
+        {
+            foreach (var (wire, own) in _wireIndex)
+            {
+                if (string.Equals(own, id, StringComparison.Ordinal))
+                {
+                    return wire;
+                }
+            }
+
+            return string.Empty;
+        }
+    }
+
+    /// <summary>
+    /// Resolves a presented wire handle back to the internal file reference without opening content.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A wire form is an unrelated random value held only by the protocol adapter. The durable
+    /// record contains the protocol-independent file reference, so a process restart invalidates
+    /// outstanding wire capabilities while preserving the stored reference for lifecycle/sweep.
+    /// </para>
+    /// <para>
+    /// The shape is checked first. A value with no handle shape has no meaning to resolve and is
+    /// answered as absent rather than as a malformed guess.
+    /// </para>
+    /// </remarks>
+    public async Task<FileHandleLookup> TryResolveWire(string wire, CancellationToken cancellationToken)
+    {
+        if (!HandleCodec.IsWireForm(wire))
+        {
+            return FileHandleLookup.NotFound;
+        }
+
+        string? id;
+
+        lock (_indexGate)
+        {
+            _wireIndex.TryGetValue(wire, out id);
+        }
+
+        return id is null
+            ? FileHandleLookup.NotFound
+            : await DescribeAsync(id, cancellationToken).ConfigureAwait(false);
+    }
+
+    private void Remember(string wire, string id)
+    {
+        if (!HandleCodec.IsWireForm(wire) || !IsWellFormedId(id))
+        {
+            return;
+        }
+
+        lock (_indexGate)
+        {
+            _wireIndex[wire] = id;
+        }
+    }
+
+    private void Forget(string id)
+    {
+        if (!IsWellFormedId(id))
+        {
+            return;
+        }
+
+        lock (_indexGate)
+        {
+            string? wire = _wireIndex
+                .FirstOrDefault(pair => string.Equals(pair.Value, id, StringComparison.Ordinal))
+                .Key;
+
+            if (wire is not null)
+            {
+                _wireIndex.Remove(wire);
+            }
+        }
+    }
+
     private void Remove(FileHandleReference record, string reason, FileHandleAuditAction action)
     {
         // The record goes first. Reversed, an interrupted removal would leave a handle that
@@ -467,7 +605,15 @@ public sealed class FileHandleStore
         Discard(Resolve(record.Id + RecordExtension));
         Discard(Resolve(record.StoragePointer));
 
-        _audit?.Record(new FileHandleAuditEvent(action, record.Id, record.Scope, reason));
+        Forget(record.Id);
+        _audit?.Record(new FileHandleAuditEvent(
+            action,
+            record.Id,
+            record.Scope,
+            reason,
+            record.Length,
+            record.MediaType,
+            record.ContentHash));
     }
 
     private async Task<FileHandleReference?> ReadRecordAsync(string id, CancellationToken cancellationToken)
@@ -649,16 +795,21 @@ public sealed class FileHandleStore
     }
 
     private static void Discard(string path)
+        => _ = TryDiscard(path);
+
+    private static bool TryDiscard(string path)
     {
         try
         {
             File.Delete(path);
+            return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             // Nothing useful remains to do. The leftover is unreachable in both directions —
             // content with no record, or a record the caller was never given — and the sweep
             // will try again.
+            return false;
         }
     }
 

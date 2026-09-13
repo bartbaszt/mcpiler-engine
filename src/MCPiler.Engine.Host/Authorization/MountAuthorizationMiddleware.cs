@@ -70,14 +70,18 @@ internal sealed class MountAuthorizationMiddleware
 
         if (!verification.Active)
         {
-            await ChallengeAsync(context).ConfigureAwait(false);
+            await ChallengeAsync(context, addressed).ConfigureAwait(false);
             return;
         }
+
+        string resourcePath = addressed.AuthorizationResourcePath
+            ?? context.Request.Path.Value
+            ?? "/";
 
         string canonical = MountAuthorization.CanonicalResource(
             context.Request.Scheme,
             context.Request.Host.Value ?? string.Empty,
-            context.Request.Path.Value ?? "/");
+            resourcePath);
 
         if (verification.Audience is null
             || !MountAuthorization.AudienceNames(verification.Audience, canonical))
@@ -129,16 +133,20 @@ internal sealed class MountAuthorizationMiddleware
     /// ever come back authorized, and an unknown resource would answer with nothing, which is
     /// what "unknown" has to mean to a client that has not authenticated yet.
     /// </summary>
-    private static Task ChallengeAsync(HttpContext context)
+    private static Task ChallengeAsync(HttpContext context, SurfaceEndpoint addressed)
     {
         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
 
+        string resourcePath = addressed.AuthorizationResourcePath
+            ?? context.Request.Path.Value
+            ?? "/";
+
         // The resource_metadata URI mirrors the request path under the well-known prefix,
-        // which is the SDK handler's own derivation and the address a client rediscovers
-        // the metadata document at.
+        // except for transfer children, which inherit their parent MCP surface rather than
+        // becoming protected resources of their own.
         string metadata = $"{context.Request.Scheme}://{context.Request.Host.Value}"
             + "/.well-known/oauth-protected-resource"
-            + context.Request.Path.Value;
+            + resourcePath;
 
         context.Response.Headers.WWWAuthenticate = $"Bearer resource_metadata=\"{metadata}\"";
 

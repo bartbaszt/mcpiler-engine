@@ -4,6 +4,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 
 using MCPiler.Engine.Execution.Files;
+using MCPiler.Engine.Files;
 
 namespace MCPiler.Engine.Transform;
 
@@ -568,13 +569,14 @@ internal static class TransformEvaluator
                 }
 
                 // A handle, and nothing that merely resembles one. The only thing this
-                // operation may move is an identifier the caller already holds; accepting an
+                // operation may move is an identifier the caller already holds — in the form
+                // the wire carries it or the form the store keeps it under. Accepting an
                 // arbitrary string here would turn fileRef into a way to name a file by
                 // guessing, which is the one escape the exclusion list exists to close.
                 if (value is not JsonValue candidate
                     || !candidate.TryGetValue(out string? handle)
                     || handle is null
-                    || !FileHandleStore.IsWellFormedId(handle))
+                    || (!FileHandleStore.IsWellFormedId(handle) && !HandleCodec.IsWireForm(handle)))
                 {
                     throw new StepFailure(
                         TransformCodes.FileHandle,

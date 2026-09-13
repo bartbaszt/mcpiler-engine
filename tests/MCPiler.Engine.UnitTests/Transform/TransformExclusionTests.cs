@@ -251,6 +251,20 @@ public sealed class TransformExclusionTests
     }
 
     [Fact]
+    public void A_literal_shaped_like_a_wire_file_handle_is_refused()
+    {
+        TransformFinding finding = Programs.Only(Programs.Validate(Programs.Input(new JsonObject
+        {
+            ["op"] = "setConstant",
+            ["target"] = "/parts/upload",
+            ["value"] = new string('A', 43),
+        })));
+
+        Assert.Equal(TransformCodes.FileHandle, finding.Code);
+        Assert.Equal("/steps/0/value", finding.Pointer);
+    }
+
+    [Fact]
     public void An_ordinary_literal_is_not_mistaken_for_a_handle()
     {
         Assert.Empty(Programs.Validate(Programs.Input(new JsonObject

@@ -22,6 +22,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="MCPiler.Engine.IntegrationTests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="../MCPiler.Engine/MCPiler.Engine.csproj" />
   </ItemGroup>
 

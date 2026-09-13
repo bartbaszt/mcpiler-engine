@@ -1,5 +1,6 @@
 using MCPiler.Engine.Host.Authorization;
 using MCPiler.Engine.Host.Configuration;
+using MCPiler.Engine.Host.Files;
 using MCPiler.Engine.Host.Mcp;
 using MCPiler.Engine.Runtime;
 
@@ -7,6 +8,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace MCPiler.Engine.Host.Hosting;
 
@@ -81,6 +83,12 @@ public static class EngineWebHost
             ContentRootPath = AppContext.BaseDirectory,
         });
 
+        // The stock hosting diagnostics log the raw request URL. File download URLs contain a
+        // bearer capability, so emitting those messages would copy the capability into a wider
+        // operator log. Endpoint routing still logs the route template (with {capability}), and
+        // warnings/errors remain available without reproducing the presented value.
+        builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
+
         builder.WebHost.UseUrls(binding.Listener.Listen);
 
         builder.Services.AddSingleton(execution);
@@ -120,6 +128,7 @@ public static class EngineWebHost
         }
 
         McpRegistration.MapMounts(app, started.Mounts);
+        FileTransferEndpoints.Map(app, started.Mounts);
 
         return app;
     }

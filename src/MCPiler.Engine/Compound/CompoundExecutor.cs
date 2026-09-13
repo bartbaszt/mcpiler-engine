@@ -112,12 +112,10 @@ internal static class CompoundExecutor
             // compound rather than to any step inside it.
             JsonObject arguments = PartsDocument.Arguments(step.Operation, document, slots, new JsonObject());
 
-            var carried = new Dictionary<string, byte[]>(StringComparer.Ordinal);
-            var names = new Dictionary<string, string>(StringComparer.Ordinal);
-            var mediaTypes = new Dictionary<string, string>(StringComparer.Ordinal);
+            var carried = new Dictionary<string, ExecutionFile>(StringComparer.Ordinal);
 
             string? unreadable = await TryCarryAsync(
-                    files, issued, arguments, carried, names, mediaTypes, workflow.Token)
+                    files, issued, arguments, carried, workflow.Token)
                 .ConfigureAwait(false);
 
             if (unreadable is not null)
@@ -136,8 +134,6 @@ internal static class CompoundExecutor
                         {
                             Scope = request.Scope,
                             Files = carried,
-                            FileNames = names,
-                            FileMediaTypes = mediaTypes,
 
                             // What is left of the workflow's budget, so the aggregate is a
                             // bound on what arrives rather than a sum checked afterwards. A
@@ -177,7 +173,18 @@ internal static class CompoundExecutor
 
             if (outcome.ResponseFile is { } stored)
             {
-                issued[stored.Id] = stored;
+                if (outcome.ResponseFileHandle is not { Length: > 0 } wireHandle)
+                {
+                    return Failed(
+                        request,
+                        step.StepId,
+                        CompoundStage.Execution,
+                        ExecutionFailureKind.FileRuntime,
+                        completed,
+                        "The stored response has no transferable file capability.");
+                }
+
+                issued[wireHandle] = stored;
             }
 
             responses[step.StepId] = PartsDocument.Response(outcome);
@@ -294,25 +301,24 @@ internal static class CompoundExecutor
     /// <remarks>
     /// <para>
     /// This is the whole of how a file crosses between steps. A binary response was stored
-    /// rather than materialized, the response document carries its handle, and a mapping moves
-    /// that handle into a later step's request. The bytes are read here, handed to the compiler
-    /// as a file part, and never written into anything a caller can read.
+    /// rather than materialized, the response document carries its handle in its wire form, and
+    /// a mapping moves that handle into a later step's request. The store resolves the wire form
+    /// back to what it refers to and a replayable source is handed to the compiler. The content
+    /// is opened only while the later step's outbound request is serialized.
     /// </para>
     /// <para>
     /// Only an identifier this workflow issued is recognised. Treating any well-formed
-    /// identifier as a reference would mean a caller's own sixty-four hexadecimal characters —
-    /// a digest, a commit, an opaque key — either became a file or failed the step, and neither
-    /// is what the argument said. Because the set is what the workflow issued, the scope and
-    /// the lifetime are this invocation's own and there is no cross-tenant handle to refuse.
+    /// identifier as a reference would mean a caller's own opaque string either became a file or
+    /// failed the step, and neither is what the argument said. Because the set is what the
+    /// workflow issued, the scope and the lifetime are this invocation's own and there is no
+    /// cross-tenant handle to refuse.
     /// </para>
     /// </remarks>
     private static async Task<string?> TryCarryAsync(
         FileHandleStore? files,
         IReadOnlyDictionary<string, FileHandleReference> issued,
         JsonObject arguments,
-        Dictionary<string, byte[]> carried,
-        Dictionary<string, string> names,
-        Dictionary<string, string> mediaTypes,
+        Dictionary<string, ExecutionFile> carried,
         CancellationToken cancellationToken)
     {
         if (issued.Count == 0)
@@ -324,8 +330,8 @@ internal static class CompoundExecutor
         {
             if (value is not JsonValue text
                 || text.GetValueKind() != JsonValueKind.String
-                || text.GetValue<string>() is not { } id
-                || !issued.TryGetValue(id, out FileHandleReference? reference))
+                || text.GetValue<string>() is not { } wire
+                || !issued.TryGetValue(wire, out FileHandleReference? reference))
             {
                 continue;
             }
@@ -335,22 +341,21 @@ internal static class CompoundExecutor
                 return $"Step argument '{member}' names a stored file, and this runtime has no file store configured.";
             }
 
-            FileHandleLookup lookup = await files.OpenAsync(id, cancellationToken).ConfigureAwait(false);
+            FileHandleLookup lookup = await files
+                .DescribeAsync(reference.Id, cancellationToken)
+                .ConfigureAwait(false);
 
-            if (lookup.Content is not { } content)
+            if (lookup.Status != FileHandleStatus.Available)
             {
                 return $"Step argument '{member}' names a stored file that is no longer available.";
             }
 
-            await using (content.ConfigureAwait(false))
-            {
-                using var buffer = new MemoryStream();
-                await content.CopyToAsync(buffer, cancellationToken).ConfigureAwait(false);
-
-                carried[member] = buffer.ToArray();
-                names[member] = reference.FileName;
-                mediaTypes[member] = reference.MediaType;
-            }
+            carried[member] = new ExecutionFile(
+                wire,
+                reference.FileName,
+                reference.MediaType,
+                reference.Length,
+                new StoreBackedBodySource(files, reference));
         }
 
         return null;

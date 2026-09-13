@@ -37,6 +37,15 @@ public sealed record EngineExecutionResult
     /// <summary>The issued handle, when the body was stored as a file.</summary>
     public FileHandleReference? ResponseFile { get; init; }
 
+    /// <summary>
+    /// The opaque bearer capability that may cross a protocol boundary for <see cref="ResponseFile"/>.
+    /// </summary>
+    /// <remarks>
+    /// Kept separate from <see cref="FileHandleReference"/> so the internal file-reference contract
+    /// remains independent of any protocol wire representation.
+    /// </remarks>
+    public string? ResponseFileHandle { get; init; }
+
     /// <summary>A human-readable explanation of the failure, or null on success.</summary>
     public string? FailureReason { get; init; }
 

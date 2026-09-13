@@ -136,6 +136,7 @@ public static class CredentialApplier
             Uri = AppendQuery(request.ExactUrl, query),
             Headers = headers,
             Body = request.Body,
+            BodySource = request.BodySource,
             BodyMediaType = request.BodyMediaType,
             SensitiveHeaders = sensitive.ToArray(),
         };

@@ -33,10 +33,16 @@ internal sealed class SurfaceEndpoint
         new(StringComparer.Ordinal);
     private readonly object _definitionsGate = new();
 
-    internal SurfaceEndpoint(MountedManifest mount, MountedSurface surface)
+    internal SurfaceEndpoint(
+        MountedManifest mount,
+        MountedSurface surface,
+        string resourceIdentity,
+        string? authorizationResourcePath = null)
     {
         Mount = mount;
         Surface = surface;
+        ResourceIdentity = resourceIdentity;
+        AuthorizationResourcePath = authorizationResourcePath;
     }
 
     /// <summary>The mount this surface belongs to.</summary>
@@ -44,6 +50,15 @@ internal sealed class SurfaceEndpoint
 
     /// <summary>The surface addressed.</summary>
     public MountedSurface Surface { get; }
+
+    /// <summary>The exact protected-resource identity this route represents.</summary>
+    public string ResourceIdentity { get; }
+
+    /// <summary>
+    /// A parent resource path inherited by a child endpoint, or null when the request path itself
+    /// is the protected resource. MCP routes leave this null; transfer child routes set it.
+    /// </summary>
+    public string? AuthorizationResourcePath { get; }
 
     /// <summary>Maps the compiled catalogue for one negotiated protocol revision.</summary>
     public IReadOnlyList<Tool> Definitions(string? negotiatedProtocolRevision)
@@ -114,16 +129,26 @@ internal static class McpRegistration
         {
             foreach (MountedSurface surface in mount.Surfaces)
             {
-                SurfaceEndpoint addressed = new(mount, surface);
-
-                app.MapMcp(mount.Prefix + "/" + surface.Slug).WithMetadata(addressed);
+                string qualifiedPath = mount.Prefix + "/" + surface.Slug;
+                app.MapMcp(qualifiedPath).WithMetadata(
+                    new SurfaceEndpoint(mount, surface, ResourceIdentity(app, qualifiedPath)));
 
                 if (surface.IsDefault)
                 {
-                    app.MapMcp(mount.Prefix).WithMetadata(addressed);
+                    app.MapMcp(mount.Prefix).WithMetadata(
+                        new SurfaceEndpoint(mount, surface, ResourceIdentity(app, mount.Prefix)));
                 }
             }
         }
+    }
+
+    private static string ResourceIdentity(WebApplication app, string path)
+    {
+        // The listener may bind port zero and learn its concrete authority only after start,
+        // so route registration cannot freeze scheme/host here. The path is the part routing
+        // decides. ConfigureSession replaces this provisional value with the request's exact
+        // canonical identity before a handler is installed.
+        return path;
     }
 
     /// <summary>
@@ -152,10 +177,41 @@ internal static class McpRegistration
         McpServerOptions options,
         CancellationToken cancellationToken)
     {
-        if (context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>() is not { } addressed)
+        if (context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>() is not { } route)
         {
             return Task.CompletedTask;
         }
+
+        SurfaceEndpoint addressed = new(
+            route.Mount,
+            route.Surface,
+            MountAuthorization.CanonicalResource(
+                context.Request.Scheme,
+                context.Request.Host.Value ?? string.Empty,
+                context.Request.Path.Value ?? "/"));
+
+        EngineExecution execution = context.RequestServices.GetRequiredService<EngineExecution>();
+        ConfigureSurface(options, addressed, execution);
+
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Configures one protocol session from one already-derived surface.
+    /// </summary>
+    /// <remarks>
+    /// Both transports call this method. Keeping identity, listing and invocation handlers here
+    /// makes transport parity structural: HTTP and stdio differ in framing and reachability, while
+    /// the surface they expose is the same object with the same handlers.
+    /// </remarks>
+    internal static void ConfigureSurface(
+        McpServerOptions options,
+        SurfaceEndpoint addressed,
+        EngineExecution execution)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(addressed);
+        ArgumentNullException.ThrowIfNull(execution);
 
         ServerIdentity identity = addressed.Surface.Identity;
 
@@ -170,8 +226,6 @@ internal static class McpRegistration
         options.Capabilities ??= new ServerCapabilities();
         options.Capabilities.Tools = new ToolsCapability();
 
-        EngineExecution execution = context.RequestServices.GetRequiredService<EngineExecution>();
-
         options.Handlers.ListToolsHandler = (request, _)
             => ValueTask.FromResult(new ListToolsResult
             {
@@ -180,7 +234,5 @@ internal static class McpRegistration
 
         options.Handlers.CallToolHandler = (request, token)
             => ToolBridge.InvokeAsync(addressed, execution, request, token);
-
-        return Task.CompletedTask;
     }
 }
