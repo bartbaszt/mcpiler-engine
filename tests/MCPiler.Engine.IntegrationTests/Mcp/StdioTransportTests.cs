@@ -79,6 +79,42 @@ public sealed class StdioTransportTests : IDisposable
     }
 
     [Fact]
+    public async Task Execution_failure_classification_is_byte_identical_over_both_transports()
+    {
+        string variable = "MCPILER_STDIO_PARITY_" + Guid.NewGuid().ToString("N").ToUpperInvariant();
+        Assert.Null(Environment.GetEnvironmentVariable(variable));
+        string manifest = ServedManifests.Write(
+            _root,
+            "classified-call-parity",
+            ManifestSufficiencyTests.Manifest(
+                new Uri("https://example.invalid"),
+                credentialVariable: variable));
+
+        await using ServedEngine http = await ServedEngine.StartAsync(
+            new RuntimeOptions([new MountRequest("/api", manifest)], Store("classified-http")),
+            TestContext.Current.CancellationToken);
+
+        using McpHttpSession session = await McpHttpSession.OpenAsync(
+            http.At("/api/full"),
+            TestContext.Current.CancellationToken);
+
+        McpExchange remote = await session.CallAsync(
+            "ping",
+            "{}",
+            2,
+            TestContext.Current.CancellationToken);
+
+        string local = await StdioRequestAsync(
+            manifest,
+            Store("classified-stdio"),
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"ping\",\"arguments\":{}}}",
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(remote.Payload, local);
+        Assert.Contains("\"_meta\":{\"io.mcpiler/errorCode\":\"Authentication\"}", local, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task A_scoped_surface_is_served_locally_without_a_token()
     {
         string scoped = ServedManifests.OneSurface.Replace(

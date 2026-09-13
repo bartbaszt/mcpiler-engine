@@ -195,9 +195,11 @@ internal static class ToolInvocation
             // a caller has to react to — which step, how far it got — and a sentence carrying
             // them would be a contract written as prose, which is a contract nobody can rely on
             // and everybody breaks by rewording.
-            return result.FailureDetail is { } detail
+            ToolOutcome failed = result.FailureDetail is { } detail
                 ? new ToolOutcome(detail.ToJsonString(), IsError: true)
                 : new ToolOutcome(result.FailureReason ?? Unexplained(result.Failure), IsError: true);
+
+            return failed with { ErrorCode = result.Failure.ToString() };
         }
 
         if (result.ResponseFile is { } stored)

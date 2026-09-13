@@ -46,6 +46,12 @@ digests, not by a self-verifying file.
 The manifest format is versioned independently of Engine. During alpha the format version
 stays in the `0.x` range and Engine states its supported range when it refuses a manifest.
 
+## Hosting
+
+[`docs/hosting.md`](docs/hosting.md) documents mounts, host configuration, HTTP and stdio
+transports, health checks, file-store commands, exit codes, shutdown behavior and the container
+contract.
+
 ## File handles
 
 A binary upstream response is written to a local store and returned as a handle rather than

@@ -164,6 +164,7 @@ public sealed class ToolInvocationTests
 
         Assert.True(outcome.IsError);
         Assert.Equal("the stated reason", outcome.Text);
+        Assert.Equal(failure.ToString(), outcome.ErrorCode);
     }
 
     [Theory]
@@ -176,6 +177,7 @@ public sealed class ToolInvocationTests
 
         Assert.True(outcome.IsError);
         Assert.Contains(failure.ToString(), outcome.Text, StringComparison.Ordinal);
+        Assert.Equal(failure.ToString(), outcome.ErrorCode);
     }
 
     [Fact]

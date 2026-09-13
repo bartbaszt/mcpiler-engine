@@ -24,6 +24,14 @@ namespace MCPiler.Engine.Runtime;
 /// <param name="IsError">Whether the call itself failed.</param>
 public sealed record ToolOutcome(string Text, bool IsError)
 {
+    /// <summary>The stable execution-failure classification, when execution reached that boundary.</summary>
+    /// <remarks>
+    /// Kept as text so this seam remains protocol-neutral. The host may carry the value as
+    /// transport metadata, while callers that never cross MCP can still react to the same closed
+    /// vocabulary without parsing <see cref="Text"/>.
+    /// </remarks>
+    public string? ErrorCode { get; init; }
+
     /// <summary>The structured result as JSON text, when this session was promised one.</summary>
     /// <remarks>
     /// Text keeps the library/host seam protocol-neutral and preserves the bytes the library

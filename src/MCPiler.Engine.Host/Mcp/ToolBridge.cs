@@ -27,6 +27,8 @@ namespace MCPiler.Engine.Host.Mcp;
 /// </remarks>
 internal static class ToolBridge
 {
+    private const string ErrorCodeMetaKey = "io.mcpiler/errorCode";
+
     /// <summary>Runs one call against the surface the request addressed.</summary>
     public static async ValueTask<CallToolResult> InvokeAsync(
         SurfaceEndpoint addressed,
@@ -72,6 +74,9 @@ internal static class ToolBridge
                 Content = [new TextContentBlock { Text = outcome.Text }],
                 StructuredContent = outcome.StructuredContentJson is { } structured
                     ? JsonSerializer.Deserialize<JsonElement>(structured)
+                    : null,
+                Meta = outcome.ErrorCode is { } errorCode
+                    ? new JsonObject { [ErrorCodeMetaKey] = errorCode }
                     : null,
             };
         }
