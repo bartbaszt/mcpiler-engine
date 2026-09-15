@@ -62,4 +62,27 @@ public sealed record RuntimeOptions(IReadOnlyList<MountRequest> Mounts, string F
 
     /// <summary>Directories this process serves to clients; the file-store root must be outside them.</summary>
     public IReadOnlyList<string> ServedContentRoots { get; init; } = [];
+
+    /// <summary>
+    /// Where runtime-owned mutable authentication state is encrypted at rest. Null keeps it in
+    /// memory only.
+    /// </summary>
+    /// <remarks>
+    /// This state exists for one class of value: a credential the upstream replaces when it is
+    /// used, where losing the replacement makes the deployment unable to authenticate. It is
+    /// deliberately separate from <see cref="FileStoreRoot"/>: that one holds client-visible
+    /// content, while this one holds a secret and never serves anything.
+    /// </remarks>
+    public string? RuntimeStateRoot { get; init; }
+
+    /// <summary>
+    /// The file holding the Engine runtime-state key. Required exactly when
+    /// <see cref="RuntimeStateRoot"/> is set.
+    /// </summary>
+    /// <remarks>
+    /// Engine's own key, never the Platform master key. A configured root with no key — or the
+    /// reverse — is refused rather than resolved to a default, because either half alone would
+    /// silently produce a deployment that cannot read what it wrote.
+    /// </remarks>
+    public string? RuntimeStateKeyFile { get; init; }
 }

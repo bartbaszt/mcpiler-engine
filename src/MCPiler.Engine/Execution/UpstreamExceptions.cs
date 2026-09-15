@@ -84,11 +84,23 @@ public sealed class UpstreamTransportException(string message, Exception? inner 
 /// of a secret in order to explain why it could not be read would defeat the reason the
 /// reference exists.
 /// </remarks>
-public sealed class CredentialUnavailableException(string credentialId, string message)
-    : Exception($"Credential '{credentialId}': {message}")
+public sealed class CredentialUnavailableException : Exception
 {
+    /// <summary>Creates a failure naming the credential slot and the cause.</summary>
+    /// <param name="credentialId">The credential the caller could not obtain or apply.</param>
+    /// <param name="message">What went wrong, never including any part of a value.</param>
+    /// <param name="inner">The underlying cause, when the failure wraps one.</param>
+    public CredentialUnavailableException(
+        string credentialId,
+        string message,
+        Exception? inner = null)
+        : base($"Credential '{credentialId}': {message}", inner)
+    {
+        CredentialId = credentialId;
+    }
+
     /// <summary>The credential slot that could not be resolved or applied.</summary>
-    public string CredentialId { get; } = credentialId;
+    public string CredentialId { get; }
 }
 
 /// <summary>

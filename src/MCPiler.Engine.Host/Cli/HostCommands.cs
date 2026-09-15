@@ -3,7 +3,9 @@ using System.Text;
 
 using MCPiler.Engine.Host.Configuration;
 using MCPiler.Engine.Host.Hosting;
+using MCPiler.Engine.Host.Managed;
 using MCPiler.Engine.Runtime;
+using MCPiler.Engine.Runtime.Managed;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Hosting;
@@ -81,7 +83,12 @@ public static class HostCommands
         TextWriter? progress,
         CancellationToken cancellationToken)
     {
-        if (!HasManifestMount(parsed, out CommandOutcome? refused))
+        // The mode is read before binding, because it decides whether a local mount is required at
+        // all: a managed process is refused for naming one, and a file-mode process is refused for
+        // omitting one. Checking the mount before the mode would report the wrong absence.
+        bool managed = HostConfiguration.RequestsManagedMode(parsed.Settings);
+
+        if (!managed && !HasManifestMount(parsed, out CommandOutcome? refused))
         {
             return refused;
         }
@@ -89,6 +96,11 @@ public static class HostCommands
         if (!Bind(parsed, out HostBinding? binding, out refused))
         {
             return refused;
+        }
+
+        if (binding.Mode is HostDeploymentMode.Managed)
+        {
+            return await ServeManagedAsync(binding, identity, progress, cancellationToken).ConfigureAwait(false);
         }
 
         RuntimeStartResult result = EngineRuntime.Start(binding.Runtime);
@@ -139,18 +151,176 @@ public static class HostCommands
         }
         else
         {
-            await using WebApplication app = EngineWebHost.Build(result, binding, execution, drain);
+            WebApplication app;
+            try
+            {
+                app = EngineWebHost.Build(result, binding, execution, drain);
+            }
+            catch (InvalidOperationException refusal)
+            {
+                // The listener refuses before it exists: for example a mount that requires a
+                // token while no issuer is configured. That is a configuration outcome, not a
+                // crash, so it reports through the same refusal path every other startup
+                // problem uses and exits with the configuration code.
+                return new CommandOutcome(
+                    ExitCodes.Configuration,
+                    refusal.Message + Environment.NewLine);
+            }
 
-            await app.StartAsync(cancellationToken).ConfigureAwait(false);
-            await WaitForStoppingAsync(app, cancellationToken).ConfigureAwait(false);
+            await using (app.ConfigureAwait(false))
+            {
+                await app.StartAsync(cancellationToken).ConfigureAwait(false);
+                await WaitForStoppingAsync(app, cancellationToken).ConfigureAwait(false);
 
-            DrainReport drainReport = await drain
-                .ShutdownAsync(app, binding.Lifecycle.DrainTimeout)
-                .ConfigureAwait(false);
-            ReportDrain(progress, drainReport);
+                DrainReport drainReport = await drain
+                    .ShutdownAsync(app, binding.Lifecycle.DrainTimeout)
+                    .ConfigureAwait(false);
+                ReportDrain(progress, drainReport);
+            }
         }
 
         return new CommandOutcome(ExitCodes.Success, string.Empty);
+    }
+
+    /// <summary>
+    /// Serves the desired state one Platform deployment delivers.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The initial synchronization is bounded and happens before the listener exists. A managed
+    /// process with no generation has nothing to serve, and opening a socket first would report
+    /// readiness to an orchestrator while answering nothing: the refusal has to be a startup
+    /// outcome, not a client-visible absence.
+    /// </para>
+    /// <para>
+    /// The worker starts only after the listener is up, so the first activation cannot race the
+    /// generation the listener was built around.
+    /// </para>
+    /// </remarks>
+    private static async Task<CommandOutcome> ServeManagedAsync(
+        HostBinding binding,
+        string identity,
+        TextWriter? progress,
+        CancellationToken cancellationToken)
+    {
+        if (binding.Listener.Transport is HostTransport.Stdio)
+        {
+            return new CommandOutcome(
+                ExitCodes.Configuration,
+                "Managed synchronization serves a long-polled generation and cannot run over stdio. "
+                + "Choose the http transport."
+                + Environment.NewLine);
+        }
+
+        ManagedSyncOptions options = binding.Managed
+            ?? throw new InvalidOperationException(
+                "A managed binding without synchronization settings cannot serve. The configuration "
+                + "layer refuses this shape, so reaching here means a caller built a binding by hand.");
+
+        if (!ManagedGenerationLoader.TryOpen(
+                binding.Runtime,
+                out ManagedGenerationLoader? loader,
+                out IReadOnlyList<StartupRefusal> loadRefusals))
+        {
+            return new CommandOutcome(
+                ExitCodes.Configuration,
+                identity + Environment.NewLine + Render(loadRefusals));
+        }
+
+        using ManagedGenerationLoader generationsLoader = loader!;
+        using EngineGenerationManager generations = new(HostMode.Managed);
+        using DrainCoordinator drain = new();
+        using ManagedSyncWorker worker = new(
+            options,
+            generationsLoader,
+            generations,
+            EngineRuntime.SupportedManifestFormatRange,
+            diagnostic =>
+            {
+                progress?.WriteLine(diagnostic);
+                progress?.Flush();
+            });
+
+        ManagedInitialSync initial = await worker
+            .SynchronizeInitialAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!initial.Started)
+        {
+            string refusal = initial.Refusal is { } refusalValue
+                ? StartupReport.RenderRefusal(refusalValue)
+                : "Engine could not obtain an initial generation and will not open a listener."
+                    + Environment.NewLine;
+
+            return new CommandOutcome(ExitCodes.Configuration, identity + Environment.NewLine + refusal);
+        }
+
+        progress?.Write(identity + Environment.NewLine + StartupReport.RenderManaged(
+            options.Describe(),
+            initial.GenerationId!,
+            generationsLoader.DurableRuntimeState));
+        progress?.Flush();
+
+        await using WebApplication? app = BuildManagedOrRefuse(binding, drain, generations, out CommandOutcome? buildRefusal);
+        if (app is null)
+        {
+            return buildRefusal!;
+        }
+
+        await app.StartAsync(cancellationToken).ConfigureAwait(false);
+
+        // Started after the listener, because an activation that landed earlier would replace the
+        // generation the listener was built around while nothing could yet serve it.
+        worker.Start(cancellationToken);
+
+        await WaitForStoppingAsync(app, cancellationToken).ConfigureAwait(false);
+
+        DrainReport drainReport = await drain
+            .ShutdownAsync(app, binding.Lifecycle.DrainTimeout)
+            .ConfigureAwait(false);
+        ReportDrain(progress, drainReport);
+
+        return new CommandOutcome(ExitCodes.Success, string.Empty);
+
+        static string Render(IReadOnlyList<StartupRefusal> refusals)
+        {
+            StringBuilder text = new();
+
+            foreach (StartupRefusal refusal in refusals)
+            {
+                text.AppendLine(StartupReport.RenderRefusal(refusal));
+            }
+
+            return text.ToString();
+        }
+    }
+
+    /// <summary>
+    /// Builds the managed listener, or reports the startup refusal a configuration gap names.
+    /// </summary>
+    /// <remarks>
+    /// The listener refuses before it exists when the active generation requires authorization and
+    /// no issuer is configured. That is the same class of outcome as any other startup refusal, so
+    /// it exits with the configuration code instead of escaping as an unhandled exception.
+    /// </remarks>
+    private static WebApplication? BuildManagedOrRefuse(
+        HostBinding binding,
+        DrainCoordinator drain,
+        EngineGenerationManager generations,
+        out CommandOutcome? refusal)
+    {
+        try
+        {
+            refusal = null;
+            return EngineWebHost.BuildManaged(binding, drain, generations);
+        }
+        catch (InvalidOperationException unbuildable)
+        {
+            refusal = new CommandOutcome(
+                ExitCodes.Configuration,
+                unbuildable.Message + Environment.NewLine);
+            return null;
+        }
     }
 
     private static async Task WaitForStoppingAsync(

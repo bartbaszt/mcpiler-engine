@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mcpiler:manifest:0.3:search",
+  "title": "MCPiler Manifest 0.3 search section",
+  "description": "Optional lexical index. Omit it and Engine rebuilds it from agentSurface and operations. It is a term store, not a permission list: whether an operation is discoverable is decided by the surface exposure list, never by presence here.",
+  "type": "object",
+  "required": ["operations"],
+  "additionalProperties": false,
+  "properties": {
+    "formatVersion": { "const": 1 },
+    "builderVersion": {
+      "description": "An index built by another builder version is ignored and rebuilt rather than trusted.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "indexedFields": {
+      "$comment": "Not constrained to the catalogue. An unrecognised field carries weight 0, so it is inert rather than dangerous, and refusing it here would make this document stricter than the reader.",
+      "description": "Catalogue: name, summary, description, tags, groups, httpPath, parameterName, parameterDescription, requestSchema, responseSchema, alias, keyword, exampleIntent, stepName, stepSummary.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "scoring": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "quantizationStep": { "type": "integer", "minimum": 1 },
+        "metaMultiplier": { "type": "integer", "minimum": 0 },
+        "vectorScale": { "type": "integer", "minimum": 1 },
+        "fieldWeights": {
+          "description": "Part of the format so a Studio built and an Engine built index rank identically.",
+          "type": "object",
+          "additionalProperties": { "type": "integer" }
+        }
+      }
+    },
+    "operations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/document" }
+    }
+  },
+  "$defs": {
+    "document": {
+      "type": "object",
+      "required": ["operation"],
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "description": "An agentSurface slug.",
+          "type": "string"
+        },
+        "summary": { "type": "string" },
+        "risk": { "type": "string" },
+        "terms": {
+          "description": "Field name to terms. Same catalogue as indexedFields, and equally not constrained here.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

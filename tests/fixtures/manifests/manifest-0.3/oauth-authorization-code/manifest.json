@@ -1,0 +1,95 @@
+{
+  "manifestFormatVersion": "0.3",
+  "sections": {
+    "server": {
+      "inline": {
+        "name": "OAuth Authorization Code"
+      }
+    },
+    "policy": {
+      "inline": {
+        "baseUrl": "https://api.example.com/v1"
+      }
+    },
+    "operations": {
+      "inline": {
+        "operations": [
+          { "key": "GET /pets", "method": "GET", "path": "/pets" }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "operations": [
+          {
+            "slug": "list-pets",
+            "name": "List pets",
+            "binding": {
+              "type": "http",
+              "operation": "GET /pets",
+              "authenticationRef": "oauth2-authorization-code-pkce-refresh"
+            }
+          }
+        ]
+      }
+    },
+    "credentials": {
+      "inline": {
+        "formatVersion": 3,
+        "credentials": [
+          {
+            "id": "oauth2-authorization-client-secret",
+            "scheme": "oauth2-authorization-code",
+            "slot": "clientSecret",
+            "value": { "fromFile": "/run/secrets/example-client-secret" }
+          },
+          {
+            "id": "oauth2-authorization-refresh-token",
+            "scheme": "oauth2-authorization-code",
+            "slot": "refreshToken",
+            "value": { "fromFile": "/run/secrets/example-refresh-token" }
+          }
+        ]
+      }
+    },
+    "authentication": {
+      "inline": {
+        "formatVersion": 1,
+        "profiles": [
+          {
+            "id": "oauth2-authorization-code-pkce-refresh",
+            "kind": "oauth2-authorization-code-pkce-refresh",
+            "configuration": {
+              "strategyId": "oauth2-authorization-code-pkce-refresh",
+              "inputs": { "clientId": "example-client" },
+              "clientId": "example-client",
+              "tokenEndpoint": "https://auth.example.com/oauth2/token",
+              "authorizationEndpoint": "https://auth.example.com/oauth2/authorize",
+              "revocationEndpoint": "https://auth.example.com/oauth2/revoke",
+              "tokenAuthMethod": "client_secret_basic",
+              "scopes": ["pets.read"],
+              "resource": "https://api.example.com",
+              "accessTokenSafetySkewSeconds": 30
+            },
+            "authenticationOrigins": [
+              "https://auth.example.com:443"
+            ],
+            "destinationOrigins": ["https://api.example.com:443"],
+            "credentialRef": [
+              "oauth2-authorization-client-secret",
+              "oauth2-authorization-refresh-token"
+            ],
+            "scopeFingerprint": "0000000000000000000000000000000000000000000000000000000000000003",
+            "slots": [
+              {
+                "slot": "refreshToken",
+                "authorityEpoch": 2,
+                "runtimeRevision": 7
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

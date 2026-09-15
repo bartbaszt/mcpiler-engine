@@ -13,9 +13,9 @@ Manifests are ordinary JSON. A person can write one by hand, a script can
 generate one, and MCPiler Studio can export one. None of those three is
 privileged: the format is the contract, not the producer.
 
-- Current format version: **0.2**
-- Supported by this Engine: **0.2**
-- JSON Schemas: [`schemas/manifest-0.2/`](../schemas/manifest-0.2/)
+- Current format version: **0.3**
+- Supported by this Engine: **0.3**
+- JSON Schemas: [`schemas/manifest-0.3/`](../schemas/manifest-0.3/)
 - Worked examples: [`tests/fixtures/manifests/`](../tests/fixtures/manifests/)
 
 ## Contents
@@ -38,7 +38,7 @@ specific to the API being served. This is a complete, servable manifest:
 
 ```json
 {
-  "manifestFormatVersion": "0.2",
+  "manifestFormatVersion": "0.3",
   "sections": {
     "server": { "inline": { "name": "Example API" } },
     "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -251,8 +251,11 @@ incorrect belief about the deployed perimeter.
 Credentials by reference. A manifest never carries secret material.
 
 Each entry is `{id, scheme, slot, location?, value}`. Schemes are `basic`,
-`bearer`, `apiKey` and `header`. `location` applies to `apiKey` only and is
-`header` (default), `query` or `cookie`.
+`bearer`, `apiKey` and `header` for credentials a binding applies directly, and
+`oauth2-client-credentials`, `oauth2-authorization-code`, `token-session-exchange`,
+`challenge-session` and `request-signing` for slots an authentication profile
+consumes. `location` applies to `apiKey` only and is `header` (default), `query`
+or `cookie`.
 
 `id` is how a binding names this credential. It matches `^[a-z0-9][a-z0-9-]*$`,
 is at most 64 characters, and must be unique within the section. Upper case is
@@ -265,6 +268,9 @@ same id no matter which secret is behind it.
 
 - `{"fromEnv": "NAME"}` — an environment variable.
 - `{"fromFile": "/absolute/path"}` — a file, trailing newline trimmed.
+- `{"fromProvider": "KEY"}` — an opaque key into the active generation's
+  in-memory secret set. Refused unless `--allow-provider-references` (managed
+  mode), and refused when the mode is standalone.
 - `{"inline": "..."}` — refused unless `--allow-inline-secrets`, and always
   warned about.
 
@@ -285,6 +291,96 @@ servable, but the deployment is being asked for a secret nothing will use.
 An unresolvable reference is an authentication fault with its own diagnostic
 code, never a network error. No diagnostic ever echoes a credential value, a
 resolved secret or the contents of an environment variable.
+
+### `authentication`
+
+Optional. Generic authentication profiles: the portable form of a connector's
+dynamic authentication configuration. A manifest without this section keeps the
+legacy static model, in which each binding's `credentialRef` names the
+credentials it applies directly. A connector whose authentication is dynamic
+declares exactly one profile here and its executing bindings reference it by
+`authenticationRef` instead of declaring a credential scope.
+
+A profile is
+`{id, kind, configuration, authenticationOrigins, destinationOrigins, credentialRef,
+scopeFingerprint?, slots?}`. `id` shares the credential charset and is
+manifest-local: a binding names it, and nothing about the profile is derived from
+a producer row identity.
+
+`kind` is a closed discriminator. The executable kinds are `static`,
+`oauth2-client-credentials`, `oauth2-authorization-code-pkce-refresh`,
+`token-session-exchange`, `challenge-session` and `request-signing`.
+`reviewed-composite` is part of the vocabulary so a stored value round-trips, but
+no accepted artifact defines its runtime semantics, so a profile declaring it is
+refused at load (`authentication/kind-not-executable`) rather than failing on the
+first invocation that uses it.
+
+`configuration` is required and its member set is closed and selected by `kind`:
+
+| Kind | Configuration members |
+|---|---|
+| `static` | `strategyId`, `inputs` |
+| `oauth2-client-credentials`, `oauth2-authorization-code-pkce-refresh` | `strategyId`, `inputs`, `clientId`, `tokenEndpoint`, `authorizationEndpoint` (required for the authorization-code kind), `revocationEndpoint`, `tokenAuthMethod` (`client_secret_post` default, `client_secret_basic`, `none`), `scopes`, `resource`, `audience`, `accessTokenSafetySkewSeconds` (0–300), `authorizationParameters` |
+| `token-session-exchange` | `strategyId`, `inputs`, `endpoint`, `method` (`GET`/`POST`/`PUT`/`PATCH`), `request`, `response`, `injection`, `destination?`, `defaultLifetimeSeconds` (1–2592000), `safetySkewSeconds` (0–300), `authFailureStatusCodes` |
+| `challenge-session` | `strategyId`, `inputs`, `challenge`, `injection`, `replaySafeOperationKeys`, `sessionLifetimeSeconds` (1–2592000) |
+| `request-signing` | `strategyId` (one of the reviewed signer kinds below), `inputs` with exactly `accessKeyId` |
+
+`request-signing` names one of four reviewed signer kinds:
+`request-signing-aws-sigv4`, `request-signing-hmac`,
+`request-signing-jwt-hmac`, `request-signing-subsonic-md5`. A signer this build
+does not implement is refused (`authentication/signer-unknown`), because the
+alternative is a request that fails — or is sent unsigned — at invocation time.
+
+Every member set is closed at every depth, and a member named like executable
+content (`regex`, `script`, `expression`, `template`, `command`, `shell`) is
+refused at any depth (`authentication/executable-member`). A malformed or
+unknown member refuses the profile (`authentication/configuration-invalid`).
+This refuses the whole manifest before any secret is resolved, so an authoring
+mistake never becomes a production outage.
+
+`authenticationOrigins` are the origins that may receive a revealed credential,
+for example a token endpoint. `destinationOrigins` are the origins the
+authenticated request may reach. Both are canonical `scheme://host:port` origins
+and both admit the reviewed `https://*.parent` wildcard form. No origin may carry
+a path, query, fragment or user information.
+
+`credentialRef` names `credentials` entries by id and is checked against the
+kind's slot shape: `oauth2-client-credentials` needs a
+`clientSecret`; `oauth2-authorization-code-pkce-refresh` needs a `clientSecret`
+or an authorized `refreshToken`; `request-signing` needs a `signingSecret`; and
+each dynamic scheme may only reference credentials of its own scheme. A profile
+referencing an incompatible credential is refused
+(`authentication/credential-incompatible`) — silently resolving to a slot the
+strategy never reveals would make the profile behave as if unauthenticated.
+
+`scopeFingerprint` is the producer's non-secret scope identity, 64 lower-case
+hexadecimal characters. Engine compares it for equality when binding a local
+runtime record; it is never derived from a secret value.
+
+`slots` declares mutable-slot authority state for kinds that own a writable slot:
+`{slot, authorityEpoch, runtimeRevision?}`. `authorityEpoch` advances only on an
+explicit producer-side authorization, clear, replacement or scope change; a
+runtime rotation advances `runtimeRevision` within the epoch. A record whose
+epoch or scope fingerprint disagrees with the active profile is never used.
+
+**A profile must be referenced.** A binding's `authenticationRef` names it, and
+an unreferenced profile is a warning; an unknown reference refuses the manifest
+(`binding/authentication-ref-unknown`). `authenticationRef` appears on an `http`
+binding and inside a `transformedHttp` binding's `base`, and nowhere else: on a
+transformed wrapper or a compound binding it is an unknown member, because the
+base is what executes and a compound binding resolves each step's own profile.
+
+**A dynamic credential cannot be applied directly.** A binding whose
+`credentialRef` names a dynamic-scheme credential is refused
+(`authentication/credential-incompatible`): such a credential is consumed by a
+profile's strategy, never attached to a request as a literal header.
+
+**Deployment-mode applicability.** `fromProvider` resolves only in managed mode,
+where the active generation carries exactly one matching in-memory value; a
+standalone Engine refuses a manifest containing `fromProvider`
+(`credential/provider-not-permitted`). Managed mode refuses a missing, duplicate
+or unreferenced provider value. Provider values never enter rendered manifest
+bytes, diagnostics, generation identities or durable Engine state.
 
 ### `operations`
 
@@ -338,9 +434,12 @@ the join is by name, ordinal and case-sensitive.
 Bindings:
 
 - `{"type": "http", "operation": "<execution key>", "serverUrl": "...",
-  "credentialRef": ["..."]}` — a direct call. `serverUrl` overrides
-  `policy.baseUrl` for this operation and remains fully subject to
-  `allowedOrigins`. `credentialRef` names the credentials this request carries.
+  "credentialRef": ["..."], "authenticationRef": "..."}` — a direct call.
+  `serverUrl` overrides `policy.baseUrl` for this operation and remains fully
+  subject to `allowedOrigins`. `credentialRef` names the credentials this request
+  carries; `authenticationRef` names the profile whose strategy authenticates it.
+  The two are alternatives: a profiled execution states the profile and not a
+  direct scope.
 - `{"type": "transformedHttp", "base": {...}, "inputProgram": {...},
   "outputProgram": {...}}` — a call with a bounded argument or response
   transformation. Input pointers address `/path`, `/query`, `/headers`,
@@ -500,7 +599,8 @@ neither is complete; their absence is not a defect in the artifact.
 `http` binding and inside a `transformedHttp` binding's `base`, and nowhere else:
 on a transformed wrapper or on a compound binding it is an unknown member and the
 section is refused. A compound binding has no credentials of its own — each step
-carries whatever its own operation's binding names.
+carries whatever its own operation's binding names. `authenticationRef` follows
+exactly the same placement rule.
 
 Absent and empty mean the same thing, and both mean **no credential**. A binding
 that names none sends no credential material, so a manifest that forgets to grant
@@ -607,12 +707,12 @@ format release, and a format release does not require an Engine release to be
 described.
 
 **Engine declares an explicit supported range.** This Engine supports manifest
-format `0.2`. Section versions are not uniform, because they move
-independently: `credentials` and `agentSurface` are at `2`, while `server`,
-`policy`, `operations`, `tools` and `search` are still at `1`. A section that
-omits `formatVersion` is accepted at whatever version this Engine supports for
-it. A refusal always names the version observed and the range supported. Hostile
-input echoed for context is truncated.
+format `0.3`. Section versions are not uniform, because they move
+independently: `credentials` and `agentSurface` are at `3`, `authentication` is
+at `1`, while `server`, `policy`, `operations`, `tools` and `search` are still
+at `1`. A section that omits `formatVersion` is accepted at whatever version this
+Engine supports for it. A refusal always names the version observed and the range
+supported. Hostile input echoed for context is truncated.
 
 **While MAJOR is 0 there is no compatibility promise.** The remedy for an old
 manifest is to produce it again, not to migrate it. There is no alpha migrator,
@@ -725,6 +825,7 @@ The following codes are always warnings; every other code is an error:
 | `binding/pointer-root-not-allowed` | A pointer addresses a root not allowed in that position. |
 | `binding/credential-ref-unknown` | A `credentialRef` names a credential `credentials` does not declare. |
 | `binding/credential-basic-incomplete` | A binding references one half of a `basic` pair. |
+| `binding/authentication-ref-unknown` | An `authenticationRef` names a profile `authentication` does not declare. |
 
 ### `surface` — routing
 
@@ -762,6 +863,27 @@ The following codes are always warnings; every other code is an error:
 | `credential/duplicate-id` | Two credentials declare the same `id`. |
 | `credential/slot-duplicate` | One binding references two credentials that address the same destination. |
 | `credential/unreferenced` | A declared credential no binding references. |
+| `credential/provider-not-permitted` | A `fromProvider` reference in standalone mode. |
+| `credential/provider-key-invalid` | A `fromProvider` key outside the admitted printable form. |
+
+### `authentication` — generic authentication profiles
+
+| Code | Meaning |
+|---|---|
+| `authentication/id-invalid` | A profile `id` outside `^[a-z0-9][a-z0-9-]*$`, or longer than 64 characters. |
+| `authentication/duplicate-id` | Two profiles declare the same `id`. |
+| `authentication/kind-unknown` | A `kind` outside the vocabulary. |
+| `authentication/kind-not-executable` | A vocabulary kind with no runtime semantics (`reviewed-composite`). |
+| `authentication/configuration-invalid` | A configuration member is missing, unknown, malformed or over a bound. |
+| `authentication/executable-member` | A member named like executable content at any depth. |
+| `authentication/origin-invalid` | An origin is not canonical, is a wildcard outside destination context, or is over-long. |
+| `authentication/credential-unknown` | A `credentialRef` names a credential `credentials` does not declare. |
+| `authentication/credential-incompatible` | A `credentialRef` names a scheme/slot the profile kind cannot consume, or a dynamic credential is referenced directly by a binding. |
+| `authentication/scope-fingerprint-invalid` | A `scopeFingerprint` that is not 64 lower-case hexadecimal characters. |
+| `authentication/slot-invalid` | A `slots` entry missing its slot name or authority epoch. |
+| `authentication/slot-duplicate` | Two `slots` entries share a slot name. |
+| `authentication/signer-unknown` | A `request-signing` strategy id outside the reviewed signer kinds. |
+| `authentication/unreferenced` | A profile no binding's `authenticationRef` names. |
 
 ### `tools` — the advertised tool set
 

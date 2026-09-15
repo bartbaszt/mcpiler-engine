@@ -63,7 +63,30 @@ public sealed class UpstreamSender : IUpstreamTransport
                 throw new RedirectLimitException(hopLimit);
             }
 
-            using var message = Build(method, uri, headers, preserveBody ? request : null);
+            // The signature covers the exact request that will be sent, so it is computed here,
+            // after the redirect rules have decided this hop's method, destination and headers,
+            // and before the message is built. A hook that rewrites the destination is honoured
+            // by the next iteration's perimeter check, because the rewritten request is what the
+            // loop continues with.
+            UpstreamRequest hopRequest = request with
+            {
+                Method = method,
+                Uri = uri,
+                Headers = headers,
+                Body = preserveBody ? request.Body : null,
+                BodySource = preserveBody ? request.BodySource : null,
+                BodyMediaType = preserveBody ? request.BodyMediaType : null,
+            };
+
+            if (policy.SignRequest is { } sign)
+            {
+                hopRequest = await sign(hopRequest, hop, cancellationToken).ConfigureAwait(false);
+                method = hopRequest.Method;
+                uri = hopRequest.Uri;
+                headers = hopRequest.Headers;
+            }
+
+            using var message = Build(method, uri, headers, hopRequest);
 
             HttpResponseMessage response;
             try

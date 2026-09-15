@@ -43,7 +43,7 @@
       "schemaRefuses": true,
       "why": "policy is omitted. The perimeter and the outbound bounds have no safe default, so the manifest cannot load without it.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "operations": { "inline": { "operations": [{ "key": "GET /ping", "method": "GET", "path": "/ping" }] } },
@@ -57,7 +57,7 @@
       "schemaRefuses": true,
       "why": "An unknown section name is usually a misspelling of a real one. Ignoring it would silently drop whatever the author intended it to configure.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -73,7 +73,7 @@
       "schemaRefuses": true,
       "why": "Two payload sources for one section leave the effective content ambiguous, and a reader that silently prefers one would let the other be a decoy.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" }, "path": "sections/server.json" },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -88,7 +88,7 @@
       "schemaRefuses": true,
       "why": "An entry with no payload source is a declaration with nothing behind it.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": {},
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -103,7 +103,7 @@
       "schemaRefuses": true,
       "why": "The vector matrix is a binary payload outside the determinism contract; admitting it inline would put unbounded base64 inside the document the seal covers.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -119,7 +119,7 @@
       "schemaRefuses": true,
       "why": "An unrecognised root member is either a typo or an attempt to smuggle configuration past a strict reader.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "allowInsecureTransport": true,
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
@@ -135,7 +135,7 @@
       "schemaRefuses": true,
       "why": "A digest on an inline payload is a second authority over bytes that already sit inside the sealed document, with no independent writer to disagree with.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" }, "sha256": "0000000000000000000000000000000000000000000000000000000000000000" },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -150,7 +150,7 @@
       "schemaRefuses": true,
       "why": "A misspelled policy member would otherwise silently fall back to a default perimeter the author did not intend.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com", "allowedOrigin": ["https://attacker.example.com"] } },
@@ -165,7 +165,7 @@
       "schemaRefuses": true,
       "why": "A section payload of the wrong JSON kind has no members to read.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": ["Hostile"] },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -180,7 +180,7 @@
       "schemaRefuses": false,
       "why": "The execution key is the address a binding resolves. Two operations sharing it would make the executed request depend on declaration order.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -202,7 +202,7 @@
       "schemaRefuses": false,
       "why": "A key that disagrees with the method and path it claims to address would let the advertised operation and the executed request diverge.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -217,7 +217,7 @@
       "schemaRefuses": true,
       "why": "The intermediate model has a querystring location but the request compiler refuses it, so admitting it here would create an authorable but unexecutable operation.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -243,7 +243,7 @@
       "schemaRefuses": true,
       "why": "An unknown serialization style has no defined wire behavior, and falling back to the default would silently change the request shape.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -269,7 +269,7 @@
       "schemaRefuses": true,
       "why": "A non-local reference would turn manifest loading into a network fetch, which the format deliberately cannot do.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -295,7 +295,7 @@
       "schemaRefuses": false,
       "why": "A dangling pointer must be reported at load, not discovered as an empty schema during the first invocation.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -322,7 +322,7 @@
       "schemaRefuses": false,
       "why": "A reference chain that never reaches a schema is unresolvable rather than a bound violation, so the message names the cycle instead of blaming the depth limit.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -354,7 +354,7 @@
       "schemaRefuses": false,
       "why": "The slug is the route segment. Two surfaces sharing it would make the served catalogue depend on declaration order.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": {
             "inline": {
@@ -377,7 +377,7 @@
       "schemaRefuses": true,
       "why": "Without a default surface the unqualified route has nothing to resolve to.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": {
             "inline": {
@@ -397,7 +397,7 @@
       "schemaRefuses": true,
       "why": "Two defaults make the unqualified route ambiguous, and picking the first would let declaration order decide which catalogue is served.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": {
             "inline": {
@@ -420,7 +420,7 @@
       "schemaRefuses": false,
       "why": "A surface entry naming an operation that does not exist is a dangling grant; refusing it keeps the exposure list the single runtime authority.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": {
             "inline": {
@@ -449,7 +449,7 @@
       "schemaRefuses": false,
       "why": "The same operation listed twice with different exposures would let declaration order decide whether it is advertised.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": {
             "inline": {
@@ -478,7 +478,7 @@
       "schemaRefuses": false,
       "why": "The slug is the manifest-local identity used by surfaces, compound steps and derived sections. Duplicates make every one of those references ambiguous.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -507,7 +507,7 @@
       "schemaRefuses": false,
       "why": "Group membership joins by name. An undeclared name is a typo that would otherwise silently drop the operation out of its group.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -529,7 +529,7 @@
       "schemaRefuses": false,
       "why": "A declared kind that contradicts the binding shape would let the two disagree about what actually executes.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -550,7 +550,7 @@
       "schemaRefuses": false,
       "why": "A binding naming a key with no operation behind it is an advertised tool that can never execute.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -571,7 +571,7 @@
       "schemaRefuses": false,
       "why": "Nesting a compound inside a compound removes the single-level bound on how much work one invocation can start.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -608,7 +608,7 @@
       "schemaRefuses": false,
       "why": "A step referencing a slug that does not exist is a workflow that fails partway through after earlier steps have already run.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -640,7 +640,7 @@
       "schemaRefuses": false,
       "why": "Step identifiers address step outputs. Duplicates would let declaration order decide which response a later mapping reads.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -672,7 +672,7 @@
       "schemaRefuses": false,
       "why": "A step reading its own response, or a later step's, describes a workflow that can never execute in the declared order.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -718,7 +718,7 @@
       "schemaRefuses": true,
       "why": "The base URL seeds the default perimeter, so an unparseable value must refuse the section rather than produce an empty one.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "api.example.com/v1" } },
@@ -733,7 +733,7 @@
       "schemaRefuses": true,
       "why": "An origin carrying a path implies a narrower permission than the origin comparison actually applies, so accepting and truncating it would record a perimeter the operator did not authorise.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": {
@@ -753,7 +753,7 @@
       "schemaRefuses": false,
       "why": "A per-operation server URL outside the perimeter is refused at load, because it can never widen the perimeter at execution time and would otherwise fail on every call.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -778,7 +778,7 @@
       "schemaRefuses": true,
       "why": "No applier branch matches an unknown scheme, so accepting it would produce a credential that is silently never sent.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -798,7 +798,7 @@
       "schemaRefuses": false,
       "why": "One binding reaching two credentials that write the same header makes the value actually sent depend on declaration order.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -821,7 +821,7 @@
       "schemaRefuses": false,
       "why": "A basic credential missing one half produces an Authorization header built from a value the author never supplied.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -841,7 +841,7 @@
       "schemaRefuses": false,
       "why": "A literal secret in the manifest is refused unless the operator opts in, because a manifest is a file that gets copied, committed and shipped in images.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -863,7 +863,7 @@
       "schemaRefuses": true,
       "why": "A credential with no identifier is unreachable from any binding, and under the fail-safe default an unreachable credential is never applied at all.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -883,7 +883,7 @@
       "schemaRefuses": true,
       "why": "Upper case is refused rather than folded, because folding would let two declarations that differ only by case become one identifier.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -903,7 +903,7 @@
       "schemaRefuses": false,
       "why": "Two credentials answering to one identifier make the credential a binding actually reaches depend on declaration order, which is the ambiguity the identifier exists to remove.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -926,7 +926,7 @@
       "schemaRefuses": false,
       "why": "A dangling reference is the failure mode that silently applies nothing, so it is refused rather than tolerated as an empty scope.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -946,7 +946,7 @@
       "schemaRefuses": false,
       "why": "Basic authentication composes one header from two slots, so a binding that reaches only one of them would send a credential no upstream service can accept.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -969,7 +969,7 @@
       "schemaRefuses": true,
       "why": "The base is the operation that actually runs, so a scope stated on the wrapper would be silently ignored and the binding would look authorized when it is not.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -1003,7 +1003,7 @@
       "schemaRefuses": true,
       "why": "A compound binding has no request of its own, so its steps carry the scope; accepting one here would describe a credential that reaches nothing.",
       "manifest": {
-        "manifestFormatVersion": "0.2",
+        "manifestFormatVersion": "0.3",
         "sections": {
           "server": { "inline": { "name": "Hostile" } },
           "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -1032,6 +1032,268 @@
           }
         }
       }
-    }
+    },
+    {
+  "name": "authentication-kind-unknown",
+  "code": "authentication/kind-unknown",
+  "schemaRefuses": true,
+  "why": "An unknown kind cannot select a closed configuration schema, so nothing about the profile can be validated.",
+  "manifest": {
+    "sections": {
+      "operations": {
+        "inline": {
+          "operations": [
+            {
+              "key": "GET /ping",
+              "path": "/ping",
+              "method": "GET"
+            }
+          ]
+        }
+      },
+      "policy": {
+        "inline": {
+          "baseUrl": "https://api.example.com"
+        }
+      },
+      "server": {
+        "inline": {
+          "name": "Hostile"
+        }
+      },
+      "agentSurface": {
+        "inline": {
+          "operations": [
+            {
+              "binding": {
+                "operation": "GET /ping",
+                "type": "http",
+                "authenticationRef": "mystery"
+              },
+              "name": "Ping",
+              "slug": "ping"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "inline": {
+          "credentials": [
+            {
+              "value": {
+                "fromEnv": "TOKEN"
+              },
+              "slot": "Authorization",
+              "id": "header-authorization",
+              "scheme": "bearer"
+            }
+          ],
+          "formatVersion": 3
+        }
+      },
+      "authentication": {
+        "inline": {
+          "profiles": [
+            {
+              "scopeFingerprint": "0000000000000000000000000000000000000000000000000000000000000001",
+              "authenticationOrigins": [
+                "https://api.example.com:443"
+              ],
+              "credentialRef": [
+                "header-authorization"
+              ],
+              "kind": "not-a-kind",
+              "configuration": {
+                "inputs": {},
+                "strategyId": "static-bearer"
+              },
+              "id": "mystery",
+              "destinationOrigins": [
+                "https://api.example.com:443"
+              ]
+            }
+          ],
+          "formatVersion": 1
+        }
+      }
+    },
+    "manifestFormatVersion": "0.3"
+  }
+},
+    {
+  "name": "authentication-kind-not-executable",
+  "code": "authentication/kind-not-executable",
+  "schemaRefuses": false,
+  "why": "The kind is in the vocabulary so a stored value round-trips, but no accepted artifact defines its runtime semantics, so accepting it would defer the failure to the first invocation.",
+  "manifest": {
+    "sections": {
+      "operations": {
+        "inline": {
+          "operations": [
+            {
+              "key": "GET /ping",
+              "path": "/ping",
+              "method": "GET"
+            }
+          ]
+        }
+      },
+      "policy": {
+        "inline": {
+          "baseUrl": "https://api.example.com"
+        }
+      },
+      "server": {
+        "inline": {
+          "name": "Hostile"
+        }
+      },
+      "agentSurface": {
+        "inline": {
+          "operations": [
+            {
+              "binding": {
+                "operation": "GET /ping",
+                "type": "http",
+                "authenticationRef": "reviewed-composite"
+              },
+              "name": "Ping",
+              "slug": "ping"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "inline": {
+          "credentials": [
+            {
+              "value": {
+                "fromEnv": "TOKEN"
+              },
+              "slot": "Authorization",
+              "id": "header-authorization",
+              "scheme": "bearer"
+            }
+          ],
+          "formatVersion": 3
+        }
+      },
+      "authentication": {
+        "inline": {
+          "profiles": [
+            {
+              "scopeFingerprint": "0000000000000000000000000000000000000000000000000000000000000001",
+              "authenticationOrigins": [
+                "https://api.example.com:443"
+              ],
+              "credentialRef": [
+                "header-authorization"
+              ],
+              "kind": "reviewed-composite",
+              "configuration": {
+                "inputs": {},
+                "strategyId": "reviewed-composite"
+              },
+              "id": "reviewed-composite",
+              "destinationOrigins": [
+                "https://api.example.com:443"
+              ]
+            }
+          ],
+          "formatVersion": 1
+        }
+      }
+    },
+    "manifestFormatVersion": "0.3"
+  }
+},
+    {
+  "name": "authentication-id-invalid",
+  "code": "authentication/id-invalid",
+  "schemaRefuses": true,
+  "why": "A profile id is the manifest-local identity a binding references; it shares the credential charset so one identity rule covers the format.",
+  "manifest": {
+    "sections": {
+      "operations": {
+        "inline": {
+          "operations": [
+            {
+              "key": "GET /ping",
+              "path": "/ping",
+              "method": "GET"
+            }
+          ]
+        }
+      },
+      "policy": {
+        "inline": {
+          "baseUrl": "https://api.example.com"
+        }
+      },
+      "server": {
+        "inline": {
+          "name": "Hostile"
+        }
+      },
+      "agentSurface": {
+        "inline": {
+          "operations": [
+            {
+              "binding": {
+                "operation": "GET /ping",
+                "type": "http",
+                "authenticationRef": "static"
+              },
+              "name": "Ping",
+              "slug": "ping"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "inline": {
+          "credentials": [
+            {
+              "value": {
+                "fromEnv": "TOKEN"
+              },
+              "slot": "Authorization",
+              "id": "header-authorization",
+              "scheme": "bearer"
+            }
+          ],
+          "formatVersion": 3
+        }
+      },
+      "authentication": {
+        "inline": {
+          "profiles": [
+            {
+              "scopeFingerprint": "0000000000000000000000000000000000000000000000000000000000000001",
+              "authenticationOrigins": [
+                "https://api.example.com:443"
+              ],
+              "credentialRef": [
+                "header-authorization"
+              ],
+              "kind": "static",
+              "configuration": {
+                "inputs": {},
+                "strategyId": "static-bearer"
+              },
+              "id": "Not Valid!",
+              "destinationOrigins": [
+                "https://api.example.com:443"
+              ]
+            }
+          ],
+          "formatVersion": 1
+        }
+      }
+    },
+    "manifestFormatVersion": "0.3"
+  }
+}
   ]
 }
+

@@ -39,7 +39,7 @@ public sealed class SharedDefaultsTests
     /// Each section version is asserted on its own.
     /// </summary>
     /// <remarks>
-    /// A section version governs only its own payload, so the seven do not move together.
+    /// A section version governs only its own payload, so the eight do not move together.
     /// One shared expectation would have made the first divergence look like a defect.
     /// </remarks>
     [Fact]
@@ -52,6 +52,7 @@ public sealed class SharedDefaultsTests
             ["operations.formatVersion"] = OperationsSection.FormatVersion,
             ["agentSurface.formatVersion"] = AgentSurfaceSection.FormatVersion,
             ["credentials.formatVersion"] = CredentialsSection.FormatVersion,
+            ["authentication.formatVersion"] = AuthenticationSection.FormatVersion,
             ["tools.formatVersion"] = ToolsSection.FormatVersion,
             ["search.formatVersion"] = SearchSection.FormatVersion,
         };
@@ -321,6 +322,7 @@ public sealed class SharedDefaultsTests
         "operations.formatVersion",
         "agentSurface.formatVersion",
         "credentials.formatVersion",
+        "authentication.formatVersion",
         "tools.formatVersion",
         "search.formatVersion",
         "server.surface.isDefault",

@@ -1,5 +1,5 @@
 {
-  "manifestFormatVersion": "0.2",
+  "manifestFormatVersion": "0.3",
   "sections": {
     "server": {
       "inline": {
@@ -29,7 +29,7 @@
     },
     "credentials": {
       "inline": {
-        "formatVersion": 2,
+        "formatVersion": 3,
         "credentials": [
           {
             "id": "x-api-key",
@@ -132,7 +132,7 @@
     },
     "agentSurface": {
       "inline": {
-        "formatVersion": 2,
+        "formatVersion": 3,
         "operations": [
           {
             "slug": "search",
@@ -161,7 +161,7 @@
   },
   "completeness": {
     "algorithm": "sha256",
-    "value": "8b027d0fe6cf205be57827b2d17dba60179fa5906e424635e773eadbabe4b268"
+    "value": "440bad753467bab549be9245c193bc8fa0d154f84df1fe1cf3347b0734b134ae"
   },
   "provenance": {
     "connectorId": "7a1c0000000040008000000000000001",

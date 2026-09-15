@@ -1,0 +1,14 @@
+{
+  "protocolVersion": 1,
+  "deploymentId": "00000000000000000000000000000001",
+  "desiredGenerationId": "00000000000000000000000000000000000000000000000000000000000000ab",
+  "deliveredGenerationId": "00000000000000000000000000000000000000000000000000000000000000ab",
+  "activeGenerationId": "00000000000000000000000000000000000000000000000000000000000000ab",
+  "engineVersion": "fixture",
+  "supportedManifestRange": "0.3",
+  "pendingReconciliationCount": 0,
+  "result": {
+    "outcome": "active",
+    "diagnostics": []
+  }
+}

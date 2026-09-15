@@ -100,7 +100,7 @@ public sealed class ManifestDiagnosticCodesTests
     {
         // A missing group here means an area of the format has no way to report a problem,
         // which shows up in the field as a bare "manifest invalid".
-        Assert.Equal(12, ManifestDiagnosticCodes.Groups.Count);
+        Assert.Equal(13, ManifestDiagnosticCodes.Groups.Count);
         Assert.True(ManifestDiagnosticCodes.All.Count >= 50);
     }
 

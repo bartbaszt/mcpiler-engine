@@ -1,0 +1,77 @@
+{
+  "manifestFormatVersion": "0.3",
+  "sections": {
+    "server": {
+      "inline": {
+        "name": "Challenge Session"
+      }
+    },
+    "policy": {
+      "inline": {
+        "baseUrl": "https://api.example.com/v1"
+      }
+    },
+    "operations": {
+      "inline": {
+        "operations": [
+          { "key": "GET /pets", "method": "GET", "path": "/pets" }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "operations": [
+          {
+            "slug": "list-pets",
+            "name": "List pets",
+            "binding": {
+              "type": "http",
+              "operation": "GET /pets",
+              "authenticationRef": "challenge-session"
+            }
+          }
+        ]
+      }
+    },
+    "credentials": {
+      "inline": {
+        "formatVersion": 3,
+        "credentials": [
+          {
+            "id": "challenge-session-secret",
+            "scheme": "challenge-session",
+            "slot": "sessionSecret",
+            "value": { "fromEnv": "MCPILER_CHALLENGE_SESSION_SECRET" }
+          }
+        ]
+      }
+    },
+    "authentication": {
+      "inline": {
+        "formatVersion": 1,
+        "profiles": [
+          {
+            "id": "challenge-session",
+            "kind": "challenge-session",
+            "configuration": {
+              "strategyId": "bounded-challenge-session",
+              "inputs": { "username": "example-user" },
+              "challenge": {
+                "statusCodes": [409],
+                "source": "header",
+                "selector": "X-Challenge"
+              },
+              "injection": { "location": "cookie", "name": "session", "prefix": "" },
+              "replaySafeOperationKeys": ["GET /pets"],
+              "sessionLifetimeSeconds": 28800
+            },
+            "authenticationOrigins": ["https://api.example.com:443"],
+            "destinationOrigins": ["https://api.example.com:443"],
+            "credentialRef": ["challenge-session-secret"],
+            "scopeFingerprint": "0000000000000000000000000000000000000000000000000000000000000005"
+          }
+        ]
+      }
+    }
+  }
+}

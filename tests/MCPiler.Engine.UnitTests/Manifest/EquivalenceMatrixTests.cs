@@ -144,7 +144,7 @@ public sealed class EquivalenceMatrixTests
 
         const string externalRoot = """
             {
-              "manifestFormatVersion": "0.2",
+              "manifestFormatVersion": "0.3",
               "sections": {
                 "server": { "path": "sections/server.json" },
                 "policy": { "path": "sections/policy.json" },
@@ -187,7 +187,7 @@ public sealed class EquivalenceMatrixTests
                 Path.Combine(origin.FullName, "manifest.json"),
                 """
                 {
-                  "manifestFormatVersion": "0.2",
+                  "manifestFormatVersion": "0.3",
                   "sections": {
                     "server": { "path": "sections/server.json" },
                     "policy": { "path": "sections/policy.json" },
@@ -329,7 +329,7 @@ public sealed class EquivalenceMatrixTests
         Assert.NotNull(fromPresent.Manifest!.Provenance);
         Assert.Equal("https://api.example.com/", fromPresent.Manifest.Policy.BaseUrl.ToString());
         Assert.Equal("Order API", fromPresent.Manifest.Server.Name);
-        Assert.Equal("0.2", fromPresent.Manifest.FormatVersion.ToString());
+        Assert.Equal("0.3", fromPresent.Manifest.FormatVersion.ToString());
     }
 
     [Fact]
@@ -618,7 +618,7 @@ public sealed class EquivalenceMatrixTests
         CultureInfo.InvariantCulture,
         $$"""
         {
-          "manifestFormatVersion": "0.2",
+          "manifestFormatVersion": "0.3",
           "sections": {
             "server": { "inline": {{server ?? DefaultServer}} },
             "policy": { "inline": {{policy ?? DefaultPolicy}} },

@@ -1,0 +1,75 @@
+{
+  "manifestFormatVersion": "0.3",
+  "sections": {
+    "server": {
+      "inline": {
+        "name": "Static Authentication"
+      }
+    },
+    "policy": {
+      "inline": {
+        "baseUrl": "https://api.example.com/v1"
+      }
+    },
+    "operations": {
+      "inline": {
+        "operations": [
+          { "key": "GET /pets", "method": "GET", "path": "/pets" }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "operations": [
+          {
+            "slug": "list-pets",
+            "name": "List pets",
+            "binding": {
+              "type": "http",
+              "operation": "GET /pets",
+              "authenticationRef": "static"
+            }
+          }
+        ]
+      }
+    },
+    "credentials": {
+      "inline": {
+        "formatVersion": 3,
+        "credentials": [
+          {
+            "id": "header-authorization",
+            "scheme": "bearer",
+            "slot": "Authorization",
+            "value": { "fromEnv": "EXAMPLE_BEARER_TOKEN" }
+          },
+          {
+            "id": "header-x-tenant",
+            "scheme": "header",
+            "slot": "X-Tenant",
+            "value": { "fromFile": "/run/secrets/example-tenant" }
+          }
+        ]
+      }
+    },
+    "authentication": {
+      "inline": {
+        "formatVersion": 1,
+        "profiles": [
+          {
+            "id": "static",
+            "kind": "static",
+            "configuration": {
+              "strategyId": "static-bearer",
+              "inputs": {}
+            },
+            "authenticationOrigins": ["https://api.example.com:443"],
+            "destinationOrigins": ["https://api.example.com:443"],
+            "credentialRef": ["header-authorization", "header-x-tenant"],
+            "scopeFingerprint": "0000000000000000000000000000000000000000000000000000000000000001"
+          }
+        ]
+      }
+    }
+  }
+}

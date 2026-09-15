@@ -25,6 +25,10 @@ namespace MCPiler.Engine.Manifest.Model;
 /// <param name="Operations">The effective HTTP operation model.</param>
 /// <param name="AgentSurface">Agent operations, groups and bindings.</param>
 /// <param name="Credentials">Credential slot declarations. Absent means no credentials.</param>
+/// <param name="Authentication">
+/// Generic authentication profiles. Absent means every executing binding is unauthenticated,
+/// exactly as if it referenced no profile.
+/// </param>
 /// <param name="Tools">Explicit advertised tool set, or <c>null</c> to derive it.</param>
 /// <param name="Search">Explicit lexical index, or <c>null</c> to derive it.</param>
 /// <param name="Vectors">Vector matrix metadata, when the bundle carries one.</param>
@@ -43,6 +47,7 @@ public sealed record ManifestDocument(
     OperationsSection Operations,
     AgentSurfaceSection AgentSurface,
     CredentialsSection? Credentials = null,
+    AuthenticationSection? Authentication = null,
     ToolsSection? Tools = null,
     SearchSection? Search = null,
     VectorSectionMetadata? Vectors = null,
@@ -74,6 +79,9 @@ public sealed record ManifestDocument(
 
     /// <summary>The declared credentials, or an empty set.</summary>
     public CredentialsSection EffectiveCredentials => Credentials ?? CredentialsSection.Empty;
+
+    /// <summary>The declared authentication profiles, or an empty set.</summary>
+    public AuthenticationSection EffectiveAuthentication => Authentication ?? AuthenticationSection.Empty;
 
     /// <summary>True when the bundle carries a vector matrix payload.</summary>
     public bool HasVectors => Vectors is not null && !VectorPayload.IsEmpty;

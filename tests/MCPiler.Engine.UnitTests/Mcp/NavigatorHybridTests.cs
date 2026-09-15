@@ -275,7 +275,7 @@ public sealed class NavigatorHybridTests
     /// </remarks>
     private const string Catalogue = """
         {
-          "manifestFormatVersion": "0.2",
+          "manifestFormatVersion": "0.3",
           "sections": {
             "server": {
               "inline": {

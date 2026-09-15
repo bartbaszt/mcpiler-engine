@@ -76,7 +76,16 @@ public static class CanonicalJson
         => JsonNode.Parse(
             utf8Json,
             nodeOptions: null,
-            documentOptions: new JsonDocumentOptions { MaxDepth = MaximumDocumentDepth });
+            documentOptions: new JsonDocumentOptions
+            {
+                MaxDepth = MaximumDocumentDepth,
+                // A duplicate member has no single meaning: every consumer of the parsed node
+                // would see whichever value the parser happened to keep, and enumeration of the
+                // collapsed object throws in this version of the runtime. Refusing it here keeps
+                // the failure a parse diagnostic instead of an unhandled exception, and keeps
+                // "the manifest says X" a statement the bytes support.
+                AllowDuplicateProperties = false,
+            });
 
     /// <summary>Computes the lowercase SHA-256 hex digest of already-canonical bytes.</summary>
     public static string ComputeHash(ReadOnlySpan<byte> canonicalBytes)

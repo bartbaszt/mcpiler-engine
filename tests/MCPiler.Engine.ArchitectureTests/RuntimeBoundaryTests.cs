@@ -146,6 +146,13 @@ public sealed class RuntimeBoundaryTests
         "MCPiler.Engine.Mcp",
         "MCPiler.Engine.Transform",
         "MCPiler.Engine.Compound",
+
+        // Authentication decides how a request proves who it is: which credential is
+        // revealed, to which origin, and how a signature is constructed. An adapter
+        // directory holds one host capability and no such decision, so referencing this
+        // namespace from inside Outbound/, Secrets/ or Files/ inverts the dependency the
+        // sign-request delegate exists to keep one-directional.
+        "MCPiler.Engine.Authentication",
     ];
 
     [Fact]
@@ -243,6 +250,7 @@ public sealed class RuntimeBoundaryTests
     [InlineData("var findings = MCPiler.Engine.Transform.TransformValidation.Validate(program, ceiling, files);")]
     [InlineData("using MCPiler.Engine.Compound;")]
     [InlineData("var schema = MCPiler.Engine.Mcp.OutputSchemaEnvelope.Shape(authored);")]
+    [InlineData("var signing = MCPiler.Engine.Authentication.Signing.ResolvedRequestSigning.Create(profile);")]
     public void The_containment_assertion_catches_manifest_knowledge_inside_an_adapter(string driver)
     {
         var caught = ProductNamespaces.Any(space => driver.Contains(space, StringComparison.Ordinal));
@@ -251,6 +259,42 @@ public sealed class RuntimeBoundaryTests
             caught,
             "A file with this line inside an adapter directory would carry manifest knowledge and "
                 + $"the containment assertion would not notice: {driver}");
+    }
+
+    /// <summary>
+    /// The new authentication namespace is scanned by the host-access rule like every other
+    /// library namespace, so its host-freedom is a guard rather than a claim.
+    /// </summary>
+    /// <remarks>
+    /// A guard scoped to the subtree it was written for goes green forever when the next
+    /// namespace arrives, which is the failure mode <c>LESSONS.md</c> names twice. The
+    /// authentication runtime is where a naive port would reach for <c>HttpClient</c> and
+    /// <c>Environment</c>, because the Platform implementation it replaces does exactly that.
+    /// These assertions make the port's host-freedom explicit at the place a future change
+    /// would break it.
+    /// </remarks>
+    [Fact]
+    public void The_authentication_runtime_is_scanned_and_stays_host_free()
+    {
+        const string AuthenticationSourceRoot = EngineSourceRoot + "/Authentication";
+
+        var scanned = RuntimeSources()
+            .Select(EngineRepository.Relative)
+            .Where(path => path.StartsWith(AuthenticationSourceRoot + "/", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.True(
+            scanned.Count > 0,
+            $"No production source was found under {AuthenticationSourceRoot}, so the "
+                + "host-access rule is asserting nothing about the authentication runtime.");
+
+        var exempt = scanned.Where(IsExempt).ToList();
+
+        Assert.True(
+            exempt.Count == 0,
+            "The authentication runtime reaches secrets and the network through the transport "
+                + "port and resolved credentials, never through an adapter exemption. These files "
+                + $"were exempted instead of kept host-free: {string.Join(", ", exempt)}");
     }
 
     /// <summary>
@@ -542,6 +586,62 @@ public sealed class RuntimeBoundaryTests
             "A boundary rule now names something manifest-local reference resolution depends on. "
                 + "The prohibition is on interpreting source API description formats, not on resolving a "
                 + $"fragment-only pointer inside one section document. Conflicting entries: {string.Join(", ", widened)}");
+    }
+
+    /// <summary>
+    /// Only the declared mutable-slot kinds may reach the durable store, and only through the
+    /// port's one implementation.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The store exists for exactly one kind of material: a value an upstream rotates at runtime
+    /// for a slot the Manifest declares mutable. Static credentials, managed provider values,
+    /// access tokens, exchange sessions and challenge sessions are all excluded by the accepted
+    /// decision, and the exclusion has to be structural rather than a discipline a future
+    /// strategy is trusted to keep: a second writer is how a cache becomes a credential database,
+    /// and a general credential database is precisely what the accepted decision refuses.
+    /// </para>
+    /// <para>
+    /// The port is also the whole of what authentication logic may know about persistence. A
+    /// direct <c>File</c>/<c>Directory</c> write from the OAuth service would bypass the commit
+    /// ordering the port encodes - commit before publish - which is correctness for a provider
+    /// that retires the presented refresh token.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public void Only_the_mutable_slot_port_writes_durable_runtime_state()
+    {
+        string[] permitted =
+        [
+            ExecutionSourceRoot + "/RuntimeState/IMutableSlotStore.cs",
+            EngineSourceRoot + "/Authentication/OAuth/OAuthTokenService.cs",
+            ExecutionSourceRoot + "/Secrets/RuntimeState/FileMutableSlotStore.cs",
+        ];
+
+        string[] writers = ["new MutableSlotRecord", "ReplaceAsync("];
+
+        var offenders = LibrarySources()
+            .Select(EngineRepository.Relative)
+            .Where(relative => !permitted.Contains(relative, StringComparer.Ordinal))
+            .Where(relative =>
+            {
+                var text = File.ReadAllText(EngineRepository.Absolute(relative));
+
+                return writers.Any(token => text.Contains(token, StringComparison.Ordinal));
+            })
+            .ToList();
+
+        Assert.True(
+            offenders.Count == 0,
+            "Durable runtime state is written by the mutable-slot port alone, and only the "
+                + "declared mutable slot kinds may call it. These files write it outside the "
+                + $"declared set: {string.Join(", ", offenders)}");
+
+        // The permitted set is a claim about the code, not a placeholder: each entry must exist
+        // and must still be the site that writes.
+        Assert.All(permitted, path => Assert.True(
+            EngineRepository.Exists(path),
+            $"The mutable-slot writer '{path}' does not exist, so the exemption list is stale."));
     }
 
     /// <summary>

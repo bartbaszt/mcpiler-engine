@@ -1,0 +1,82 @@
+{
+  "manifestFormatVersion": "0.3",
+  "sections": {
+    "server": {
+      "inline": {
+        "name": "OAuth Client Credentials"
+      }
+    },
+    "policy": {
+      "inline": {
+        "baseUrl": "https://api.example.com/v1"
+      }
+    },
+    "operations": {
+      "inline": {
+        "operations": [
+          { "key": "GET /pets", "method": "GET", "path": "/pets" }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "operations": [
+          {
+            "slug": "list-pets",
+            "name": "List pets",
+            "binding": {
+              "type": "http",
+              "operation": "GET /pets",
+              "authenticationRef": "oauth2-client-credentials"
+            }
+          }
+        ]
+      }
+    },
+    "credentials": {
+      "inline": {
+        "formatVersion": 3,
+        "credentials": [
+          {
+            "id": "oauth2-client-secret",
+            "scheme": "oauth2-client-credentials",
+            "slot": "clientSecret",
+            "value": { "fromEnv": "MCPILER_OAUTH2_CLIENT_CREDENTIALS_CLIENTSECRET" }
+          }
+        ]
+      }
+    },
+    "authentication": {
+      "inline": {
+        "formatVersion": 1,
+        "profiles": [
+          {
+            "id": "oauth2-client-credentials",
+            "kind": "oauth2-client-credentials",
+            "configuration": {
+              "strategyId": "oauth2-client-credentials",
+              "inputs": { "clientId": "example-client" },
+              "tokenEndpoint": "https://auth.example.com/oauth2/token",
+              "clientId": "example-client",
+              "tokenAuthMethod": "client_secret_post",
+              "scopes": ["pets.read", "pets.write"],
+              "accessTokenSafetySkewSeconds": 30,
+              "authorizationParameters": {}
+            },
+            "authenticationOrigins": ["https://auth.example.com:443"],
+            "destinationOrigins": ["https://api.example.com:443"],
+            "credentialRef": ["oauth2-client-secret"],
+            "scopeFingerprint": "0000000000000000000000000000000000000000000000000000000000000002",
+            "slots": [
+              {
+                "slot": "clientSecret",
+                "authorityEpoch": 1,
+                "runtimeRevision": 0
+              }
+            ]
+          }
+        ]
+      }
+    }
+  }
+}

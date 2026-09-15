@@ -105,7 +105,14 @@ public sealed class VocabularyTests
         Assert.Equal(["direct", "navigator", "hidden"], Vocabulary.ExposureNames);
         Assert.Equal(["query", "header", "path", "cookie"], Vocabulary.ParameterLocationNames);
         Assert.Equal(["source-backed", "custom-http", "compound"], Vocabulary.OperationKindNames);
-        Assert.Equal(["basic", "bearer", "apiKey", "header"], Vocabulary.CredentialSchemeNames);
+        Assert.Equal(
+            ["basic", "bearer", "apiKey", "header", "oauth2-client-credentials", "oauth2-authorization-code",
+             "token-session-exchange", "challenge-session", "request-signing"],
+            Vocabulary.CredentialSchemeNames);
+        Assert.Equal(
+            ["static", "oauth2-client-credentials", "oauth2-authorization-code-pkce-refresh",
+             "token-session-exchange", "challenge-session", "request-signing", "reviewed-composite"],
+            Vocabulary.AuthenticationKindNames);
     }
 
     [Theory]

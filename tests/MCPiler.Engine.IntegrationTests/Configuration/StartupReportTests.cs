@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 
 using MCPiler.Engine.Host.Hosting;
 using MCPiler.Engine.Runtime;
@@ -97,7 +98,7 @@ public sealed class StartupReportTests : IDisposable
 
     private const string Minimal = """
         {
-          "manifestFormatVersion": "0.2",
+          "manifestFormatVersion": "0.3",
           "sections": {
             "server": { "inline": { "name": "Example API" } },
             "policy": { "inline": { "baseUrl": "https://api.example.com" } },
@@ -113,6 +114,144 @@ public sealed class StartupReportTests : IDisposable
                     "slug": "list-pets",
                     "name": "List pets",
                     "binding": { "type": "http", "operation": "GET /pets" }
+                  }
+                ]
+              }
+            }
+          }
+        }
+        """;
+
+    /// <summary>
+    /// A rotatable credential without the store is a refusal, not a silent degradation.
+    /// </summary>
+    /// <remarks>
+    /// Memory-only serving would look healthy until the first restart after a rotation, at
+    /// which point the provider has already invalidated the predecessor. The refusal must name
+    /// the settings an operator can act on.
+    /// </remarks>
+    [Fact]
+    public void A_rotatable_credential_without_the_runtime_store_refuses_to_start()
+    {
+        string manifest = Path.Combine(_root, "refresh");
+        Directory.CreateDirectory(manifest);
+        File.WriteAllText(Path.Combine(manifest, "manifest.json"), Rotatable);
+
+        string store = Path.Combine(_root, "files");
+        Directory.CreateDirectory(store);
+
+        RuntimeStartResult refused = EngineRuntime.Start(new RuntimeOptions([new MountRequest("/api", manifest)], store));
+
+        Assert.False(refused.Started);
+        StartupRefusal refusal = Assert.Single(refused.Refusals, entry => entry.Code == "host/runtime-state-required");
+        Assert.Equal("/api", refusal.Mount);
+
+        string report = StartupReport.Render(refused);
+        Assert.Contains("RuntimeStateRoot", report, StringComparison.Ordinal);
+        Assert.Contains("RuntimeStateKeyFile", report, StringComparison.Ordinal);
+        Assert.Contains("will not start", report, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_rotatable_credential_with_the_runtime_store_starts()
+    {
+        string manifest = Path.Combine(_root, "refresh-configured");
+        Directory.CreateDirectory(manifest);
+        File.WriteAllText(Path.Combine(manifest, "manifest.json"), Rotatable);
+
+        string store = Path.Combine(_root, "files-configured");
+        Directory.CreateDirectory(store);
+        string stateRoot = Path.Combine(_root, "state");
+        string keyFile = Path.Combine(_root, "state-key");
+        File.WriteAllBytes(keyFile, [.. Enumerable.Range(1, 32).Select(value => (byte)value)]);
+
+        RuntimeStartResult started = EngineRuntime.Start(new RuntimeOptions([new MountRequest("/api", manifest)], store)
+        {
+            RuntimeStateRoot = stateRoot,
+            RuntimeStateKeyFile = keyFile,
+        });
+
+        Assert.True(started.Started, StartupReport.Render(started));
+        Assert.True(started.DurableRuntimeState);
+    }
+
+    [Fact]
+    public void A_static_only_manifest_starts_without_the_runtime_store()
+    {
+        string manifest = Path.Combine(_root, "static-only");
+        Directory.CreateDirectory(manifest);
+        File.WriteAllText(Path.Combine(manifest, "manifest.json"), Minimal);
+
+        string store = Path.Combine(_root, "files-static");
+        Directory.CreateDirectory(store);
+
+        RuntimeStartResult started = EngineRuntime.Start(new RuntimeOptions([new MountRequest("/api", manifest)], store));
+
+        Assert.True(started.Started, StartupReport.Render(started));
+        Assert.False(started.DurableRuntimeState);
+    }
+
+    private const string Rotatable = """
+        {
+          "manifestFormatVersion": "0.3",
+          "sections": {
+            "server": { "inline": { "name": "Rotating API" } },
+            "policy": {
+              "inline": {
+                "baseUrl": "https://api.example.com",
+                "allowedOrigins": ["https://api.example.com", "https://auth.example.com"]
+              }
+            },
+            "operations": {
+              "inline": {
+                "operations": [ { "key": "GET /pets", "method": "GET", "path": "/pets" } ]
+              }
+            },
+            "agentSurface": {
+              "inline": {
+                "operations": [
+                  {
+                    "slug": "list-pets",
+                    "name": "List pets",
+                    "binding": { "type": "http", "operation": "GET /pets", "authenticationRef": "oauth2-authorization-code-pkce-refresh" }
+                  }
+                ]
+              }
+            },
+            "credentials": {
+              "inline": {
+                "formatVersion": 3,
+                "credentials": [
+                  {
+                    "id": "oauth2-authorization-refresh-token",
+                    "scheme": "oauth2-authorization-code",
+                    "slot": "refreshToken",
+                    "value": { "fromEnv": "EXAMPLE_REFRESH_TOKEN" }
+                  }
+                ]
+              }
+            },
+            "authentication": {
+              "inline": {
+                "formatVersion": 1,
+                "profiles": [
+                  {
+                    "id": "oauth2-authorization-code-pkce-refresh",
+                    "kind": "oauth2-authorization-code-pkce-refresh",
+                    "configuration": {
+                      "strategyId": "oauth2-authorization-code-pkce-refresh",
+                      "inputs": { "clientId": "example-client" },
+                      "clientId": "example-client",
+                      "tokenEndpoint": "https://auth.example.com/oauth2/token",
+                      "authorizationEndpoint": "https://auth.example.com/oauth2/authorize",
+                      "scopes": ["pets.read"]
+                    },
+                    "authenticationOrigins": ["https://auth.example.com:443"],
+                    "destinationOrigins": ["https://api.example.com:443"],
+                    "credentialRef": ["oauth2-authorization-refresh-token"],
+                    "slots": [
+                      { "slot": "refreshToken", "authorityEpoch": 1, "runtimeRevision": 0 }
+                    ]
                   }
                 ]
               }

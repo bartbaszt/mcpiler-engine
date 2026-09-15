@@ -2,6 +2,7 @@ using System.Globalization;
 
 using MCPiler.Engine.Execution;
 using MCPiler.Engine.Execution.Files;
+using MCPiler.Engine.Execution.Secrets.RuntimeState;
 using MCPiler.Engine.Manifest;
 using MCPiler.Engine.Manifest.Loading;
 using MCPiler.Engine.Manifest.Model;
@@ -58,19 +59,24 @@ public static class EngineRuntime
 
         RefusePrefixCollisions(options.Mounts, refusals);
 
-        IReadOnlyDictionary<string, long>? floors = ParseSettings(
-            options.Floors,
-            string.Empty,
-            manifest: null,
-            "host/floor-unknown",
-            "host/floor-malformed",
-            refusals);
+        IReadOnlyDictionary<string, long>? floors = ParseFloors(options, refusals);
 
         List<MountedManifest> mounts = [];
 
         foreach (MountRequest request in options.Mounts)
         {
-            MountedManifest? mounted = Mount(request, options, floors, refusals, warnings);
+            // A mount names a directory holding the Manifest, and whether that directory holds one
+            // is decided by the component whose declared purpose is reading a bundle from a
+            // directory. Probing here would put a second existence decision in a component that
+            // is supposed to reach nothing, and the guard says so.
+            MountedManifest? mounted = Mount(
+                new DirectoryManifestSource(request.Path),
+                request,
+                options,
+                floors,
+                allowProviderReferences: false,
+                refusals,
+                warnings);
 
             if (mounted is not null)
             {
@@ -83,28 +89,134 @@ public static class EngineRuntime
         // under defaults that the Manifests then change.
         FileHandleStore? files = OpenFileStore(options, mounts, refusals);
 
+        // Runtime-owned mutable authentication state, opened for the same reason: a key that
+        // cannot be read is a deploy-time fault, not something an operator should discover on the
+        // first refresh-token rotation.
+        RuntimeStateLocation? runtimeState = OpenRuntimeState(options, refusals);
+
+        // A Manifest that declares a rotatable slot cannot be served without the store. Served
+        // memory-only it would look healthy and lose the rotated credential on the first
+        // restart, after the provider had already invalidated the predecessor — a failure the
+        // deployment would discover as an authentication outage it cannot recover by retrying.
+        RequireRuntimeStateForMutableMounts(mounts, runtimeState, refusals);
+
         return refusals.Count > 0 || files is null
             ? RuntimeStartResult.Refused(refusals, warnings)
-            : RuntimeStartResult.Ready(mounts, warnings, files, options.AllowInlineSecrets);
+            : RuntimeStartResult.Ready(mounts, warnings, files, options.AllowInlineSecrets, runtimeState);
     }
 
-    private static MountedManifest? Mount(
+    /// <summary>
+    /// Refuses a process that would have to rotate a durable credential but has no store to
+    /// commit the replacement into.
+    /// </summary>
+    /// <remarks>
+    /// The refusal names the mount and the missing settings rather than the credential, so an
+    /// operator learns what to configure without the diagnostic becoming a secret channel. A
+    /// static-only deployment pays nothing: no profile declares a slot, so nothing here fires.
+    /// </remarks>
+    private static void RequireRuntimeStateForMutableMounts(
+        IReadOnlyList<MountedManifest> mounts,
+        RuntimeStateLocation? runtimeState,
+        List<StartupRefusal> refusals)
+    {
+        if (runtimeState is not null)
+        {
+            return;
+        }
+
+        foreach (MountedManifest mount in mounts)
+        {
+            foreach (AuthenticationProfile profile in mount.Document.EffectiveAuthentication.Profiles)
+            {
+                if (profile.Slots.Count == 0)
+                {
+                    continue;
+                }
+
+                refusals.Add(new StartupRefusal(
+                    mount.Prefix,
+                    "host/runtime-state-required",
+                    $"The Manifest mounted here declares runtime-owned mutable authentication state " +
+                    $"('{profile.Id}'), so a rotated credential must survive a restart. Configure " +
+                    $"'{nameof(RuntimeOptions.RuntimeStateRoot)}' and " +
+                    $"'{nameof(RuntimeOptions.RuntimeStateKeyFile)}' to give the process a durable " +
+                    "store, or the process refuses to start rather than lose the rotated value.")
+                {
+                    Manifest = mount.Path,
+                    Setting = nameof(RuntimeOptions.RuntimeStateRoot),
+                });
+
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Opens durable runtime state, or records why it cannot be used.
+    /// </summary>
+    /// <remarks>
+    /// Unconfigured is supported and means the process keeps mutable state in memory. A configured
+    /// pair that is unusable refuses the process rather than silently degrading, because a
+    /// deployment that believes a rotating credential is durable must not be given one that is not.
+    /// </remarks>
+    internal static RuntimeStateLocation? OpenRuntimeState(RuntimeOptions options, List<StartupRefusal> refusals)
+    {
+        if (refusals.Count > 0)
+        {
+            return null;
+        }
+
+        if (!RuntimeStateLocation.TryOpen(
+            options.RuntimeStateRoot,
+            options.RuntimeStateKeyFile,
+            out var state,
+            out var refusal))
+        {
+            refusals.Add(new StartupRefusal(string.Empty, "host/runtime-state-unusable", refusal!)
+            {
+                Setting = options.RuntimeStateKeyFile is null ? "RuntimeStateRoot" : "RuntimeStateKeyFile",
+                Attempted = options.RuntimeStateKeyFile ?? options.RuntimeStateRoot,
+            });
+
+            return null;
+        }
+
+        return state;
+    }
+
+    /// <summary>
+    /// Loads one mount from an arbitrary source, applying the same rules a directory mount gets.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The source is a parameter rather than a path because a managed generation arrives as
+    /// bytes. Loading it here — through the same load, narrowing and derivation sequence — is
+    /// what makes "the same Manifest" mean the same thing whichever way it was delivered, and
+    /// keeps a second loading rule from existing.
+    /// </para>
+    /// <para>
+    /// <paramref name="allowProviderReferences"/> is a parameter rather than a process option
+    /// because it is not an operator preference: a standalone deployment must refuse a Manifest
+    /// that names provider values it can never be given, while a managed generation is exactly
+    /// the case those references exist for. Only the delivery mode may decide it.
+    /// </para>
+    /// </remarks>
+    internal static MountedManifest? Mount(
+        IManifestSource source,
         MountRequest request,
         RuntimeOptions options,
         IReadOnlyDictionary<string, long>? floors,
+        bool allowProviderReferences,
         List<StartupRefusal> refusals,
         List<StartupRefusal> warnings)
     {
-        // A mount names a directory holding the Manifest, and whether that directory holds one
-        // is decided by the component whose declared purpose is reading a bundle from a
-        // directory. Probing here would put a second existence decision in a component that
-        // is supposed to reach nothing, and the guard says so.
         ManifestReadResult loaded = ManifestReader.Read(
-            new DirectoryManifestSource(request.Path),
+            source,
             new ManifestLoadOptions
             {
                 RequireSealed = options.RequireSealed,
                 AllowInlineSecrets = options.AllowInlineSecrets,
+                AllowProviderReferences = allowProviderReferences,
             });
 
         foreach (ManifestDiagnostic diagnostic in loaded.Warnings)
@@ -230,7 +342,7 @@ public static class EngineRuntime
     /// building a second store later would mean the object that was proven usable is not the
     /// object that stores anything, and only the first one was checked.
     /// </remarks>
-    private static FileHandleStore? OpenFileStore(RuntimeOptions options, IReadOnlyList<MountedManifest> mounts, List<StartupRefusal> refusals)
+    internal static FileHandleStore? OpenFileStore(RuntimeOptions options, IReadOnlyList<MountedManifest> mounts, List<StartupRefusal> refusals)
     {
         if (refusals.Count > 0)
         {
@@ -258,6 +370,22 @@ public static class EngineRuntime
             return null;
         }
     }
+
+    /// <summary>
+    /// Parses the process floors, or records why they cannot be used.
+    /// </summary>
+    /// <remarks>
+    /// Exposed to the managed loader so an activation and a file-mode start apply the same floor
+    /// rules rather than maintaining a second interpretation of the same settings.
+    /// </remarks>
+    internal static IReadOnlyDictionary<string, long>? ParseFloors(RuntimeOptions options, List<StartupRefusal> refusals)
+        => ParseSettings(
+            options.Floors,
+            string.Empty,
+            manifest: null,
+            "host/floor-unknown",
+            "host/floor-malformed",
+            refusals);
 
     private static IReadOnlyDictionary<string, long>? ParseSettings(
         IReadOnlyDictionary<string, string> settings,

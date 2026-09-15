@@ -85,13 +85,24 @@ internal sealed class ServedEngine : IAsyncDisposable
     /// <param name="connections">The outbound policy, permissive unless a test asks otherwise.</param>
     /// <param name="diagnostics">Where operational diagnostics are reported.</param>
     /// <param name="authorization">The authorization configuration, or none for mounts that require none.</param>
+    /// <param name="loggerProvider">Where the host's own log records are written, when a test reads them.</param>
+    /// <param name="trustedProxies">
+    /// Reverse-proxy addresses whose forwarded headers this host honours. Empty trusts none, which is
+    /// what a directly reached listener should do.
+    /// </param>
+    /// <param name="allowedOrigins">
+    /// Browser origins allowed to call an MCP address. Empty accepts no browser origin, which is the
+    /// right default for a listener reached only by non-browser clients.
+    /// </param>
     public static async Task<ServedEngine> StartAsync(
         RuntimeOptions options,
         CancellationToken cancellationToken,
         OutboundConnectionPolicy? connections = null,
         Action<RuntimeDiagnostic>? diagnostics = null,
         HostAuthorizationOptions? authorization = null,
-        ILoggerProvider? loggerProvider = null)
+        ILoggerProvider? loggerProvider = null,
+        IReadOnlyList<string>? trustedProxies = null,
+        IReadOnlyList<string>? allowedOrigins = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -115,7 +126,11 @@ internal sealed class ServedEngine : IAsyncDisposable
             new HostBinding(
                 options,
                 new HostListenOptions("http://127.0.0.1:0", HostTransport.Http),
-                authorization),
+                authorization)
+            {
+                TrustedProxies = trustedProxies ?? [],
+                AllowedOrigins = allowedOrigins ?? [],
+            },
             execution,
             drain);
 

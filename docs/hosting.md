@@ -36,10 +36,19 @@ The host accepts the following settings:
 
 | Setting | Purpose |
 | --- | --- |
+| `--mount <prefix>=<dir>` | Mounts a Manifest bundle directory. Repeatable; exactly one mode applies. |
 | `--file-store-root <dir>` | Directory used for binary response and upload handles. |
+| `--runtime-state-root <dir>` | Directory for Engine's encrypted runtime-owned authentication state. Paired with `--runtime-state-key-file`. |
+| `--runtime-state-key-file <file>` | Deployment-supplied Engine runtime-state key, 32 raw bytes or 64 hex characters. Paired with `--runtime-state-root`. |
 | `--listen <http-url>` | HTTP bind address. Default: `http://127.0.0.1:8080`. |
 | `--transport http\|stdio` | Select Streamable HTTP or stdio. Default: `http`. |
 | `--served-content-root <dir>` | Declares a directory served by the deployment so the file store can be kept outside it. Repeatable. |
+| `--mode file\|managed` | Desired-state authority. `file` (default) serves locally mounted Manifests; `managed` pulls the desired generation from Platform. |
+| `--management-endpoint <url>` | Platform base address for managed mode. Required with `--mode managed`. |
+| `--deployment-id <id>` | Deployment identity for managed mode. Required with `--mode managed`. |
+| `--deployment-secret-file <file>` | File holding the deployment-scoped bearer secret for managed mode. Required with `--mode managed`. |
+| `--trusted-proxy <ip>` | Trusts `X-Forwarded-For`/`X-Forwarded-Proto` from this proxy address. Repeatable; IP literals only. |
+| `--allowed-origin <origin>` | Browser origin admitted on served MCP addresses. Repeatable; canonical origins only. Absent means no browser origin is admitted. |
 | `--issuer <url>` | Trusted OAuth issuer for mounts that require bearer authorization. |
 | `--token-validation introspection\|jwks` | Token-validation mode. Must be paired with `--issuer`. |
 | `--introspection-endpoint <url>` | Override the discovered RFC 7662 endpoint. |
@@ -61,6 +70,138 @@ Both switches may also be written with an explicit Boolean value, for example
 Compiled limits can only be narrowed. Use `--floor <bound>=<value>` for a process-wide floor,
 or `--mount-limit <prefix>:<bound>=<value>` for one mount. A host setting cannot widen a value
 compiled into the Manifest.
+
+## Runtime-owned authentication state
+
+A connector may declare authentication with a slot whose value the provider rotates, such as an
+OAuth authorization-code refresh token. Engine may keep that one value across restarts in a
+bounded, encrypted, file-backed store so a rotation survives a process restart without losing the
+credential.
+
+The store is configured with two paired settings. Supplying one without the other is refused, and
+a refusal names both:
+
+```bash
+dotnet mcpiler-engine.dll serve \
+  --mount /petstore=/manifests/petstore \
+  --file-store-root /data \
+  --runtime-state-root /state \
+  --runtime-state-key-file /run/secrets/engine-runtime-state-key
+```
+
+- `--runtime-state-root` is the state directory. Records are written beneath it, one per mount,
+  profile, and slot. Engine creates the directory when it does not exist and keeps it
+  owner-only.
+- `--runtime-state-key-file` holds Engine's own runtime-state key: exactly 32 raw bytes or 64
+  hexadecimal characters, with one optional trailing newline. This is a deployment key. It is
+  never the Platform master key, and Engine never reads Platform key material.
+
+Without both settings, startup reports `runtime state: memory-only` and a rotated refresh token
+is lost on restart. With both, startup reports `runtime state: durable`.
+
+The store is deliberately narrow. Only a slot a Manifest declares as runtime-owned mutable
+authentication state is persistable; today that is the rotating OAuth authorization-code refresh
+token. Static credentials, managed provider values, access tokens, token/session exchange
+values, challenge sessions, and signing outputs are never written to disk.
+
+Each record is authenticated-encrypted with a random nonce and binds the store format, mount,
+profile, slot, scope fingerprint, authority epoch, and runtime revision as authenticated
+metadata. A record whose metadata does not match the active Manifest is never used. Replacement
+writes a complete ciphertext to a sibling temporary file, flushes it to disk, and atomically
+replaces the target, so a crash exposes either the complete predecessor or the complete
+successor and never a partial record.
+
+Failures fail closed. A missing or unusable key, or a record that cannot be authenticated
+(wrong key, corruption, truncation, moved file), refuses the affected invocation with a
+non-secret diagnostic and preserves the ciphertext as evidence; Engine never deletes stored
+ciphertext automatically and never falls back to plaintext. Recovery is explicit: reprovision
+the key and reauthorize the connector, which establishes a new authority epoch.
+
+Losing the key does not lose the ability to serve from static credentials, and the previous
+refresh token remains on disk as ciphertext for an operator to inspect or remove deliberately.
+
+## Deployment modes
+
+Engine has exactly one desired-state authority per process. The mode is explicit and the process
+never falls back between modes.
+
+| Mode | Desired-state authority | Activation boundary | Platform dependency |
+| --- | --- | --- | --- |
+| `file` (default) | locally mounted Manifest bundles | process start or redeploy | none |
+| `managed` | the configured Platform deployment | validated generation pointer swap | synchronization only |
+
+`file` mode serves the Manifests given with `--mount`. Replacing a Manifest directory does not
+change a running process: the new content takes effect after an Engine redeploy or restart.
+
+`managed` mode rejects mounts and requires a deployment identity, a Platform endpoint, and a
+deployment secret file. The endpoint must use HTTPS unless it is a loopback address. On startup
+Engine performs a bounded initial synchronization and only opens the listener once it holds a
+valid generation; a Platform that cannot be reached within that bound refuses startup with a
+synchronization diagnostic rather than serving an empty surface. After activation a background
+long-poll keeps the process on Platform's desired generation:
+
+```bash
+dotnet mcpiler-engine.dll serve \
+  --mode managed \
+  --management-endpoint https://mcpiler.example.com \
+  --deployment-id <deployment-id> \
+  --deployment-secret-file /run/secrets/engine-deployment-secret \
+  --file-store-root /data \
+  --runtime-state-root /data/runtime-state \
+  --runtime-state-key-file /run/secrets/engine-runtime-state-key
+```
+
+- `--management-endpoint` is Platform's public address. Engine calls only Platform's
+  authenticated internal management endpoint beneath it.
+- `--deployment-id` names this deployment; it must equal Platform's configured
+  `EngineManagement:DeploymentId`.
+- `--deployment-secret-file` holds the deployment-scoped bearer secret. The value is read per
+  request and the file path, never the value, appears in process arguments.
+
+Every candidate generation is loaded and validated completely before activation, and activation
+is one atomic pointer exchange. A candidate that cannot be loaded leaves the running generation
+untouched and reports the refusal to Platform as a sanitized diagnostic. A request admitted under
+one generation finishes under that generation; the superseded generation's execution graph and
+in-memory secret values are disposed once its leases drain.
+
+Platform/channel failure does not stop the running generation. Engine keeps serving its last
+active generation and retries with bounded exponential backoff, so an unreachable Platform
+degrades synchronization latency but never serving.
+
+## Proxy deployments
+
+Behind a reverse proxy the public scheme and host arrive as forwarded headers. Engine ignores
+those headers unless the direct peer is named with `--trusted-proxy`:
+
+```bash
+dotnet mcpiler-engine.dll serve \
+  --mount /petstore=/manifests/petstore \
+  --file-store-root /data \
+  --trusted-proxy 172.28.0.2
+```
+
+Only `X-Forwarded-For` and `X-Forwarded-Proto` are trusted, and only from a listed address. The
+proxy must preserve the original `Host` header unchanged; Engine never trusts `X-Forwarded-Host`.
+This matters for protected-resource metadata, which names the exact external resource address an
+MCP client must use.
+
+### Browser origins
+
+The MCP streamable HTTP transport spec requires the endpoint to validate the `Origin` header when
+a browser sends one. Name each browser origin that may reach a served address:
+
+```bash
+dotnet mcpiler-engine.dll serve \
+  --mount /petstore=/manifests/petstore \
+  --file-store-root /data \
+  --allowed-origin https://studio.example.com
+```
+
+`--allowed-origin` is repeatable and accepts canonical origins only (`scheme://host[:port]`, no
+path, query, or credentials). When no origin is configured, a request carrying an `Origin` header
+is refused on served addresses while a client that sends none — every non-browser MCP client — is
+served normally. Non-served paths such as health and protected-resource metadata ignore the
+header, so discovery keeps working for browser-based clients.
 
 ## Inspecting without serving
 
@@ -150,6 +291,32 @@ docker run --rm \
   --file-store-root /data \
   --listen http://0.0.0.0:8080
 ```
+
+Key material and management credentials are always passed as file paths, never as argument
+values, so `docker inspect` shows where a secret lives rather than what it is. A managed
+container adds the management settings and mounts the deployment secret file read-only:
+
+```bash
+docker run --rm \
+  -p 8080:8080 \
+  -v mcpiler-data:/data \
+  -v /srv/mcpiler/deployment-secret:/run/secrets/engine-deployment-secret:ro \
+  -v /srv/mcpiler/runtime-state-key:/run/secrets/engine-runtime-state-key:ro \
+  <image> \
+  serve \
+  --mode managed \
+  --management-endpoint https://mcpiler.example.com \
+  --deployment-id <deployment-id> \
+  --deployment-secret-file /run/secrets/engine-deployment-secret \
+  --file-store-root /data \
+  --runtime-state-root /data/runtime-state \
+  --runtime-state-key-file /run/secrets/engine-runtime-state-key \
+  --listen http://0.0.0.0:8080
+```
+
+An Engine container needs no Platform master key and never receives one. Engine's runtime-state
+key is its own deployment secret; losing it does not expose the Platform store, and Platform
+cannot read Engine's persisted records.
 
 Build an OCI image index for both supported Linux architectures with Buildx:
 

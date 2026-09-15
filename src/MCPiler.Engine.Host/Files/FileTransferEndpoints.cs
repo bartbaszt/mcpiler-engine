@@ -8,6 +8,19 @@ using Microsoft.AspNetCore.Http;
 namespace MCPiler.Engine.Host.Files;
 
 /// <summary>Maps the streaming file-transfer children of every HTTP MCP surface.</summary>
+/// <remarks>
+/// <para>
+/// A transfer child is addressed relative to its parent MCP surface, so its metadata states the
+/// parent address and the transfer handlers resolve the mount and surface through a generation
+/// lease. A file handle is issued and redeemed against the same execution graph that serves the
+/// surface, which is why the lease matters here as much as on the MCP routes themselves.
+/// </para>
+/// <para>
+/// File mode maps one route per child because the mount set never changes. A managed listener
+/// maps one template, which also matches the children, so the dispatch middleware recognises a
+/// transfer path and serves it there instead. Both paths reach the same handlers.
+/// </para>
+/// </remarks>
 internal static class FileTransferEndpoints
 {
     private const string UploadSuffix = "/files/upload";
@@ -20,30 +33,87 @@ internal static class FileTransferEndpoints
 
         foreach (MountedSurfaceAddress address in mounts.Addresses)
         {
-            MapSurface(app, address.Path, address.Mount, address.Surface);
+            MapSurface(app, address.Path);
         }
     }
 
-    private static void MapSurface(
-        WebApplication app,
-        string parentPath,
-        MountedManifest mount,
-        MountedSurface surface)
+    private static void MapSurface(WebApplication app, string parentPath)
     {
-        SurfaceEndpoint metadata = new(
-            mount,
-            surface,
-            parentPath,
-            authorizationResourcePath: parentPath);
+        SurfaceEndpoint metadata = new(parentPath, authorizationResourcePath: parentPath);
 
         app.MapPost(parentPath + UploadSuffix, UploadAsync).WithMetadata(metadata);
         app.MapGet(parentPath + DownloadSuffix, DownloadAsync).WithMetadata(metadata);
     }
 
-    private static async Task UploadAsync(HttpContext context, EngineExecution execution)
+    /// <summary>
+    /// Serves a transfer path recognised from the request, when the path is one.
+    /// </summary>
+    /// <remarks>
+    /// Returns false for a path that is not a transfer child, so the caller can continue into the
+    /// protocol handler. Used by the managed listener, whose single template also matches the
+    /// children.
+    /// </remarks>
+    internal static async Task<bool> TryServeAsync(HttpContext context)
     {
-        SurfaceEndpoint addressed = RequiredSurface(context);
-        string resource = CanonicalParent(context, addressed);
+        ArgumentNullException.ThrowIfNull(context);
+
+        if (!TransferPath.TryParse(context.Request.Path.Value, out TransferPath transfer))
+        {
+            return false;
+        }
+
+        SurfaceEndpoint route = new(transfer.ParentAddress, authorizationResourcePath: transfer.ParentAddress);
+        context.SetEndpoint(null);
+
+        if (transfer.Kind == TransferPathKind.Upload)
+        {
+            if (!HttpMethods.IsPost(context.Request.Method))
+            {
+                context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+                return true;
+            }
+
+            await UploadAsync(context, route).ConfigureAwait(false);
+            return true;
+        }
+
+        if (!HttpMethods.IsGet(context.Request.Method))
+        {
+            context.Response.StatusCode = StatusCodes.Status405MethodNotAllowed;
+            return true;
+        }
+
+        await DownloadAsync(context, route, transfer.Capability!).ConfigureAwait(false);
+        return true;
+    }
+
+    private static async Task UploadAsync(HttpContext context)
+    {
+        SurfaceEndpoint route = RequiredSurface(context);
+        await UploadAsync(context, route).ConfigureAwait(false);
+    }
+
+    private static async Task DownloadAsync(HttpContext context)
+    {
+        SurfaceEndpoint route = RequiredSurface(context);
+        string capability = context.Request.RouteValues["capability"]?.ToString() ?? string.Empty;
+        await DownloadAsync(context, route, capability).ConfigureAwait(false);
+    }
+
+    private static async Task UploadAsync(HttpContext context, SurfaceEndpoint route)
+    {
+        EngineGenerationManager generations = RequiredGenerations(context);
+
+        using EngineGenerationLease? lease = Lease(context, route, generations);
+
+        if (lease is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+
+        EngineExecution execution = lease.Generation.Execution;
+        string resource = CanonicalParent(context, route);
         string? fileName = context.Request.Query["fileName"].FirstOrDefault();
 
         RuntimeFileUploadResult result = await execution
@@ -75,11 +145,20 @@ internal static class FileTransferEndpoints
             context.RequestAborted).ConfigureAwait(false);
     }
 
-    private static async Task DownloadAsync(HttpContext context, EngineExecution execution)
+    private static async Task DownloadAsync(HttpContext context, SurfaceEndpoint route, string capability)
     {
-        SurfaceEndpoint addressed = RequiredSurface(context);
-        string resource = CanonicalParent(context, addressed);
-        string capability = context.Request.RouteValues["capability"]?.ToString() ?? string.Empty;
+        EngineGenerationManager generations = RequiredGenerations(context);
+
+        using EngineGenerationLease? lease = Lease(context, route, generations);
+
+        if (lease is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+
+        EngineExecution execution = lease.Generation.Execution;
+        string resource = CanonicalParent(context, route);
 
         await using RuntimeFileDownload download = await execution
             .OpenFileAsync(capability, resource, context.RequestAborted)
@@ -119,14 +198,46 @@ internal static class FileTransferEndpoints
         return content.CopyToAsync(context.Response.Body, context.RequestAborted);
     }
 
+    /// <summary>
+    /// Takes the lease a transfer endpoint operates under, or null when the addressed parent is
+    /// not served by any active generation.
+    /// </summary>
+    /// <remarks>
+    /// An unserved parent is a 404: the transfer child exists only as a child of a served surface,
+    /// so an activation that removed the parent removes the child with it.
+    /// </remarks>
+    private static EngineGenerationLease? Lease(
+        HttpContext context,
+        SurfaceEndpoint route,
+        EngineGenerationManager generations)
+    {
+        if (!generations.TryLease(out EngineGenerationLease? lease) || lease is null)
+        {
+            return null;
+        }
+
+        if (!lease.Generation.TryResolve(route.ResolveAddress(context), out SurfaceResolution? resolved)
+            || resolved is null)
+        {
+            lease.Dispose();
+            return null;
+        }
+
+        return lease;
+    }
+
     private static SurfaceEndpoint RequiredSurface(HttpContext context)
         => context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>()
             ?? throw new InvalidOperationException("A mapped transfer endpoint has no parent surface metadata.");
 
-    private static string CanonicalParent(HttpContext context, SurfaceEndpoint addressed)
+    private static EngineGenerationManager RequiredGenerations(HttpContext context)
+        => context.RequestServices.GetService(typeof(EngineGenerationManager)) as EngineGenerationManager
+            ?? throw new InvalidOperationException("A transfer endpoint has no generation manager registered.");
+
+    private static string CanonicalParent(HttpContext context, SurfaceEndpoint route)
         => MountAuthorization.CanonicalResource(
             context.Request.Scheme,
             context.Request.Host.Value ?? string.Empty,
-            addressed.AuthorizationResourcePath
+            route.AuthorizationResourcePath
                 ?? throw new InvalidOperationException("A transfer endpoint has no parent resource path."));
 }

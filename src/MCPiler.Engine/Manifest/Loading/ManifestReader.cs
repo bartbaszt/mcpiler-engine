@@ -108,7 +108,14 @@ public static class ManifestReader
             : SectionReader.ReadCredentials(
                 Document(loaded, ManifestSectionName.Credentials),
                 diagnostics,
-                effectiveOptions.AllowInlineSecrets);
+                effectiveOptions.AllowInlineSecrets,
+                effectiveOptions.AllowProviderReferences);
+
+        AuthenticationSection? authentication = loaded.Section(ManifestSectionName.Authentication) is null
+            ? null
+            : SectionReader.ReadAuthentication(
+                Document(loaded, ManifestSectionName.Authentication),
+                diagnostics);
 
         ToolsSection? tools = loaded.Section(ManifestSectionName.Tools) is null
             ? null
@@ -142,6 +149,7 @@ public static class ManifestReader
             Operations: operations,
             AgentSurface: agentSurface,
             Credentials: credentials,
+            Authentication: authentication,
             Tools: tools,
             Search: search,
             Vectors: root.Section(ManifestSectionName.Vectors)?.Vectors,

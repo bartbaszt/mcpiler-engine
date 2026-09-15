@@ -1,5 +1,5 @@
 {
-  "manifestFormatVersion": "0.2",
+  "manifestFormatVersion": "0.3",
   "generator": { "name": "hand-authored", "version": "0.0.0" },
   "sections": {
     "server": {
@@ -58,7 +58,7 @@
     },
     "agentSurface": {
       "inline": {
-        "formatVersion": 2,
+        "formatVersion": 3,
         "operations": [
           {
             "slug": "ping",

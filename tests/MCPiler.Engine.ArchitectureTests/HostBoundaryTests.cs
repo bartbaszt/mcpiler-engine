@@ -30,6 +30,9 @@ public sealed class HostBoundaryTests
 {
     private const string HostSourceRoot = "src/MCPiler.Engine.Host";
 
+    /// <summary>The library project, whose runtime namespaces the deployable must not name.</summary>
+    private const string EngineSourceRootForSeam = "src/MCPiler.Engine";
+
     /// <summary>The one library namespace the deployable is allowed to name.</summary>
     private const string Seam = "MCPiler.Engine.Runtime";
 
@@ -57,6 +60,12 @@ public sealed class HostBoundaryTests
         "MCPiler.Engine.Transform",
         "MCPiler.Engine.Compound",
         "MCPiler.Engine.Search",
+
+        // How a request acquires, reveals and signs a credential. The deployable hands the
+        // runtime its mount configuration and receives outcomes; deciding which origin may
+        // see a secret is a product decision, and it belongs on the library side of the
+        // seam where the boundary guards can see it.
+        "MCPiler.Engine.Authentication",
 
         // The protocol-neutral catalogue. It decides what a surface advertises, in which
         // order, with which schema, which is exactly the kind of answer a deployable must
@@ -237,6 +246,37 @@ public sealed class HostBoundaryTests
     }
 
     /// <summary>
+    /// The library's authentication runtime exists and the deployable never names it, so the
+    /// seam assertion is checked against a namespace that would otherwise resolve.
+    /// </summary>
+    /// <remarks>
+    /// A prohibition over a namespace that does not exist passes forever. The authentication
+    /// runtime is the newest library namespace and the most tempting for a host to reach for,
+    /// because a host owns the mount's secret inputs and could plausibly plumb them straight
+    /// into an acquisition call instead of through the seam.
+    /// </remarks>
+    [Fact]
+    public void The_authentication_runtime_exists_on_the_library_side_of_the_seam()
+    {
+        Assert.True(
+            EngineRepository.Exists(EngineSourceRootForSeam + "/Authentication"),
+            $"The library authentication runtime is missing from {EngineSourceRootForSeam}/Authentication, "
+                + "so the prohibition against the deployable naming it is asserting nothing.");
+
+        var reaching = HostSources()
+            .Where(path => File.ReadAllText(path).Contains(
+                "MCPiler.Engine.Authentication",
+                StringComparison.Ordinal))
+            .Select(EngineRepository.Relative)
+            .ToList();
+
+        Assert.True(
+            reaching.Count == 0,
+            "The deployable receives authentication outcomes through the seam; naming the library "
+                + $"authentication runtime directly bypasses it: {string.Join(", ", reaching)}");
+    }
+
+    /// <summary>
     /// The containment assertion is checked against the mistakes it exists to catch.
     /// </summary>
     /// <remarks>
@@ -254,6 +294,7 @@ public sealed class HostBoundaryTests
     [InlineData("using MCPiler.Engine.Transform;")]
     [InlineData("using MCPiler.Engine.Search;")]
     [InlineData("var tools = MCPiler.Engine.Mcp.ToolSetProjection.Project(derived);")]
+    [InlineData("private readonly MCPiler.Engine.Authentication.AuthenticationRuntime _authentication;")]
     public void The_containment_assertion_catches_a_product_decision_in_the_deployable(string driver)
     {
         var caught = ProductNamespaces.Any(space => driver.Contains(space, StringComparison.Ordinal))

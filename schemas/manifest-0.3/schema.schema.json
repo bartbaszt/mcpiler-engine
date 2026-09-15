@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mcpiler:manifest:0.3:schema",
+  "title": "MCPiler Manifest schema value",
+
+  "$comment": "Deliberately permissive. Schema values are carried verbatim so an unknown vendor keyword and a lexically preserved numeric bound survive a load/store round trip unchanged. Constraining the keyword set here would make this document stricter than the reader and would break valid manifests in an editor. The one rule that is a genuine format rule is that a reference is a local JSON Pointer fragment: there is no cross-section reference, no base URI and no fetch in this format.",
+
+  "type": ["object", "boolean"],
+  "properties": {
+    "$ref": {
+      "description": "Fragment-only JSON Pointer resolved inside the same section document.",
+      "type": "string",
+      "pattern": "^#(/|$)"
+    }
+  }
+}

@@ -18,6 +18,12 @@ public static class ManifestSectionName
     /// <summary>Credential slot declarations holding references, never secret values.</summary>
     public const string Credentials = "credentials";
 
+    /// <summary>
+    /// Generic authentication profiles: closed strategy configuration, origins, credential
+    /// references, and mutable-slot authority state.
+    /// </summary>
+    public const string Authentication = "authentication";
+
     /// <summary>The effective HTTP operation model and its local schema components.</summary>
     public const string Operations = "operations";
 
@@ -39,6 +45,7 @@ public static class ManifestSectionName
         Server,
         Policy,
         Credentials,
+        Authentication,
         Operations,
         AgentSurface,
         Tools,

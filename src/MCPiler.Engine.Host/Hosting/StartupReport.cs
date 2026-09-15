@@ -71,6 +71,14 @@ public static class StartupReport
                     $"mounted {mount.Prefix} -> {mount.ServerName} ({mount.Path})"));
             }
 
+            // The durability of runtime-owned mutable authentication state is the one fact about
+            // it an operator needs at startup: a deployment that keeps a rotating refresh token in
+            // memory loses it on restart and must reauthorize, which is supported rather than
+            // broken, and is invisible until the first restart unless it is stated here.
+            text.AppendLine(result.DurableRuntimeState
+                ? "runtime state: durable (rotated authentication state survives a restart)"
+                : "runtime state: memory-only (a rotated refresh token is lost on restart)");
+
             return text.ToString();
         }
 
@@ -91,6 +99,48 @@ public static class StartupReport
         ArgumentNullException.ThrowIfNull(result);
 
         return result.Started ? ExitCodes.Success : ExitCodes.Configuration;
+    }
+
+    /// <summary>Renders one refusal the host produced before a runtime existed.</summary>
+    /// <remarks>
+    /// Managed startup can refuse before any Manifest is loaded: a Platform that never delivered
+    /// an initial generation has no library-side refusal to report, only a synchronization one.
+    /// Rendering it through the same line shape keeps an operator's reading of a refusal the same
+    /// whichever side produced it.
+    /// </remarks>
+    public static string RenderRefusal(StartupRefusal refusal)
+    {
+        ArgumentNullException.ThrowIfNull(refusal);
+
+        StringBuilder text = new();
+        text.AppendLine(Line("refused", refusal));
+        text.AppendLine("The process will not start. Nothing is served: a partially mounted process "
+            + "answers some requests and refuses others in a way that reads as an upstream fault.");
+        return text.ToString();
+    }
+
+    /// <summary>Renders the managed synchronization facts an operator needs at startup.</summary>
+    /// <remarks>
+    /// The initial generation id is the answer to "what is this process serving", which is not
+    /// recoverable from the address it listens on. It is stated once at startup rather than on
+    /// every activation, because the progress stream is read by a person watching a boot.
+    /// </remarks>
+    public static string RenderManaged(string endpoint, string generationId, bool durableRuntimeState)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(endpoint);
+        ArgumentException.ThrowIfNullOrEmpty(generationId);
+
+        StringBuilder text = new();
+
+        text.AppendLine(string.Create(
+            CultureInfo.InvariantCulture,
+            $"managed from {endpoint} -> generation {generationId}"));
+
+        text.AppendLine(durableRuntimeState
+            ? "runtime state: durable (rotated authentication state survives a restart)"
+            : "runtime state: memory-only (a rotated refresh token is lost on restart)");
+
+        return text.ToString();
     }
 
     private static string Line(string severity, StartupRefusal refusal)

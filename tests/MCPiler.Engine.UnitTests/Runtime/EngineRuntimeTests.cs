@@ -269,7 +269,7 @@ public sealed class EngineRuntimeTests : IDisposable
 
         return Author(name, $$"""
             {
-              "manifestFormatVersion": "0.2",
+              "manifestFormatVersion": "0.3",
               "sections": {
                 "server": { "inline": { "name": "Example API" } },
                 "policy": { "inline": { "baseUrl": "https://api.example.com"{{limits}} } },
@@ -304,7 +304,7 @@ public sealed class EngineRuntimeTests : IDisposable
 
     private const string InlineCredentialManifest = """
         {
-          "manifestFormatVersion": "0.2",
+          "manifestFormatVersion": "0.3",
           "sections": {
             "server": { "inline": { "name": "Example API" } },
             "policy": { "inline": { "baseUrl": "https://api.example.com" } },

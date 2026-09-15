@@ -326,9 +326,70 @@ public sealed class HostCommandsTests : IDisposable
         return directory;
     }
 
+    /// <summary>
+    /// A mount that requires a scope with no configured issuer is a configuration outcome.
+    /// </summary>
+    /// <remarks>
+    /// The listener refuses before it exists, and that refusal reaching the operator as a crash
+    /// (an unhandled exception and a non-configuration exit code) makes an ordinary setup mistake
+    /// look like a defect in Engine.
+    /// </remarks>
+    [Fact]
+    public async Task A_scoped_mount_without_an_issuer_is_refused_with_the_configuration_code()
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            ["serve", "--file-store-root", Store(), "--mount", "/api=" + ScopedManifest("scoped")],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
+        Assert.Contains("issuer", outcome.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("Unhandled exception", outcome.Output, StringComparison.Ordinal);
+    }
+
+    private string ScopedManifest(string name)
+    {
+        string directory = Path.Combine(_root, name);
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "manifest.json"), ScopedManifestText);
+        return directory;
+    }
+
+    private const string ScopedManifestText = """
+        {
+          "manifestFormatVersion": "0.3",
+          "sections": {
+            "server": { "inline": {
+              "name": "Scoped API",
+              "surfaces": [
+                { "slug": "full", "isDefault": true, "requiredScopes": ["probe.read"],
+                  "operations": [ { "operation": "list-pets", "exposure": "direct" } ] }
+              ]
+            } },
+            "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+            "operations": {
+              "inline": {
+                "operations": [ { "key": "GET /pets", "method": "GET", "path": "/pets" } ]
+              }
+            },
+            "agentSurface": {
+              "inline": {
+                "operations": [
+                  {
+                    "slug": "list-pets",
+                    "name": "List pets",
+                    "binding": { "type": "http", "operation": "GET /pets" }
+                  }
+                ]
+              }
+            }
+          }
+        }
+        """;
+
     private const string MinimalManifest = """
         {
-          "manifestFormatVersion": "0.2",
+          "manifestFormatVersion": "0.3",
           "sections": {
             "server": { "inline": { "name": "Example API" } },
             "policy": { "inline": { "baseUrl": "https://api.example.com" } },

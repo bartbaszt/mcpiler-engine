@@ -1,4 +1,5 @@
 using MCPiler.Engine.Host.Configuration;
+using MCPiler.Engine.Host.Hosting;
 using MCPiler.Engine.Host.Mcp;
 using MCPiler.Engine.Runtime;
 
@@ -30,20 +31,31 @@ namespace MCPiler.Engine.Host.Authorization;
 /// a source address — none of them substitute for a token where the mount requires one, and
 /// none of them widen anything where it does not.
 /// </para>
+/// <para>
+/// Authorization resolves through one generation lease taken for this request, so the mount
+/// state that decides whether a token is required and the surface whose scopes are checked
+/// both come from the same immutable generation.
+/// </para>
 /// </remarks>
 internal sealed class MountAuthorizationMiddleware
 {
     private readonly RequestDelegate _next;
     private readonly ITokenValidator _tokens;
+    private readonly EngineGenerationManager _generations;
 
     /// <summary>
     /// The middleware constructor. Public because the middleware convention requires it; the
-    /// validator is registered, the next delegate is supplied by the pipeline.
+    /// validator and the generation manager are registered, the next delegate is supplied by the
+    /// pipeline.
     /// </summary>
-    public MountAuthorizationMiddleware(RequestDelegate next, ITokenValidator tokens)
+    public MountAuthorizationMiddleware(
+        RequestDelegate next,
+        ITokenValidator tokens,
+        EngineGenerationManager generations)
     {
         _next = next;
         _tokens = tokens;
+        _generations = generations;
     }
 
     /// <summary>
@@ -52,7 +64,7 @@ internal sealed class MountAuthorizationMiddleware
     /// </summary>
     public async Task InvokeAsync(HttpContext context)
     {
-        if (context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>() is not { } addressed)
+        if (context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>() is not { } route)
         {
             // No surface metadata means the request matched no route, which routing already
             // answers. Nothing here can disclose what no route reached.
@@ -60,46 +72,69 @@ internal sealed class MountAuthorizationMiddleware
             return;
         }
 
-        if (!addressed.Mount.RequiresAuthorization())
+        if (!_generations.TryLease(out EngineGenerationLease? lease))
         {
-            await _next(context);
-            return;
-        }
-
-        TokenVerification verification = await VerifyAsync(context).ConfigureAwait(false);
-
-        if (!verification.Active)
-        {
-            await ChallengeAsync(context, addressed).ConfigureAwait(false);
-            return;
-        }
-
-        string resourcePath = addressed.AuthorizationResourcePath
-            ?? context.Request.Path.Value
-            ?? "/";
-
-        string canonical = MountAuthorization.CanonicalResource(
-            context.Request.Scheme,
-            context.Request.Host.Value ?? string.Empty,
-            resourcePath);
-
-        if (verification.Audience is null
-            || !MountAuthorization.AudienceNames(verification.Audience, canonical))
-        {
+            // No generation is installed. The process is either shutting down or has not yet
+            // received one; either way the answer is the one an unknown resource gives.
             await RefuseSilentlyAsync(context).ConfigureAwait(false);
             return;
         }
 
-        foreach (string scope in addressed.Surface.RequiredScopes)
+        using (lease)
         {
-            if (!verification.Scopes.Contains(scope, StringComparer.Ordinal))
+            string address = RequestAddress.Resolve(context, route);
+
+            if (!lease!.Generation.TryResolve(address, out SurfaceResolution? resolved)
+                || resolved is null)
+            {
+                // The address is mapped but the leased generation does not serve it: a managed
+                // activation removed the surface. The refusal is byte-identical to the one for an
+                // address that was never mapped.
+                await RefuseSilentlyAsync(context).ConfigureAwait(false);
+                return;
+            }
+
+            if (!resolved.Mount.RequiresAuthorization())
+            {
+                await _next(context);
+                return;
+            }
+
+            TokenVerification verification = await VerifyAsync(context).ConfigureAwait(false);
+
+            if (!verification.Active)
+            {
+                await ChallengeAsync(context, route).ConfigureAwait(false);
+                return;
+            }
+
+            string resourcePath = route.AuthorizationResourcePath
+                ?? context.Request.Path.Value
+                ?? "/";
+
+            string canonical = MountAuthorization.CanonicalResource(
+                context.Request.Scheme,
+                context.Request.Host.Value ?? string.Empty,
+                resourcePath);
+
+            if (verification.Audience is null
+                || !MountAuthorization.AudienceNames(verification.Audience, canonical))
             {
                 await RefuseSilentlyAsync(context).ConfigureAwait(false);
                 return;
             }
-        }
 
-        await _next(context).ConfigureAwait(false);
+            foreach (string scope in resolved.Surface.RequiredScopes)
+            {
+                if (!verification.Scopes.Contains(scope, StringComparer.Ordinal))
+                {
+                    await RefuseSilentlyAsync(context).ConfigureAwait(false);
+                    return;
+                }
+            }
+
+            await _next(context).ConfigureAwait(false);
+        }
     }
 
     /// <summary>

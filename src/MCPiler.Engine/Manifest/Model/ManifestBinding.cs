@@ -39,6 +39,10 @@ public abstract record ManifestBinding
 /// <param name="CredentialRef">
 /// The ids of the <c>credentials</c>-section entries that apply to this operation.
 /// </param>
+/// <param name="AuthenticationRef">
+/// The id of the <c>authentication</c>-section profile that governs how the credential is
+/// obtained and applied.
+/// </param>
 /// <remarks>
 /// <para>
 /// <b>Absent means none.</b> An omitted member and an empty list are one representation and
@@ -56,7 +60,8 @@ public abstract record ManifestBinding
 public sealed record HttpBinding(
     string Operation,
     string? ServerUrl = null,
-    IReadOnlyList<string> CredentialRef = null!) : ManifestBinding
+    IReadOnlyList<string> CredentialRef = null!,
+    string? AuthenticationRef = null) : ManifestBinding
 {
     /// <summary>The wire discriminator.</summary>
     public const string TypeName = "http";

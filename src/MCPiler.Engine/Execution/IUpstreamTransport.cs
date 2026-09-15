@@ -52,7 +52,24 @@ public sealed record UpstreamRequest
 /// The total time budget is NOT here — it is the caller's cancellation token, because a budget
 /// that the transport re-derived per call could not span a chain the caller is measuring.
 /// </param>
-public sealed record UpstreamSendPolicy(OriginAllowList AllowedOrigins, OutboundLimits Limits);
+/// <param name="SignRequest">
+/// An optional per-hop rewrite applied to the request immediately before each hop is sent.
+/// </param>
+/// <remarks>
+/// The hook exists because a request signature covers the exact bytes, destination and headers of
+/// one hop: a redirect target is a different request, and a signature carried to it would either
+/// be rejected or, worse, accepted for a destination it never covered. Signing is therefore
+/// re-evaluated per hop rather than once per exchange.
+///
+/// It is a delegate over <see cref="UpstreamRequest"/> rather than over a signer type so the
+/// transport stays unaware of what signing is; the execution layer builds the closure. The hook
+/// returns the request to send, and a hop's returned request is what the next hop's redirect rules
+/// are applied to.
+/// </remarks>
+public sealed record UpstreamSendPolicy(
+    OriginAllowList AllowedOrigins,
+    OutboundLimits Limits,
+    Func<UpstreamRequest, int, CancellationToken, ValueTask<UpstreamRequest>>? SignRequest = null);
 
 /// <summary>
 /// A response whose metadata has already been captured and whose body is still streaming.

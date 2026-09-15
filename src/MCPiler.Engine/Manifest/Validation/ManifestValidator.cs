@@ -41,12 +41,194 @@ public static class ManifestValidator
         ValidateCredentialIdentity(manifest, diagnostics);
         ValidateBindingCredentialScope(manifest, diagnostics);
         ValidateCredentialReachability(manifest, diagnostics);
+        ValidateAuthenticationProfiles(manifest, diagnostics);
+        ValidateAuthenticationReachability(manifest, diagnostics);
         ValidateSchemaReferences(manifest, diagnostics);
         ValidateDeclaredTools(manifest, diagnostics);
         ValidateTransformPrograms(manifest, diagnostics);
 
         return diagnostics;
     }
+
+    /// <summary>
+    /// Authentication profile identity, credential references, and kind compatibility.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Profile ids must be unique for the same reason credential ids must be: a binding that
+    /// names one would otherwise resolve by declaration order. The credential references are
+    /// checked here rather than in the reader because they name another section, and the
+    /// compatibility check exists because a profile that references a credential its strategy
+    /// cannot use would resolve to a secret it then never reveals — an authentication profile
+    /// that silently behaves as if unauthenticated.
+    /// </para>
+    /// <para>
+    /// The dynamic kinds expect the durable scheme ids the Platform credential store already
+    /// uses, so a stored slot crosses the Manifest boundary unchanged and a strategy can never
+    /// read a credential that was stored for a different strategy.
+    /// </para>
+    /// </remarks>
+    private static void ValidateAuthenticationProfiles(ManifestDocument manifest, List<ManifestDiagnostic> diagnostics)
+    {
+        IReadOnlyList<AuthenticationProfile> profiles = manifest.EffectiveAuthentication.Profiles;
+        IReadOnlyList<ManifestCredential> credentials = manifest.EffectiveCredentials.Credentials;
+        Dictionary<string, ManifestCredential> byId = new(StringComparer.Ordinal);
+        Dictionary<string, int> seen = new(StringComparer.Ordinal);
+
+        foreach (ManifestCredential credential in credentials)
+        {
+            byId.TryAdd(credential.Id, credential);
+        }
+
+        for (int index = 0; index < profiles.Count; index++)
+        {
+            AuthenticationProfile profile = profiles[index];
+            string pointer = JsonPointer.Build("profiles", Segment(index));
+
+            if (seen.TryGetValue(profile.Id, out int first))
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.DuplicateAuthenticationId,
+                    $"Authentication profiles {first} and {index} both declare the id " +
+                    $"'{DiagnosticText.Echo(profile.Id)}'. A binding naming it would resolve by " +
+                    "declaration order rather than by anything the author stated.",
+                    section: ManifestSectionName.Authentication,
+                    pointer: pointer + "/id"));
+                continue;
+            }
+
+            seen[profile.Id] = index;
+
+            for (int refIndex = 0; refIndex < profile.CredentialRef.Count; refIndex++)
+            {
+                string reference = profile.CredentialRef[refIndex];
+                string refPointer = pointer + "/credentialRef/" + Segment(refIndex);
+
+                if (!byId.TryGetValue(reference, out ManifestCredential? credential))
+                {
+                    diagnostics.Add(ManifestDiagnostic.Error(
+                        ManifestDiagnosticCodes.AuthenticationCredentialUnknown,
+                        $"Authentication profile '{DiagnosticText.Echo(profile.Id)}' references " +
+                        $"credential '{DiagnosticText.Echo(reference)}', which the credentials " +
+                        "section does not declare. The profile could never reveal it.",
+                        section: ManifestSectionName.Authentication,
+                        pointer: refPointer));
+                    continue;
+                }
+
+                if (!SchemeFitsProfile(profile.Kind, credential))
+                {
+                    diagnostics.Add(ManifestDiagnostic.Error(
+                        ManifestDiagnosticCodes.AuthenticationCredentialIncompatible,
+                        $"Authentication profile '{DiagnosticText.Echo(profile.Id)}' is of kind " +
+                        $"'{Vocabulary.Write(profile.Kind)}', which cannot use credential " +
+                        $"'{DiagnosticText.Echo(reference)}' (scheme '{Vocabulary.Write(credential.Scheme)}', " +
+                        $"slot '{DiagnosticText.Echo(credential.Slot)}'). " +
+                        ExpectedCredentialShape(profile.Kind),
+                        section: ManifestSectionName.Authentication,
+                        pointer: refPointer));
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Refuses an authentication profile no executing binding reaches.
+    /// </summary>
+    /// <remarks>
+    /// The spec requires an unused profile to be refused, not warned about: a profile declared
+    /// ahead of the binding that will use it is indistinguishable from an operation that was
+    /// meant to authenticate dynamically and does not, and only one of those two readings is safe.
+    /// A producer that emits a profile emits the reference with it.
+    /// </remarks>
+    private static void ValidateAuthenticationReachability(ManifestDocument manifest, List<ManifestDiagnostic> diagnostics)
+    {
+        IReadOnlyList<AuthenticationProfile> profiles = manifest.EffectiveAuthentication.Profiles;
+
+        if (profiles.Count == 0)
+        {
+            return;
+        }
+
+        HashSet<string> referenced = new(StringComparer.Ordinal);
+
+        for (int index = 0; index < manifest.AgentSurface.Operations.Count; index++)
+        {
+            AgentOperationEntry operation = manifest.AgentSurface.Operations[index];
+
+            if (ManifestBindingDispatcher.AuthenticationRefOf(operation.Binding) is not { } profileId)
+            {
+                continue;
+            }
+
+            if (manifest.EffectiveAuthentication.Profile(profileId) is null)
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.BindingAuthenticationRefUnknown,
+                    $"Operation '{DiagnosticText.Echo(operation.Slug)}' references authentication " +
+                    $"profile '{DiagnosticText.Echo(profileId)}', which the authentication section " +
+                    "does not declare. The operation would execute without the intended strategy.",
+                    section: ManifestSectionName.AgentSurface,
+                    pointer: JsonPointer.Build("operations", Segment(index), "binding", "authenticationRef")));
+                continue;
+            }
+
+            referenced.Add(profileId);
+        }
+
+        for (int index = 0; index < profiles.Count; index++)
+        {
+            if (referenced.Contains(profiles[index].Id))
+            {
+                continue;
+            }
+
+            diagnostics.Add(ManifestDiagnostic.Error(
+                ManifestDiagnosticCodes.AuthenticationUnreferenced,
+                $"Authentication profile '{DiagnosticText.Echo(profiles[index].Id)}' is referenced " +
+                "by no operation, so it is never used. An operation that was meant to execute " +
+                "the strategy sends an unauthenticated request.",
+                section: ManifestSectionName.Authentication,
+                pointer: JsonPointer.Build("profiles", Segment(index), "id")));
+        }
+    }
+
+    /// <summary>
+    /// Decides whether a credential scheme can serve a profile strategy.
+    /// </summary>
+    /// <remarks>
+    /// The static kind accepts the four application schemes. Every dynamic kind accepts exactly
+    /// the durable scheme the Platform credential store records for it, so a strategy can never
+    /// reveal a credential stored for another strategy even though both are just strings in a
+    /// list.
+    /// </remarks>
+    private static bool SchemeFitsProfile(AuthenticationKind kind, ManifestCredential credential) => kind switch
+    {
+        AuthenticationKind.Static => credential.Scheme is CredentialScheme.Basic
+            or CredentialScheme.Bearer
+            or CredentialScheme.ApiKey
+            or CredentialScheme.Header,
+        AuthenticationKind.OAuth2ClientCredentials => credential.Scheme is CredentialScheme.OAuth2ClientCredentials
+            && string.Equals(credential.Slot, "clientSecret", StringComparison.Ordinal),
+        AuthenticationKind.OAuth2AuthorizationCodePkceRefresh => credential.Scheme is CredentialScheme.OAuth2AuthorizationCode
+            && credential.Slot is "clientSecret" or "refreshToken",
+        AuthenticationKind.TokenSessionExchange => credential.Scheme is CredentialScheme.TokenSessionExchange,
+        AuthenticationKind.ChallengeSession => credential.Scheme is CredentialScheme.ChallengeSession,
+        AuthenticationKind.RequestSigning => credential.Scheme is CredentialScheme.RequestSigning
+            && string.Equals(credential.Slot, "signingSecret", StringComparison.Ordinal),
+        _ => false,
+    };
+
+    private static string ExpectedCredentialShape(AuthenticationKind kind) => kind switch
+    {
+        AuthenticationKind.Static => "Expected one of the application schemes: basic, bearer, apiKey, header.",
+        AuthenticationKind.OAuth2ClientCredentials => "Expected scheme 'oauth2-client-credentials' with slot 'clientSecret'.",
+        AuthenticationKind.OAuth2AuthorizationCodePkceRefresh => "Expected scheme 'oauth2-authorization-code' with slot 'clientSecret' or 'refreshToken'.",
+        AuthenticationKind.TokenSessionExchange => "Expected scheme 'token-session-exchange'.",
+        AuthenticationKind.ChallengeSession => "Expected scheme 'challenge-session'.",
+        AuthenticationKind.RequestSigning => "Expected scheme 'request-signing' with slot 'signingSecret'.",
+        _ => "This profile kind declares no credential references.",
+    };
 
     /// <summary>
     /// Every transformation program the manifest carries passes Tier-1 validation.
@@ -537,6 +719,28 @@ public static class ManifestValidator
                     continue;
                 }
 
+                // A dynamic-source credential names the role a secret plays in a strategy,
+                // not a place to write it. Referencing one from a binding would reach the
+                // credential applier, which has no rule for it; refusing it here keeps that a
+                // load-time authoring error rather than a first-call failure.
+                if (IsDynamicScheme(credential.Scheme))
+                {
+                    diagnostics.Add(ManifestDiagnostic.Error(
+                        ManifestDiagnosticCodes.AuthenticationCredentialIncompatible,
+                        $"Operation '{DiagnosticText.Echo(operation.Slug)}' references credential " +
+                        $"'{DiagnosticText.Echo(reference)}', which declares the strategy scheme " +
+                        $"'{Vocabulary.Write(credential.Scheme)}'. A strategy source secret is " +
+                        "revealed by its authentication profile, not applied directly by a binding.",
+                        section: ManifestSectionName.AgentSurface,
+                        pointer: JsonPointer.Build(
+                            "operations",
+                            Segment(index),
+                            "binding",
+                            "credentialRef",
+                            Segment(refIndex))));
+                    continue;
+                }
+
                 string destination = DestinationOf(credential);
 
                 if (destinations.TryGetValue(destination, out string? first))
@@ -615,13 +819,13 @@ public static class ManifestValidator
     }
 
     /// <summary>
-    /// Reports a declared credential that no operation references.
+    /// Reports a declared credential that nothing references.
     /// </summary>
     /// <remarks>
-    /// A warning rather than a refusal: declaring a credential ahead of the operation that will
-    /// use it is legitimate. It is worth reporting because the likelier cause is an operation
-    /// that was meant to be authenticated and is not, and the fail-safe default makes that
-    /// mistake silent at the wire.
+    /// Both reference sites count: a binding applies a credential directly, and an
+    /// authentication profile reveals one as part of its strategy. Counting only bindings would
+    /// report every dynamic source secret as unreferenced even though the profile that owns it
+    /// is what uses it.
     /// </remarks>
     private static void ValidateCredentialReachability(
         ManifestDocument manifest,
@@ -639,6 +843,14 @@ public static class ManifestValidator
         foreach (AgentOperationEntry operation in manifest.AgentSurface.Operations)
         {
             foreach (string reference in ManifestBindingDispatcher.CredentialRefsOf(operation.Binding))
+            {
+                referenced.Add(reference);
+            }
+        }
+
+        foreach (AuthenticationProfile profile in manifest.EffectiveAuthentication.Profiles)
+        {
+            foreach (string reference in profile.CredentialRef)
             {
                 referenced.Add(reference);
             }
@@ -803,6 +1015,16 @@ public static class ManifestValidator
 
         diagnostics.AddRange(resolver.Validate(schema, section, pointer));
     }
+
+    /// <summary>
+    /// Decides whether a scheme names a strategy source secret rather than an application rule.
+    /// </summary>
+    private static bool IsDynamicScheme(CredentialScheme scheme) => scheme is
+        CredentialScheme.OAuth2ClientCredentials
+        or CredentialScheme.OAuth2AuthorizationCode
+        or CredentialScheme.TokenSessionExchange
+        or CredentialScheme.ChallengeSession
+        or CredentialScheme.RequestSigning;
 
     private static string DestinationOf(ManifestCredential credential) => credential.Scheme switch
     {

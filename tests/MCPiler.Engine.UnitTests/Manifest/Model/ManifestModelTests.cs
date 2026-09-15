@@ -15,7 +15,7 @@ public sealed class ManifestModelTests
         Assert.False(ManifestSectionName.IsKnown("agentsurface"));
         Assert.False(ManifestSectionName.IsKnown("policies"));
         Assert.False(ManifestSectionName.IsKnown(null));
-        Assert.Equal(8, ManifestSectionName.All.Count);
+        Assert.Equal(9, ManifestSectionName.All.Count);
     }
 
     [Fact]

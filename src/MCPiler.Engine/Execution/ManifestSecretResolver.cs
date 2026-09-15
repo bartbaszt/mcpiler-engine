@@ -50,6 +50,7 @@ public sealed class ManifestSecretResolver : IManifestSecretResolver
 {
     private readonly SecretResolutionOptions _options;
     private readonly ISecretSource _source;
+    private readonly GenerationSecretSource? _providers;
 
     /// <summary>Creates a resolver refusing inline material and reading the real host.</summary>
     public ManifestSecretResolver()
@@ -65,12 +66,32 @@ public sealed class ManifestSecretResolver : IManifestSecretResolver
 
     /// <summary>Creates a resolver under <paramref name="options"/> reading <paramref name="source"/>.</summary>
     public ManifestSecretResolver(SecretResolutionOptions options, ISecretSource source)
+        : this(options, source, providers: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates a resolver that also reads <paramref name="providers"/>.
+    /// </summary>
+    /// <param name="options">Which references are admissible.</param>
+    /// <param name="source">Where environment and file references are read.</param>
+    /// <param name="providers">
+    /// The active generation's in-memory provider values, or null for a process that runs no
+    /// generation. A <c>fromProvider</c> reference in a manifest this resolver reads without a
+    /// source is a deployment fault: standalone loading refuses such a manifest, so reaching
+    /// this state means the two halves of the mode decision disagree.
+    /// </param>
+    public ManifestSecretResolver(
+        SecretResolutionOptions options,
+        ISecretSource source,
+        GenerationSecretSource? providers)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(source);
 
         _options = options;
         _source = source;
+        _providers = providers;
     }
 
     /// <inheritdoc />
@@ -177,6 +198,33 @@ public sealed class ManifestSecretResolver : IManifestSecretResolver
             };
 
             return NonEmpty(declaration, TrimSingleTrailingNewline(contents), described);
+        }
+
+        if (reference.FromProvider is { } key)
+        {
+            if (_providers is null)
+            {
+                // A managed reference in a process with no managed generation. Standalone loading
+                // refuses such a manifest, so this is a mode disagreement rather than a
+                // deployment mistake: resolving it from anywhere else would defeat the reason
+                // provider values are delivered separately.
+                throw new CredentialUnavailableException(
+                    declaration.Id,
+                    $"{described} names a managed provider value, and this process has no active managed generation.");
+            }
+
+            if (!_providers.TryResolve(key, out var value))
+            {
+                // The key is echoed because a key is configuration, not a secret, and an operator
+                // whose generation delivered a different key needs to see which one was asked
+                // for. The delivered keys are not echoed: that would describe another
+                // generation's secret set to whoever controls this manifest.
+                throw new CredentialUnavailableException(
+                    declaration.Id,
+                    $"{described} names a provider value the active generation did not deliver.");
+            }
+
+            return NonEmpty(declaration, value, described);
         }
 
         throw new CredentialUnavailableException(

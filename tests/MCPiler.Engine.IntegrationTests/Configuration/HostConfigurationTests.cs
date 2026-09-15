@@ -202,6 +202,299 @@ public sealed class HostConfigurationTests
         Assert.All(bounds, bound => Assert.DoesNotContain(bound, HostConfiguration.AcceptedKeys, StringComparer.Ordinal));
     }
 
+    /// <summary>
+    /// A process that names no mode serves its local Manifests.
+    /// </summary>
+    /// <remarks>
+    /// The default matters more than the explicit value. Every deployment written before managed
+    /// mode existed names local mounts and no mode, and if the absent key meant anything but file
+    /// mode those command lines would start refusing.
+    /// </remarks>
+    [Fact]
+    public void An_absent_mode_serves_the_local_mounts()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+        };
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. settings], out HostBinding? binding, out _));
+        Assert.Equal(HostDeploymentMode.File, binding!.Mode);
+    }
+
+    [Fact]
+    public void The_file_mode_may_be_stated_explicitly_with_local_mounts()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.ModeKey] = HostConfiguration.FileModeName,
+        };
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. settings], out HostBinding? binding, out _));
+        Assert.Equal(HostDeploymentMode.File, binding!.Mode);
+    }
+
+    /// <summary>
+    /// A managed process refuses local mounts, because the two are competing authorities.
+    /// </summary>
+    /// <remarks>
+    /// The refusal has to name both halves. An operator who set the mode and left a mount on the
+    /// command line from an earlier deployment needs to know which line to remove, and a message
+    /// that only said "invalid configuration" would leave them reading the whole command line.
+    /// </remarks>
+    [Fact]
+    public void A_managed_mode_with_local_mounts_is_refused_before_a_listener_could_exist()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.ModeKey] = HostConfiguration.ManagedModeName,
+            [HostConfiguration.ManagementEndpointKey] = "https://platform.example.test",
+            [HostConfiguration.DeploymentIdKey] = "deployment-1",
+            [HostConfiguration.DeploymentSecretFileKey] = "/run/secrets/deployment",
+        };
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
+
+        // The mode refusal is the one this test is about; the other settings are present so the
+        // managed half is complete and the competing-authority refusal is not joined by
+        // "incomplete managed configuration" findings.
+        string refusal = Assert.Single(
+            refusals,
+            entry => entry.Contains(HostConfiguration.ModeKey, StringComparison.Ordinal));
+
+        // The message names the competing setting the operator must remove. This is the only
+        // place the two authorities are reconciled, so the message is part of the contract.
+        Assert.Contains("--mount", refusal, StringComparison.Ordinal);
+        Assert.Contains(HostConfiguration.FileModeName, refusal, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Managed mode with no local mounts is exactly the shape managed mode exists for.
+    /// </summary>
+    /// <remarks>
+    /// The bind must succeed: the mounts come from synchronization, so an empty local mount list is
+    /// correct rather than incomplete. A refusal here would make managed mode unreachable.
+    /// </remarks>
+    [Fact]
+    public void A_managed_mode_without_local_mounts_binds()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.ModeKey] = HostConfiguration.ManagedModeName,
+            [HostConfiguration.ManagementEndpointKey] = "https://platform.example.test",
+            [HostConfiguration.DeploymentIdKey] = "deployment-1",
+            [HostConfiguration.DeploymentSecretFileKey] = "/run/secrets/deployment",
+        };
+
+        Assert.True(HostConfiguration.TryBind([], [.. settings], out HostBinding? binding, out IReadOnlyList<string> refusals));
+
+        Assert.Empty(refusals);
+        Assert.Equal(HostDeploymentMode.Managed, binding!.Mode);
+        Assert.Empty(binding.Runtime.Mounts);
+        Assert.NotNull(binding.Managed);
+        Assert.Equal("deployment-1", binding.Managed!.DeploymentId);
+    }
+
+    /// <summary>
+    /// A managed process names all three synchronization settings or none of them.
+    /// </summary>
+    /// <remarks>
+    /// Each omission is reported separately so an operator fixing one at a time still sees the
+    /// whole shape they have to supply, rather than discovering the next one on the next restart.
+    /// </remarks>
+    [Fact]
+    public void A_managed_mode_without_synchronization_settings_is_refused_by_name()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.ModeKey] = HostConfiguration.ManagedModeName,
+        };
+
+        Assert.False(HostConfiguration.TryBind([], [.. settings], out _, out IReadOnlyList<string> refusals));
+
+        Assert.Contains(refusals, entry => entry.Contains(HostConfiguration.ManagementEndpointKey, StringComparison.Ordinal));
+        Assert.Contains(refusals, entry => entry.Contains(HostConfiguration.DeploymentIdKey, StringComparison.Ordinal));
+        Assert.Contains(refusals, entry => entry.Contains(HostConfiguration.DeploymentSecretFileKey, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A remote management endpoint must be https, because it carries the deployment secret.
+    /// </summary>
+    /// <remarks>
+    /// Loopback is exempt so tests and local diagnostics can run without a certificate. The
+    /// distinction is the host, not the scheme, so a remote plain-http endpoint is the case this
+    /// pins.
+    /// </remarks>
+    [Theory]
+    [InlineData("http://platform.example.test")]
+    [InlineData("http://192.0.2.10:8080")]
+    public void A_remote_management_endpoint_over_http_is_refused(string endpoint)
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.ModeKey] = HostConfiguration.ManagedModeName,
+            [HostConfiguration.ManagementEndpointKey] = endpoint,
+            [HostConfiguration.DeploymentIdKey] = "deployment-1",
+            [HostConfiguration.DeploymentSecretFileKey] = "/run/secrets/deployment",
+        };
+
+        Assert.False(HostConfiguration.TryBind([], [.. settings], out _, out IReadOnlyList<string> refusals));
+
+        Assert.Contains(
+            refusals,
+            entry => entry.Contains(HostConfiguration.ManagementEndpointKey, StringComparison.Ordinal)
+                && entry.Contains("https", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A loopback management endpoint may be plain http, which is what tests and local diagnostics use.
+    /// </summary>
+    [Theory]
+    [InlineData("http://127.0.0.1:5099")]
+    [InlineData("http://localhost:5099")]
+    [InlineData("https://platform.example.test")]
+    public void A_safe_management_endpoint_binds(string endpoint)
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.ModeKey] = HostConfiguration.ManagedModeName,
+            [HostConfiguration.ManagementEndpointKey] = endpoint,
+            [HostConfiguration.DeploymentIdKey] = "deployment-1",
+            [HostConfiguration.DeploymentSecretFileKey] = "/run/secrets/deployment",
+        };
+
+        Assert.True(HostConfiguration.TryBind([], [.. settings], out HostBinding? binding, out IReadOnlyList<string> refusals));
+        Assert.Empty(refusals);
+        Assert.Equal(endpoint, binding!.Managed!.Endpoint.ToString().TrimEnd('/'));
+    }
+
+    /// <summary>
+    /// A file-mode process accepts no synchronization settings, because none of them would be read.
+    /// </summary>
+    [Fact]
+    public void A_file_mode_process_refuses_synchronization_settings()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.ManagementEndpointKey] = "https://platform.example.test",
+        };
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
+
+        Assert.Contains(refusals, entry => entry.Contains(HostConfiguration.ManagementEndpointKey, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// An explicitly file-mode process with no mounts is refused by name rather than by the library.
+    /// </summary>
+    /// <remarks>
+    /// The library would refuse the empty mount set anyway, but naming the mode is what tells an
+    /// operator who set it that the setting is the one that has no content to serve.
+    /// </remarks>
+    [Fact]
+    public void An_explicit_file_mode_without_mounts_is_refused()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.ModeKey] = HostConfiguration.FileModeName,
+        };
+
+        Assert.False(HostConfiguration.TryBind([], [.. settings], out _, out IReadOnlyList<string> refusals));
+        Assert.Contains(refusals, message => message.Contains(HostConfiguration.ModeKey, StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("platform")]
+    [InlineData("remote")]
+    [InlineData("File")]
+    public void A_mode_outside_the_two_accepted_spellings_is_refused(string value)
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.ModeKey] = value,
+        };
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
+
+        string refusal = Assert.Single(refusals);
+        Assert.Contains(HostConfiguration.ModeKey, refusal, StringComparison.Ordinal);
+        Assert.Contains(HostConfiguration.FileModeName, refusal, StringComparison.Ordinal);
+        Assert.Contains(HostConfiguration.ManagedModeName, refusal, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A browser origin is stored in the canonical spelling every comparison uses.
+    /// </summary>
+    /// <remarks>
+    /// The header a browser sends carries no path, query or trailing slash, so accepting those
+    /// spellings in configuration and comparing them verbatim would make a correctly written
+    /// setting silently admit nothing.
+    /// </remarks>
+    [Theory]
+    [InlineData("https://studio.example.test", "https://studio.example.test")]
+    [InlineData("https://studio.example.test/", "https://studio.example.test")]
+    [InlineData("http://127.0.0.1:5099", "http://127.0.0.1:5099")]
+    public void An_allowed_browser_origin_binds_in_its_canonical_spelling(string declared, string expected)
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.AllowedOriginKey] = declared,
+        };
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. settings], out HostBinding? binding, out IReadOnlyList<string> refusals));
+        Assert.Empty(refusals);
+        Assert.Equal([expected], binding!.AllowedOrigins);
+    }
+
+    /// <summary>
+    /// A value that is not an origin is refused, because it would admit nothing.
+    /// </summary>
+    [Theory]
+    [InlineData("studio.example.test")]
+    [InlineData("https://studio.example.test/studio")]
+    [InlineData("https://studio.example.test?x=1")]
+    [InlineData("ftp://studio.example.test")]
+    public void A_value_that_is_not_a_browser_origin_is_refused(string value)
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.AllowedOriginKey] = value,
+        };
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
+
+        string refusal = Assert.Single(refusals);
+        Assert.Contains(HostConfiguration.AllowedOriginKey, refusal, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An absent origin list is the right default: no browser page may call a served address,
+    /// while every non-browser client is unaffected.
+    /// </summary>
+    [Fact]
+    public void No_configured_origin_means_no_browser_origin_is_admitted()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+        };
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. settings], out HostBinding? binding, out IReadOnlyList<string> refusals));
+        Assert.Empty(refusals);
+        Assert.Empty(binding!.AllowedOrigins);
+    }
+
     private static List<KeyValuePair<string, string>> Mounts() => [new("/api", "/manifests/api")];
 
     private static Dictionary<string, string> Empty() => new(StringComparer.Ordinal);

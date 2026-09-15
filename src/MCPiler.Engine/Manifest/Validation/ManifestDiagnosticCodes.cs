@@ -320,6 +320,79 @@ public static class ManifestDiagnosticCodes
     /// </remarks>
     public const string DuplicateCredentialSlot = "credential/slot-duplicate";
 
+    /// <summary>A credential declares a managed-provider reference outside managed mode.</summary>
+    /// <remarks>
+    /// File mode has no provider secret set, so the reference could never resolve. It is a
+    /// distinct condition from a malformed key: the shape may be perfectly valid and the
+    /// deployment mode is still wrong.
+    /// </remarks>
+    public const string CredentialProviderNotPermitted = "credential/provider-not-permitted";
+
+    /// <summary>A managed-provider key is empty, over-long, or outside the permitted characters.</summary>
+    public const string CredentialProviderKeyInvalid = "credential/provider-key-invalid";
+
+    // ---- authentication -------------------------------------------------------------
+
+    /// <summary>An authentication profile id is absent or not well formed.</summary>
+    public const string AuthenticationIdInvalid = "authentication/id-invalid";
+
+    /// <summary>Two authentication profiles declare the same id.</summary>
+    public const string DuplicateAuthenticationId = "authentication/duplicate-id";
+
+    /// <summary>A profile declares a strategy kind outside the closed vocabulary.</summary>
+    public const string AuthenticationKindUnknown = "authentication/kind-unknown";
+
+    /// <summary>
+    /// A profile declares a vocabulary kind this Engine build cannot execute.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from an unknown kind: the spelling is recognized, but no accepted artifact
+    /// defines its runtime semantics, so accepting it would describe an execution path that
+    /// does not exist. It is refused before any secret is resolved rather than at invocation.
+    /// </remarks>
+    public const string AuthenticationKindNotExecutable = "authentication/kind-not-executable";
+
+    /// <summary>A strategy configuration is absent, wrongly shaped, or names an unknown member.</summary>
+    public const string AuthenticationConfigurationInvalid = "authentication/configuration-invalid";
+
+    /// <summary>
+    /// A strategy configuration carries an executable-looking member or value.
+    /// </summary>
+    /// <remarks>
+    /// Closed configuration may never smuggle arbitrary behavior across the boundary. A
+    /// member named <c>script</c>, <c>regex</c>, <c>template</c> or similar is refused wherever
+    /// it appears in the configuration, at any depth.
+    /// </remarks>
+    public const string AuthenticationExecutableMember = "authentication/executable-member";
+
+    /// <summary>An authentication or destination origin is not a canonical http(s) origin.</summary>
+    public const string AuthenticationOriginInvalid = "authentication/origin-invalid";
+
+    /// <summary>An authentication profile declares no credential reference, or an unknown one.</summary>
+    public const string AuthenticationCredentialUnknown = "authentication/credential-unknown";
+
+    /// <summary>A profile's credential reference does not fit its strategy kind.</summary>
+    public const string AuthenticationCredentialIncompatible = "authentication/credential-incompatible";
+
+    /// <summary>A profile declares a scope fingerprint that is not a lowercase hex digest.</summary>
+    public const string AuthenticationScopeFingerprintInvalid = "authentication/scope-fingerprint-invalid";
+
+    /// <summary>
+    /// An authentication profile declares a mutable slot without usable authority state.
+    /// </summary>
+    public const string AuthenticationSlotInvalid = "authentication/slot-invalid";
+
+    /// <summary>Two profiles declare the same mutable slot identity.</summary>
+    public const string DuplicateAuthenticationSlot = "authentication/slot-duplicate";
+
+    /// <summary>A binding references an authentication profile the section does not declare.</summary>
+    public const string BindingAuthenticationRefUnknown = "binding/authentication-ref-unknown";
+
+    /// <summary>Warning: a declared authentication profile is referenced by no binding.</summary>
+    public const string AuthenticationUnreferenced = "authentication/unreferenced";
+    /// <summary>A profile names a reviewed signer kind the closed registry does not implement.</summary>
+    public const string AuthenticationSignerUnknown = "authentication/signer-unknown";
+
     // ---- derivation and optional sections -------------------------------------------
 
     /// <summary>An explicit tool section disagrees with what derivation produces.</summary>
@@ -477,6 +550,23 @@ public static class ManifestDiagnosticCodes
         DuplicateCredentialId,
         CredentialUnreferenced,
         DuplicateCredentialSlot,
+        CredentialProviderNotPermitted,
+        CredentialProviderKeyInvalid,
+        AuthenticationIdInvalid,
+        DuplicateAuthenticationId,
+        AuthenticationKindUnknown,
+        AuthenticationKindNotExecutable,
+        AuthenticationConfigurationInvalid,
+        AuthenticationExecutableMember,
+        AuthenticationOriginInvalid,
+        AuthenticationCredentialUnknown,
+        AuthenticationCredentialIncompatible,
+        AuthenticationScopeFingerprintInvalid,
+        AuthenticationSlotInvalid,
+        DuplicateAuthenticationSlot,
+        BindingAuthenticationRefUnknown,
+        AuthenticationUnreferenced,
+        AuthenticationSignerUnknown,
         ToolDerivationMismatch,
         NavigatorNameRequired,
         DuplicateToolName,
@@ -527,6 +617,7 @@ public static class ManifestDiagnosticCodes
         "surface",
         "policy",
         "credential",
+        "authentication",
         "tools",
         "search",
         "vectors",

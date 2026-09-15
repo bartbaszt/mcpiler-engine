@@ -6,10 +6,13 @@ using MCPiler.Engine.Runtime;
 
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+
+using System.Net;
 
 namespace MCPiler.Engine.Host.Hosting;
 
@@ -75,14 +78,80 @@ public static class EngineWebHost
 
         MountSet mounts = MountSet.From(started);
 
+        // File mode serves exactly the mounts startup loaded, and nothing ever replaces them.
+        // The generation wraps the execution graph the command runner owns, so disposing it does
+        // not dispose what it does not own.
+        EngineGenerationManager generations = new(HostMode.File);
+        _ = generations.Activate(new EngineGeneration(
+            number: 0,
+            mounts,
+            execution,
+            ownsExecution: false));
+
+        return BuildCore(
+            binding,
+            execution,
+            drain,
+            generations,
+            managed: false);
+    }
+
+    /// <summary>Builds a listener whose served mounts an activation may replace.</summary>
+    /// <remarks>
+    /// Managed mode maps one template and resolves the addressed surface from the generation
+    /// leased for the request. The manager must already hold the generation built from the initial
+    /// synchronization; a listener without one would serve nothing while claiming to be ready.
+    /// </remarks>
+    internal static WebApplication BuildManaged(
+        HostBinding binding,
+        DrainCoordinator drain,
+        EngineGenerationManager generations)
+    {
+        ArgumentNullException.ThrowIfNull(binding);
+        ArgumentNullException.ThrowIfNull(drain);
+        ArgumentNullException.ThrowIfNull(generations);
+
+        if (generations.Mode != HostMode.Managed)
+        {
+            throw new InvalidOperationException(
+                "A managed listener requires a managed generation manager; the supplied manager "
+                + "serves a fixed mount set.");
+        }
+
+        if (generations.Current is not { } active)
+        {
+            throw new InvalidOperationException(
+                "A managed listener requires one initial generation. The process must finish its "
+                + "bounded initial synchronization before the listener opens; otherwise it would "
+                + "serve an empty surface and claim to be ready.");
+        }
+
+        return BuildCore(
+            binding,
+            active.Execution,
+            drain,
+            generations,
+            managed: true);
+    }
+
+    private static WebApplication BuildCore(
+        HostBinding binding,
+        EngineExecution execution,
+        DrainCoordinator drain,
+        EngineGenerationManager generations,
+        bool managed)
+    {
         // The authorization pairing is a startup fact, not a request-time surprise. A mount
         // that requires a token exists and the process trusts no issuer: refusing here
         // names the mount, and an operator debugs their deployment rather than a client
         // that can only ever see a 401.
-        StartupRefusal? unconfigured = AuthorizationRefusal.Find(mounts.Mounts, binding.Authorization);
+        StartupRefusal? unconfigured = AuthorizationRefusal.Find(
+            generations.Current?.Mounts.Mounts ?? [],
+            binding.Authorization);
 
         if (unconfigured is not null)
         {
+            generations.Dispose();
             throw new InvalidOperationException(
                 "refused " + unconfigured.Mount + ": " + unconfigured.Message);
         }
@@ -103,8 +172,30 @@ public static class EngineWebHost
 
         builder.WebHost.UseUrls(binding.Listener.Listen);
 
+        // Forwarded headers are honoured only from the addresses the operator named. Without
+        // this, a process behind a TLS-terminating proxy would observe http, and every
+        // protected-resource metadata document and audience comparison would name a scheme and
+        // authority no client used. Trusting nobody by default is what keeps a client from
+        // claiming the scheme for itself.
+        if (binding.TrustedProxies.Count > 0)
+        {
+            builder.Services.Configure<ForwardedHeadersOptions>(options =>
+            {
+                options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+
+                foreach (string proxy in binding.TrustedProxies)
+                {
+                    if (IPAddress.TryParse(proxy, out IPAddress? address))
+                    {
+                        options.KnownProxies.Add(address);
+                    }
+                }
+            });
+        }
+
         builder.Services.AddSingleton(execution);
         builder.Services.AddSingleton(drain);
+        builder.Services.AddSingleton(generations);
 
         McpRegistration.AddEngineMcp(builder.Services);
 
@@ -134,6 +225,29 @@ public static class EngineWebHost
 
         WebApplication app = builder.Build();
 
+        // The middleware must run before anything reads the request's scheme or client address.
+        // It is installed only when proxies were configured, mirroring the registration above.
+        if (binding.TrustedProxies.Count > 0)
+        {
+            app.UseForwardedHeaders();
+        }
+
+        // Spec 11 requires the MCP endpoint to validate the Origin header when it is present and
+        // reject an unexpected origin. Only a browser sends that header, so the decision is "may
+        // this browser origin call the MCP addresses"; a non-browser client that sends none is
+        // served normally. It runs before admission so a refused origin costs no work.
+        app.Use(async (context, next) =>
+        {
+            if (context.Request.Headers.Origin is { Count: > 0 } origins
+                && !IsOriginAllowed(context, origins, binding.AllowedOrigins))
+            {
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                return;
+            }
+
+            await next(context).ConfigureAwait(false);
+        });
+
         // Closing admission is distinct from closing the socket. During the drain window health
         // remains observable, while every new product request is refused immediately instead of
         // entering behind work that was already admitted.
@@ -154,10 +268,123 @@ public static class EngineWebHost
             app.UseMiddleware<MountAuthorizationMiddleware>();
         }
 
-        McpRegistration.MapMounts(app, mounts);
-        FileTransferEndpoints.Map(app, mounts);
+        if (managed)
+        {
+            // One template for every address, because an activation may introduce a mount the
+            // process has never seen. The template also matches the transfer children, which
+            // cannot be mapped separately under a catch-all, so they are recognised from the
+            // request path before the protocol handler would see them.
+            app.Use(async (context, next) =>
+            {
+                if (await FileTransferEndpoints.TryServeAsync(context).ConfigureAwait(false))
+                {
+                    return;
+                }
+
+                await next(context).ConfigureAwait(false);
+            });
+
+            // An address the active generation does not serve is refused here, before the protocol
+            // handler can configure a session from it. The template matches every path, so without
+            // this an activation that removed a surface would leave its address reachable and the
+            // protocol handler would answer from a generation that was never asked. The refusal is
+            // the same empty 404 an unmapped address produces in file mode, because an address that
+            // names nothing must disclose nothing in either mode.
+            app.Use(async (context, next) =>
+            {
+                if (context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>() is not { } route)
+                {
+                    await next(context).ConfigureAwait(false);
+                    return;
+                }
+
+                if (!AddressIsServed(context, route, generations))
+                {
+                    context.Response.StatusCode = StatusCodes.Status404NotFound;
+                    return;
+                }
+
+                await next(context).ConfigureAwait(false);
+            });
+
+            McpRegistration.MapManagedTemplate(app);
+        }
+        else
+        {
+            McpRegistration.MapMounts(app, generations.Current!.Mounts);
+            FileTransferEndpoints.Map(app, generations.Current!.Mounts);
+        }
+
         HealthEndpoints.Map(app, binding.Runtime.FileStoreRoot, drain);
 
         return app;
+    }
+
+    /// <summary>
+    /// Whether the active generation serves the address a request reached.
+    /// </summary>
+    /// <remarks>
+    /// Takes one lease for the decision and releases it immediately. The lease is what makes the
+    /// answer atomic with respect to an activation: the address is judged against exactly one
+    /// generation, so a request can never be admitted by the generation that is being replaced and
+    /// then answered by the one replacing it.
+    /// </remarks>
+    private static bool AddressIsServed(
+        HttpContext context,
+        SurfaceEndpoint route,
+        EngineGenerationManager generations)
+    {
+        if (generations.LeaseSource() is not { } lease)
+        {
+            return false;
+        }
+
+        using (lease)
+        {
+            return lease.Generation.TryResolve(Mcp.RequestAddress.Resolve(context, route), out SurfaceResolution? resolved)
+                && resolved is not null;
+        }
+    }
+
+    /// <summary>
+    /// Whether a presented browser origin may call the MCP address this request reached.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Applies only to a served MCP address: health and the protected-resource metadata are read
+    /// by tooling that is not a browser page, and refusing them on an origin would make a
+    /// browser-based client unable to discover the resource it is allowed to call.
+    /// </para>
+    /// <para>
+    /// The address is recognised from the endpoint's own metadata rather than from a hard-coded
+    /// path prefix. A deployment may mount a Manifest at any prefix, so "is this an MCP address"
+    /// is a property of the routing table, not of a string literal; in managed mode the same
+    /// catch-all template also matches non-MCP paths, which must keep being served. The
+    /// comparison is ordinal-ignore-case on the whole origin, with a trailing slash ignored
+    /// because a browser never sends one and an operator may write one.
+    /// </remarks>
+    private static bool IsOriginAllowed(
+        HttpContext context,
+        IReadOnlyList<string> presented,
+        IReadOnlyList<string> allowed)
+    {
+        if (context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>() is null
+            && !TransferPath.TryParse(context.Request.Path.Value, out _))
+        {
+            return true;
+        }
+
+        foreach (string origin in presented)
+        {
+            string candidate = origin.TrimEnd('/');
+
+            if (allowed.Any(configured =>
+                string.Equals(configured, candidate, StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

@@ -14,7 +14,15 @@ namespace MCPiler.Engine.Manifest.Loading;
 /// </remarks>
 public sealed class InMemoryManifestSource : IManifestSource
 {
-    private const string VirtualRoot = "/mcpiler-manifest-bundle";
+    /// <summary>
+    /// The synthetic bundle root an in-memory payload is addressed against.
+    /// </summary>
+    /// <remarks>
+    /// A POSIX-shaped absolute path so the path policy sees the same kind of root a directory
+    /// source has. Shared with archive extraction so a bundle cannot be acceptable on one
+    /// in-memory path and refused on another.
+    /// </remarks>
+    internal const string VirtualRoot = "/mcpiler-manifest-bundle";
 
     private readonly ReadOnlyMemory<byte> _root;
     private readonly Dictionary<string, ReadOnlyMemory<byte>> _sections;

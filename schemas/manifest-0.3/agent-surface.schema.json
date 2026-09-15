@@ -1,0 +1,262 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mcpiler:manifest:0.3:agent-surface",
+  "title": "MCPiler Manifest 0.3 agentSurface section",
+  "description": "The agent-facing operations. The slug is the manifest-local identity; Studio GUIDs live in provenance and are never required at runtime.",
+  "type": "object",
+  "required": ["operations"],
+  "additionalProperties": false,
+  "properties": {
+    "formatVersion": { "const": 3 },
+    "groups": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/group" }
+    },
+    "components": {
+      "description": "Local schema components for this section's schemas.",
+      "type": "object"
+    },
+    "operations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/operation" }
+    }
+  },
+  "$defs": {
+    "group": {
+      "type": "object",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "priority": { "type": "integer" }
+      }
+    },
+    "operation": {
+      "type": "object",
+      "required": ["slug", "name", "binding"],
+      "additionalProperties": false,
+      "properties": {
+        "slug": { "type": "string" },
+        "kind": {
+          "description": "Derived from the binding when absent; a declared kind that disagrees with the binding is refused.",
+          "enum": ["source-backed", "custom-http", "compound"]
+        },
+        "name": { "type": "string" },
+        "summary": { "type": "string" },
+        "description": { "type": "string" },
+        "groups": {
+          "description": "Group names. The join to the declared groups is by name, ordinal and case sensitive.",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "inputSchema": { "$ref": "urn:mcpiler:manifest:0.3:schema" },
+        "outputSchema": { "$ref": "urn:mcpiler:manifest:0.3:schema" },
+        "outputSchemaPolicy": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "generate": { "type": "boolean" },
+            "advertise": { "enum": ["auto", "yes", "no"] },
+            "useInternally": { "type": "boolean" }
+          }
+        },
+        "annotations": { "$ref": "#/$defs/annotations" },
+        "risk": {
+          "description": "Resolved risk. 'none' or an ordinal sorted comma separated list of classes.",
+          "type": "string"
+        },
+        "search": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "aliases": { "type": "array", "items": { "type": "string" } },
+            "keywords": { "type": "array", "items": { "type": "string" } },
+            "exampleIntents": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "binding": { "$ref": "#/$defs/binding" }
+      }
+    },
+    "annotations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "readOnly": { "type": "boolean" },
+        "destructive": { "type": "boolean" },
+        "idempotent": { "type": "boolean" },
+        "openWorld": { "type": "boolean" }
+      }
+    },
+    "binding": {
+      "oneOf": [
+        { "$ref": "#/$defs/httpBinding" },
+        { "$ref": "#/$defs/transformedBinding" },
+        { "$ref": "#/$defs/compoundBinding" }
+      ]
+    },
+    "httpBinding": {
+      "type": "object",
+      "required": ["type", "operation"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "http" },
+        "bindingId": { "type": "string" },
+        "operation": {
+          "description": "An operations-section key.",
+          "type": "string"
+        },
+        "serverUrl": {
+          "description": "Overrides policy.baseUrl for this operation and stays fully subject to policy.allowedOrigins.",
+          "type": ["string", "null"]
+        },
+        "credentialRef": { "$ref": "#/$defs/credentialRef" },
+        "authenticationRef": { "$ref": "#/$defs/authenticationRef" }
+      }
+    },
+    "credentialRef": {
+      "$comment": "Absent and empty are one representation. The default fails safe: an operation with no stated scope sends no credential rather than every declared one.",
+      "description": "The credentials-section ids that apply to this operation.",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "authenticationRef": {
+      "description": "The authentication-section profile id that governs how this operation's credential is obtained and applied. The id is declared by the authentication section, not by this one.",
+      "type": "string"
+    },
+    "transformedBinding": {
+      "type": "object",
+      "required": ["type", "base"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "transformedHttp" },
+        "bindingId": { "type": "string" },
+        "base": {
+          "type": "object",
+          "required": ["operation"],
+          "additionalProperties": false,
+          "$comment": "credentialRef and authenticationRef live on 'base', never on the wrapper: a transformation rewrites arguments and never changes which upstream identity executes or authenticates.",
+          "properties": {
+            "operation": { "type": "string" },
+            "serverUrl": { "type": ["string", "null"] },
+            "credentialRef": { "$ref": "#/$defs/credentialRef" },
+            "authenticationRef": { "$ref": "#/$defs/authenticationRef" }
+          }
+        },
+        "inputProgram": { "type": ["object", "null"] },
+        "outputProgram": { "type": ["object", "null"] }
+      }
+    },
+    "compoundBinding": {
+      "type": "object",
+      "required": ["type", "steps"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "compound" },
+        "bindingId": { "type": "string" },
+        "bindingVersion": { "const": 1 },
+        "failurePolicy": { "enum": ["failFast"] },
+        "maxTotalResponseBytes": { "type": ["integer", "null"], "minimum": 1 },
+        "workflowTimeoutSeconds": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/step" }
+        },
+        "outputSelection": {
+          "type": "object",
+          "required": ["entries"],
+          "additionalProperties": false,
+          "properties": {
+            "entries": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/outputEntry" }
+            },
+            "outputProgram": { "type": ["object", "null"] }
+          }
+        }
+      }
+    },
+    "step": {
+      "type": "object",
+      "required": ["stepId", "operation"],
+      "additionalProperties": false,
+      "properties": {
+        "stepId": { "type": "string" },
+        "operation": {
+          "description": "An agentSurface slug. Nesting a compound operation is refused.",
+          "type": "string"
+        },
+        "inputMappings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/stepInputMapping" }
+        },
+        "name": { "type": "string" },
+        "summary": { "type": "string" },
+        "inputProgram": { "type": ["object", "null"] }
+      }
+    },
+    "stepInputMapping": {
+      "description": "Writes into a request scope of the step's own operation. Exactly one source.",
+      "type": "object",
+      "required": ["target"],
+      "additionalProperties": false,
+      "properties": {
+        "target": {
+          "type": "string",
+          "pattern": "^/(path|query|headers|cookies|body|parts)(/|$)"
+        },
+        "argument": { "type": "string" },
+        "fromStep": { "type": "string" },
+        "response": { "$ref": "#/$defs/responsePointer" },
+        "constant": true
+      },
+      "oneOf": [
+        { "$ref": "#/$defs/fromArgument" },
+        { "$ref": "#/$defs/fromStepResponse" },
+        { "$ref": "#/$defs/fromConstant" }
+      ]
+    },
+    "outputEntry": {
+      "$comment": "Same members as a step input mapping, but the target addresses the workflow's own result document rather than a request, so it is deliberately unrestricted. Constraining it here would refuse every workflow that returns a plain object.",
+      "description": "Writes into the workflow result. Exactly one source.",
+      "type": "object",
+      "required": ["target"],
+      "additionalProperties": false,
+      "properties": {
+        "target": { "type": "string" },
+        "argument": { "type": "string" },
+        "fromStep": { "type": "string" },
+        "response": { "$ref": "#/$defs/responsePointer" },
+        "constant": true
+      },
+      "oneOf": [
+        { "$ref": "#/$defs/fromArgument" },
+        { "$ref": "#/$defs/fromStepResponse" },
+        { "$ref": "#/$defs/fromConstant" }
+      ]
+    },
+    "responsePointer": {
+      "type": "string",
+      "pattern": "^/(status|headers|body)(/|$)"
+    },
+    "fromArgument": {
+      "title": "from an invocation argument",
+      "required": ["argument"],
+      "not": { "anyOf": [{ "required": ["fromStep"] }, { "required": ["constant"] }] }
+    },
+    "fromStepResponse": {
+      "title": "from a prior step's response",
+      "required": ["fromStep", "response"],
+      "not": { "anyOf": [{ "required": ["argument"] }, { "required": ["constant"] }] }
+    },
+    "fromConstant": {
+      "title": "a constant",
+      "required": ["constant"],
+      "not": { "anyOf": [{ "required": ["argument"] }, { "required": ["fromStep"] }] }
+    }
+  }
+}

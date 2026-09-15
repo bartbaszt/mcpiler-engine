@@ -32,7 +32,7 @@ public sealed class TransformLoadTests : IDisposable
     /// <summary>A transformed binding wrapping a stated program document.</summary>
     private static string Manifest(string program) => """
         {
-          "manifestFormatVersion": "0.2",
+          "manifestFormatVersion": "0.3",
           "sections": {
             "server": {
               "inline": {

@@ -50,14 +50,28 @@ public static class SectionReader
     /// Whether a literal secret is permitted. Defaults to <see langword="false"/> so an
     /// inline secret is refused unless an operator opted in explicitly.
     /// </param>
+    /// <param name="allowProviderReferences">
+    /// Whether <c>fromProvider</c> references are permitted. Defaults to <see langword="false"/>
+    /// so file mode refuses them; managed mode opts in explicitly.
+    /// </param>
     public static CredentialsSection? ReadCredentials(
         JsonNode? document,
         ICollection<ManifestDiagnostic> diagnostics,
-        bool allowInlineSecrets = false)
+        bool allowInlineSecrets = false,
+        bool allowProviderReferences = false)
         => CredentialsSectionReader.Read(
             document,
             Context(ManifestSectionName.Credentials, diagnostics),
-            allowInlineSecrets);
+            allowInlineSecrets,
+            allowProviderReferences);
+
+    /// <summary>Reads the <c>authentication</c> section.</summary>
+    /// <param name="document">The section payload.</param>
+    /// <param name="diagnostics">Where findings are appended.</param>
+    public static AuthenticationSection? ReadAuthentication(
+        JsonNode? document,
+        ICollection<ManifestDiagnostic> diagnostics)
+        => AuthenticationSectionReader.Read(document, Context(ManifestSectionName.Authentication, diagnostics));
 
     /// <summary>Reads the <c>operations</c> section.</summary>
     /// <param name="document">The section payload.</param>

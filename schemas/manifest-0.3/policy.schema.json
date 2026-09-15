@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mcpiler:manifest:0.3:policy",
+  "title": "MCPiler Manifest 0.3 policy section",
+  "description": "The outbound perimeter and the evaluation bounds. Local Engine configuration may narrow any of these and may never widen one.",
+  "type": "object",
+  "required": ["baseUrl"],
+  "additionalProperties": false,
+  "properties": {
+    "formatVersion": { "const": 1 },
+    "baseUrl": {
+      "type": "string",
+      "pattern": "^https?://"
+    },
+    "allowedOrigins": {
+      "description": "Defaults to the origin of baseUrl. Each entry is scheme and authority only.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^https?://[^/?#]+/?$"
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "upstreamConnectTimeoutSeconds": { "$ref": "#/$defs/positiveNumber" },
+        "upstreamRequestTimeoutSeconds": { "$ref": "#/$defs/positiveNumber" },
+        "upstreamResponseSizeLimitBytes": { "$ref": "#/$defs/positiveInteger" },
+        "redirectHopLimit": { "type": "integer", "minimum": 0 },
+        "concurrency": { "$ref": "#/$defs/positiveInteger" },
+        "mcpRequestSizeLimitBytes": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "transformCeiling": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxSteps": { "$ref": "#/$defs/positiveInteger" },
+        "maxDepth": { "$ref": "#/$defs/positiveInteger" },
+        "maxNodes": { "$ref": "#/$defs/positiveInteger" },
+        "maxOutputBytes": { "$ref": "#/$defs/positiveInteger" },
+        "maxArrayFanout": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "compound": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxTotalResponseBytes": { "$ref": "#/$defs/positiveInteger" },
+        "workflowTimeoutSeconds": { "$ref": "#/$defs/positiveNumber" }
+      }
+    },
+    "schemaBounds": {
+      "description": "Bounds every schema reference resolution. A reference is an amplification primitive, so these are refusals rather than advice.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxDepth": { "$ref": "#/$defs/positiveInteger" },
+        "maxNodes": { "$ref": "#/$defs/positiveInteger" },
+        "maxPropertiesPerLevel": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "files": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "handleLifetimeSeconds": { "$ref": "#/$defs/positiveNumber" },
+        "uploadSizeLimitBytes": { "$ref": "#/$defs/positiveInteger" },
+        "rejectMagicMismatch": { "type": "boolean" }
+      }
+    }
+  },
+  "$defs": {
+    "positiveInteger": { "type": "integer", "minimum": 1 },
+    "positiveNumber": { "type": "number", "exclusiveMinimum": 0 }
+  }
+}

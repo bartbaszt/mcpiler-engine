@@ -94,9 +94,17 @@ public enum OutputSchemaAdvertisement
 
 /// <summary>The credential application scheme.</summary>
 /// <remarks>
-/// Closed to the values the credential applier actually switches on. Platform doc comments
-/// also mention <c>none</c>, but no branch matches it, so it would be a silent no-op rather
-/// than "no authentication"; it is deliberately not part of the vocabulary.
+/// <para>
+/// Closed to the values the credential applier actually switches on, plus the dynamic strategy
+/// schemes. Platform doc comments also mention <c>none</c>, but no branch matches it, so it
+/// would be a silent no-op rather than "no authentication"; it is deliberately not part of the
+/// vocabulary.
+/// </para>
+/// <para>
+/// The dynamic schemes are not applied to a request directly. They name the role a secret plays
+/// in an authentication profile's acquisition or signing step, and they mirror the durable
+/// Platform credential scheme ids exactly so a stored slot crosses the boundary unchanged.
+/// </para>
 /// </remarks>
 public enum CredentialScheme
 {
@@ -111,6 +119,21 @@ public enum CredentialScheme
 
     /// <summary>A verbatim header whose name is the slot.</summary>
     Header,
+
+    /// <summary>The OAuth 2.0 client-credentials client secret.</summary>
+    OAuth2ClientCredentials,
+
+    /// <summary>The OAuth 2.0 authorization-code client secret or refresh token.</summary>
+    OAuth2AuthorizationCode,
+
+    /// <summary>A declarative token/session exchange input secret.</summary>
+    TokenSessionExchange,
+
+    /// <summary>A challenge-token/session negotiation input secret.</summary>
+    ChallengeSession,
+
+    /// <summary>A reviewed request signer's signing secret.</summary>
+    RequestSigning,
 }
 
 /// <summary>Where an API key is placed. Applies to <see cref="CredentialScheme.ApiKey"/>.</summary>
@@ -131,6 +154,47 @@ public enum CompoundFailurePolicy
 {
     /// <summary>Abort the workflow at the first failing step. The only policy in v1.</summary>
     FailFast,
+}
+
+/// <summary>
+/// The closed set of generic dynamic authentication strategies.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The kinds mirror the accepted spec-59 runtime exactly and carry no product or preset
+/// identity: two presets that materialize the same strategy produce the same kind and
+/// configuration, and Engine selects behavior only from these.
+/// </para>
+/// <para>
+/// <see cref="ReviewedComposite"/> is part of the closed vocabulary but is deliberately not
+/// executable. It is the reserved codec member the authoring side already has, retained so a
+/// manifest round-trips a stored value rather than silently changing it; Engine refuses it
+/// with <c>authentication/configuration-invalid</c> at load rather than inventing composite
+/// semantics that no accepted artifact defines.
+/// </para>
+/// </remarks>
+public enum AuthenticationKind
+{
+    /// <summary>Static credential application, the pre-0.3 behavior.</summary>
+    Static,
+
+    /// <summary>OAuth 2.0 client-credentials token acquisition.</summary>
+    OAuth2ClientCredentials,
+
+    /// <summary>OAuth 2.0 authorization-code with PKCE S256 and refresh-token renewal.</summary>
+    OAuth2AuthorizationCodePkceRefresh,
+
+    /// <summary>Bounded declarative HTTP token/session exchange.</summary>
+    TokenSessionExchange,
+
+    /// <summary>Bounded challenge-token/session negotiation.</summary>
+    ChallengeSession,
+
+    /// <summary>Request signing through the closed reviewed signer registry.</summary>
+    RequestSigning,
+
+    /// <summary>Reserved for reviewed composites. Part of the vocabulary, not executable.</summary>
+    ReviewedComposite,
 }
 
 /// <summary>
@@ -198,6 +262,11 @@ public static class Vocabulary
         (CredentialScheme.Bearer, "bearer"),
         (CredentialScheme.ApiKey, "apiKey"),
         (CredentialScheme.Header, "header"),
+        (CredentialScheme.OAuth2ClientCredentials, "oauth2-client-credentials"),
+        (CredentialScheme.OAuth2AuthorizationCode, "oauth2-authorization-code"),
+        (CredentialScheme.TokenSessionExchange, "token-session-exchange"),
+        (CredentialScheme.ChallengeSession, "challenge-session"),
+        (CredentialScheme.RequestSigning, "request-signing"),
     ];
 
     private static readonly (CredentialLocation Value, string Wire)[] CredentialLocations =
@@ -210,6 +279,17 @@ public static class Vocabulary
     private static readonly (CompoundFailurePolicy Value, string Wire)[] FailurePolicies =
     [
         (CompoundFailurePolicy.FailFast, "failFast"),
+    ];
+
+    private static readonly (AuthenticationKind Value, string Wire)[] AuthenticationKinds =
+    [
+        (AuthenticationKind.Static, "static"),
+        (AuthenticationKind.OAuth2ClientCredentials, "oauth2-client-credentials"),
+        (AuthenticationKind.OAuth2AuthorizationCodePkceRefresh, "oauth2-authorization-code-pkce-refresh"),
+        (AuthenticationKind.TokenSessionExchange, "token-session-exchange"),
+        (AuthenticationKind.ChallengeSession, "challenge-session"),
+        (AuthenticationKind.RequestSigning, "request-signing"),
+        (AuthenticationKind.ReviewedComposite, "reviewed-composite"),
     ];
 
     /// <summary>Every accepted <see cref="OperationExposure"/> spelling, for diagnostics.</summary>
@@ -235,6 +315,9 @@ public static class Vocabulary
 
     /// <summary>Every accepted <see cref="CompoundFailurePolicy"/> spelling, for diagnostics.</summary>
     public static IReadOnlyList<string> FailurePolicyNames { get; } = Names(FailurePolicies);
+
+    /// <summary>Every accepted <see cref="AuthenticationKind"/> spelling, for diagnostics.</summary>
+    public static IReadOnlyList<string> AuthenticationKindNames { get; } = Names(AuthenticationKinds);
 
     /// <summary>Reads an <see cref="OperationExposure"/>.</summary>
     public static bool TryReadExposure(string? wire, out OperationExposure value)
@@ -291,6 +374,13 @@ public static class Vocabulary
 
     /// <summary>Writes a <see cref="CompoundFailurePolicy"/>.</summary>
     public static string Write(CompoundFailurePolicy value) => Write(FailurePolicies, value);
+
+    /// <summary>Reads an <see cref="AuthenticationKind"/>.</summary>
+    public static bool TryReadAuthenticationKind(string? wire, out AuthenticationKind value)
+        => TryRead(AuthenticationKinds, wire, out value);
+
+    /// <summary>Writes an <see cref="AuthenticationKind"/>.</summary>
+    public static string Write(AuthenticationKind value) => Write(AuthenticationKinds, value);
 
     /// <summary>
     /// The parameter style applied when a parameter declares none.

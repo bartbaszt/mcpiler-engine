@@ -30,7 +30,7 @@ RUN case "$TARGETARCH" in \
         --no-restore \
         -o /out \
         -p:UseAppHost=false \
-    && mkdir -p /volume
+    && mkdir -p /volume/files /volume/runtime-state
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-noble-chiseled-extra AS runtime
 

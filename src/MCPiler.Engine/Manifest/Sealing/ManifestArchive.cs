@@ -37,6 +37,21 @@ public sealed record ManifestArchiveResult(
         => [.. Diagnostics.Where(diagnostic => diagnostic.IsError)];
 }
 
+/// <summary>The outcome of an in-memory extraction.</summary>
+/// <param name="Entries">The payloads extracted, keyed by their archive-relative name.</param>
+/// <param name="Diagnostics">Everything the operation found.</param>
+public sealed record ManifestArchiveExtraction(
+    IReadOnlyDictionary<string, ReadOnlyMemory<byte>> Entries,
+    IReadOnlyList<ManifestDiagnostic> Diagnostics)
+{
+    /// <summary>True when the operation completed without a refusal.</summary>
+    public bool Succeeded => !Diagnostics.Any(diagnostic => diagnostic.IsError);
+
+    /// <summary>The refusals.</summary>
+    public IReadOnlyList<ManifestDiagnostic> Errors
+        => [.. Diagnostics.Where(diagnostic => diagnostic.IsError)];
+}
+
 /// <summary>
 /// The deterministic transport wrapper around a manifest bundle directory.
 /// </summary>
@@ -283,6 +298,110 @@ public static class ManifestArchive
         }
 
         return new ManifestArchiveResult(extracted, diagnostics);
+    }
+
+    /// <summary>
+    /// Extracts an archive into memory without touching the filesystem.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Managed generations arrive as archive bytes rather than as a directory, and a running
+    /// process has no reason to write a candidate it may refuse. The entry rules are the same
+    /// ones <see cref="Unpack"/> applies — allowed types, path policy, entry and byte bounds —
+    /// so a bundle cannot be more acceptable because it arrived over the wire than because it
+    /// was read from a disk.
+    /// </para>
+    /// <para>
+    /// Directory entries are recorded but carry no payload: the manifest source addresses
+    /// section paths, not directory listings, and a directory entry with content would be a
+    /// malformed archive the tar reader already refuses.
+    /// </para>
+    /// </remarks>
+    public static ManifestArchiveExtraction Extract(
+        Stream source,
+        ManifestArchiveOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+
+        var effective = options ?? ManifestArchiveOptions.Default;
+        var diagnostics = new List<ManifestDiagnostic>();
+        var entries = new Dictionary<string, ReadOnlyMemory<byte>>(StringComparer.Ordinal);
+        var names = new List<string>();
+        var totalBytes = 0L;
+
+        try
+        {
+            using var reader = new TarReader(source, leaveOpen: true);
+
+            while (reader.GetNextEntry(copyData: false) is { } entry)
+            {
+                if (entry.EntryType is not (TarEntryType.RegularFile or TarEntryType.V7RegularFile
+                    or TarEntryType.Directory))
+                {
+                    diagnostics.Add(ManifestDiagnostic.Error(
+                        ManifestDiagnosticCodes.ArchiveEntryTypeUnsupported,
+                        $"Entry '{DiagnosticText.Echo(entry.Name)}' is a {entry.EntryType}; only regular files and directories are permitted."));
+                    return new ManifestArchiveExtraction(entries, diagnostics);
+                }
+
+                // The same rule the on-disk unpack applies, using the same virtual root the
+                // in-memory manifest source uses. A path that escapes one bundle root escapes
+                // them all, so the check does not depend on which root it is resolved against.
+                var verdict = ManifestPathPolicy.Resolve(entry.Name, InMemoryManifestSource.VirtualRoot, out _);
+
+                if (verdict != ManifestPathVerdict.Accepted)
+                {
+                    diagnostics.Add(ManifestDiagnostic.Error(
+                        ManifestDiagnosticCodes.ArchiveEntryPathUnsafe,
+                        $"Entry '{DiagnosticText.Echo(entry.Name)}' was refused: {ManifestPathPolicy.Explain(verdict)}."));
+                    return new ManifestArchiveExtraction(entries, diagnostics);
+                }
+
+                totalBytes += Math.Max(entry.Length, 0);
+
+                if (!WithinBounds(names.Count + 1, totalBytes, effective, diagnostics))
+                {
+                    return new ManifestArchiveExtraction(entries, diagnostics);
+                }
+
+                names.Add(entry.Name);
+
+                if (entry.EntryType == TarEntryType.Directory || entry.DataStream is null)
+                {
+                    continue;
+                }
+
+                using var buffer = new MemoryStream(capacity: (int)Math.Clamp(entry.Length, 0, int.MaxValue));
+
+                try
+                {
+                    entry.DataStream.CopyTo(buffer);
+                }
+                catch (InvalidDataException exception)
+                {
+                    diagnostics.Add(ManifestDiagnostic.Error(
+                        ManifestDiagnosticCodes.ArchiveUnreadable,
+                        $"The archive could not be read: {exception.Message}"));
+                    return new ManifestArchiveExtraction(entries, diagnostics);
+                }
+
+                entries[entry.Name] = buffer.ToArray();
+            }
+        }
+        catch (InvalidDataException exception)
+        {
+            diagnostics.Add(ManifestDiagnostic.Error(
+                ManifestDiagnosticCodes.ArchiveUnreadable,
+                $"The archive could not be read: {exception.Message}"));
+        }
+        catch (EndOfStreamException exception)
+        {
+            diagnostics.Add(ManifestDiagnostic.Error(
+                ManifestDiagnosticCodes.ArchiveUnreadable,
+                $"The archive ended unexpectedly: {exception.Message}"));
+        }
+
+        return new ManifestArchiveExtraction(entries, diagnostics);
     }
 
     private static bool TryReadRoot(

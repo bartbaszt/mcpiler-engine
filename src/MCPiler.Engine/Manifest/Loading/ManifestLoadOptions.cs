@@ -59,6 +59,18 @@ public sealed record ManifestLoadOptions
     /// </remarks>
     public bool AllowInlineSecrets { get; init; }
 
+    /// <summary>
+    /// Permit <c>fromProvider</c> credential references, which are resolvable only from a
+    /// managed generation's in-memory secret set.
+    /// </summary>
+    /// <remarks>
+    /// Off by default because file mode has no provider secret set: a <c>fromProvider</c>
+    /// reference there would be a mount set that can never execute, so it is refused at load.
+    /// Managed mode turns this on because its generation envelope is the only place the
+    /// corresponding values can come from.
+    /// </remarks>
+    public bool AllowProviderReferences { get; init; }
+
     /// <summary>Maximum accepted root document size in bytes.</summary>
     public long MaxRootBytes { get; init; } = DefaultMaxRootBytes;
 

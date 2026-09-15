@@ -17,7 +17,7 @@ internal static class ServedManifests
     /// <summary>One surface, one operation, one declared input schema.</summary>
     public const string OneSurface = """
         {
-          "manifestFormatVersion": "0.2",
+          "manifestFormatVersion": "0.3",
           "sections": {
             "server": {
               "inline": {
@@ -68,7 +68,7 @@ internal static class ServedManifests
     /// <summary>Three surfaces over one operation set, the middle one default.</summary>
     public const string ThreeSurfaces = """
         {
-          "manifestFormatVersion": "0.2",
+          "manifestFormatVersion": "0.3",
           "sections": {
             "server": {
               "inline": {
@@ -123,7 +123,7 @@ internal static class ServedManifests
     /// </remarks>
     public const string NavigatorOnly = """
         {
-          "manifestFormatVersion": "0.2",
+          "manifestFormatVersion": "0.3",
           "sections": {
             "server": {
               "inline": {
@@ -172,7 +172,7 @@ internal static class ServedManifests
     /// </remarks>
     public const string Identified = """
         {
-          "manifestFormatVersion": "0.2",
+          "manifestFormatVersion": "0.3",
           "sections": {
             "server": {
               "inline": {
@@ -203,7 +203,7 @@ internal static class ServedManifests
     /// <summary>A second server whose one tool name collides with the first's.</summary>
     public const string CollidingNames = """
         {
-          "manifestFormatVersion": "0.2",
+          "manifestFormatVersion": "0.3",
           "sections": {
             "server": {
               "inline": {
@@ -237,7 +237,7 @@ internal static class ServedManifests
     /// <summary>Two surfaces and no default, which no address could resolve.</summary>
     public const string NoDefaultSurface = """
         {
-          "manifestFormatVersion": "0.2",
+          "manifestFormatVersion": "0.3",
           "sections": {
             "server": {
               "inline": {
@@ -266,7 +266,7 @@ internal static class ServedManifests
     /// <summary>Two surfaces both claiming the bare mount address.</summary>
     public const string TwoDefaultSurfaces = """
         {
-          "manifestFormatVersion": "0.2",
+          "manifestFormatVersion": "0.3",
           "sections": {
             "server": {
               "inline": {
@@ -327,7 +327,7 @@ internal static class ServedManifests
 
     private const string UpstreamTemplate = """
             {
-              "manifestFormatVersion": "0.2",
+              "manifestFormatVersion": "0.3",
               "sections": {
                 "server": {
                   "inline": {

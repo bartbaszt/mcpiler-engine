@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mcpiler:manifest:0.3:server",
+  "title": "MCPiler Manifest 0.3 server section",
+  "description": "Routing identity plus the surfaces. A surface's operation list is the single runtime exposure authority.",
+  "type": "object",
+  "required": ["name"],
+  "additionalProperties": false,
+  "properties": {
+    "formatVersion": { "const": 1 },
+    "name": { "type": "string" },
+    "description": { "type": "string" },
+    "version": { "type": "string" },
+    "surfaces": {
+      "description": "Omit entirely to have one default surface synthesised over every declared agent operation.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/surface" },
+      "contains": {
+        "type": "object",
+        "required": ["isDefault"],
+        "properties": { "isDefault": { "const": true } }
+      },
+      "minContains": 1,
+      "maxContains": 1
+    }
+  },
+  "$defs": {
+    "surface": {
+      "type": "object",
+      "required": ["slug"],
+      "additionalProperties": false,
+      "properties": {
+        "slug": { "type": "string" },
+        "name": { "type": "string" },
+        "isDefault": { "type": "boolean" },
+        "enabled": { "type": "boolean" },
+        "requiredScopes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "navigator": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "pageSize": {
+              "$comment": "No upper bound here. 100 is the maximum a Navigator discover call may request, which is a tool input rule, not a manifest rule.",
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "outputSchemas": { "type": "boolean" },
+        "operations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/surfaceOperation" }
+        }
+      }
+    },
+    "surfaceOperation": {
+      "description": "Membership of this list is the grant. An omitted exposure means 'direct'; 'hidden' must be spelled out.",
+      "type": "object",
+      "required": ["operation"],
+      "additionalProperties": false,
+      "properties": {
+        "operation": { "type": "string" },
+        "exposure": { "enum": ["direct", "navigator", "hidden"] }
+      }
+    }
+  }
+}

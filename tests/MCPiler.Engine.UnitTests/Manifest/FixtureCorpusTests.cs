@@ -65,6 +65,11 @@ public sealed class FixtureCorpusTests
         {
             "compiled", "compound", "credentials", "files", "minimal", "multi-surface", "refs", "sealed-bundle",
             "search", "transformed", "two-origins",
+            "manifest-0.3/challenge-session", "manifest-0.3/exchange", "manifest-0.3/managed-provider",
+            "manifest-0.3/oauth-authorization-code", "manifest-0.3/oauth-client-credentials",
+            "manifest-0.3/request-signing-aws-sigv4", "manifest-0.3/request-signing-hmac",
+            "manifest-0.3/request-signing-jwt-hmac", "manifest-0.3/request-signing-subsonic-md5",
+            "manifest-0.3/static",
         };
 
         Assert.Equal(expected, ValidFixtureNames());
@@ -376,7 +381,8 @@ public sealed class FixtureCorpusTests
 
         var expected = new[]
         {
-            "manifest", "schema", "operations", "agent", "binding", "surface", "policy", "credential",
+            "manifest", "schema", "operations", "agent", "binding", "surface", "policy",
+            "credential", "authentication",
         };
 
         Assert.All(expected, group => Assert.Contains(group, covered));
@@ -481,7 +487,7 @@ public sealed class FixtureCorpusTests
 
         return """
             {
-              "manifestFormatVersion": "0.2",
+              "manifestFormatVersion": "0.3",
               "sections": {
                 "server": { "inline": { "name": "Bomb" } },
                 "policy": { "inline": { "baseUrl": "https://api.example.com", "schemaBounds": __BOUNDS__ } },
@@ -514,7 +520,9 @@ public sealed class FixtureCorpusTests
     private static IReadOnlyList<string> ValidFixtureNames() => ManifestCorpus.BundleNames();
 
     private static ManifestReadResult ReadFixture(string fixture, ManifestLoadOptions? options = null) =>
-        ManifestReader.Read(new DirectoryManifestSource(Path.Combine(CorpusRoot, fixture)), options);
+        ManifestReader.Read(
+            new DirectoryManifestSource(Path.Combine(CorpusRoot, fixture)),
+            options ?? ManifestCorpus.OptionsFor(fixture));
 
     private static string ReadExpectation(string path)
     {

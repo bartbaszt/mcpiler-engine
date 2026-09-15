@@ -43,9 +43,25 @@ internal sealed class MountSet
                 + "reached here has already ignored a refusal.");
         }
 
+        return From(started.Mounts);
+    }
+
+    /// <summary>
+    /// Builds the immutable host topology from an already-loaded mount set.
+    /// </summary>
+    /// <remarks>
+    /// A managed generation arrives as loaded mounts rather than as a started runtime, because the
+    /// loader that produced them is on the library side of the seam. Deriving addresses from the
+    /// mounts themselves keeps one topology rule for both modes: a managed activation cannot map
+    /// an address the file-mode host would not have mapped for the same Manifests.
+    /// </remarks>
+    public static MountSet From(IReadOnlyList<MountedManifest> mounts)
+    {
+        ArgumentNullException.ThrowIfNull(mounts);
+
         List<MountedSurfaceAddress> addresses = [];
 
-        foreach (MountedManifest mount in started.Mounts)
+        foreach (MountedManifest mount in mounts)
         {
             foreach (MountedSurface surface in mount.Surfaces)
             {
@@ -61,7 +77,7 @@ internal sealed class MountSet
             }
         }
 
-        return new MountSet(started.Mounts, addresses);
+        return new MountSet(mounts, addresses);
     }
 }
 

@@ -519,7 +519,7 @@ public sealed class AuthorizationTests : IDisposable
 
         return $$"""
             {
-              "manifestFormatVersion": "0.2",
+              "manifestFormatVersion": "0.3",
               "sections": {
                 "server": {
                   "inline": {

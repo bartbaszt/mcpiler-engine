@@ -13,7 +13,7 @@ public sealed class ManifestLoaderTests
 {
     private const string MinimalRoot = """
         {
-          "manifestFormatVersion": "0.2",
+          "manifestFormatVersion": "0.3",
           "sections": {
             "server":       { "inline": { "name": "Example API" } },
             "policy":       { "inline": { "baseUrl": "https://api.example.com" } },
@@ -33,7 +33,7 @@ public sealed class ManifestLoaderTests
         AssertNoErrors(result);
         Assert.True(result.Succeeded);
         Assert.NotNull(result.Root);
-        Assert.Equal(new ManifestFormatVersion(0, 2), result.Root!.FormatVersion);
+        Assert.Equal(new ManifestFormatVersion(0, 3), result.Root!.FormatVersion);
         Assert.Equal(4, result.Sections.Count);
 
         var server = result.Section(ManifestSectionName.Server);
@@ -131,7 +131,7 @@ public sealed class ManifestLoaderTests
     public void An_unknown_root_member_is_refused()
     {
         var result = Load("""
-            { "manifestFormatVersion": "0.2", "sections": {}, "polcy": { "baseUrl": "x" } }
+            { "manifestFormatVersion": "0.3", "sections": {}, "polcy": { "baseUrl": "x" } }
             """);
 
         var error = Assert.Single(result.Errors, e => e.Code == ManifestDiagnosticCodes.UnknownMember);
@@ -144,7 +144,7 @@ public sealed class ManifestLoaderTests
     public void An_unknown_section_name_is_refused_and_lists_the_known_names()
     {
         var result = Load("""
-            { "manifestFormatVersion": "0.2", "sections": { "polcy": { "inline": {} } } }
+            { "manifestFormatVersion": "0.3", "sections": { "polcy": { "inline": {} } } }
             """);
 
         var error = Assert.Single(result.Errors, e => e.Code == ManifestDiagnosticCodes.SectionUnknown);
@@ -157,7 +157,7 @@ public sealed class ManifestLoaderTests
     public void A_section_name_is_matched_case_sensitively()
     {
         var result = Load("""
-            { "manifestFormatVersion": "0.2", "sections": { "agentsurface": { "inline": {} } } }
+            { "manifestFormatVersion": "0.3", "sections": { "agentsurface": { "inline": {} } } }
             """);
 
         Assert.Contains(result.Errors, e => e.Code == ManifestDiagnosticCodes.SectionUnknown);
@@ -167,7 +167,7 @@ public sealed class ManifestLoaderTests
     public void A_section_declaring_both_inline_and_path_is_refused()
     {
         var result = Load("""
-            { "manifestFormatVersion": "0.2",
+            { "manifestFormatVersion": "0.3",
               "sections": { "policy": { "inline": {}, "path": "sections/policy.json" } } }
             """);
 
@@ -180,7 +180,7 @@ public sealed class ManifestLoaderTests
     public void A_section_declaring_neither_inline_nor_path_is_refused()
     {
         var result = Load("""
-            { "manifestFormatVersion": "0.2", "sections": { "policy": { "sha256": "abc" } } }
+            { "manifestFormatVersion": "0.3", "sections": { "policy": { "sha256": "abc" } } }
             """);
 
         Assert.Contains(
@@ -192,7 +192,7 @@ public sealed class ManifestLoaderTests
     public void A_section_that_is_not_an_object_is_refused()
     {
         var result = Load("""
-            { "manifestFormatVersion": "0.2", "sections": { "policy": "sections/policy.json" } }
+            { "manifestFormatVersion": "0.3", "sections": { "policy": "sections/policy.json" } }
             """);
 
         Assert.Equal(
@@ -204,7 +204,7 @@ public sealed class ManifestLoaderTests
     public void The_binary_vector_section_may_not_be_declared_inline()
     {
         var result = Load("""
-            { "manifestFormatVersion": "0.2", "sections": { "vectors": { "inline": "AAAA" } } }
+            { "manifestFormatVersion": "0.3", "sections": { "vectors": { "inline": "AAAA" } } }
             """);
 
         Assert.Equal(
@@ -220,7 +220,7 @@ public sealed class ManifestLoaderTests
         var value = member == "bytes" ? "12" : "\"abc\"";
 
         var result = Load($$"""
-            { "manifestFormatVersion": "0.2",
+            { "manifestFormatVersion": "0.3",
               "sections": { "policy": { "inline": {}, "{{member}}": {{value}} } } }
             """);
 
@@ -235,7 +235,7 @@ public sealed class ManifestLoaderTests
     public void An_unknown_section_entry_member_is_refused()
     {
         var result = Load("""
-            { "manifestFormatVersion": "0.2",
+            { "manifestFormatVersion": "0.3",
               "sections": { "policy": { "inline": {}, "sha512": "abc" } } }
             """);
 
@@ -249,7 +249,7 @@ public sealed class ManifestLoaderTests
     {
         var result = LoadBundle(
             """
-            { "manifestFormatVersion": "0.2",
+            { "manifestFormatVersion": "0.3",
               "sections": { "vectors": { "path": "sections/vectors.bin",
                                          "model": "text-embedding-3-small", "dimension": 1536 } } }
             """,
@@ -278,7 +278,7 @@ public sealed class ManifestLoaderTests
     {
         var result = LoadBundle(
             """
-            { "manifestFormatVersion": "0.2",
+            { "manifestFormatVersion": "0.3",
               "sections": { "vectors": { "path": "v.bin", "dimension": 0 } } }
             """,
             new Dictionary<string, ReadOnlyMemory<byte>>(StringComparer.Ordinal) { ["v.bin"] = new byte[] { 1 } });
@@ -296,7 +296,7 @@ public sealed class ManifestLoaderTests
 
         var result = LoadBundle(
             $$"""
-            { "manifestFormatVersion": "0.2",
+            { "manifestFormatVersion": "0.3",
               "sections": { "policy": { "path": "sections/policy.json",
                                         "sha256": "{{digest}}", "bytes": {{bytes.Length}} } } }
             """,
@@ -320,7 +320,7 @@ public sealed class ManifestLoaderTests
     {
         var result = LoadBundle(
             """
-            { "manifestFormatVersion": "0.2", "sections": { "policy": { "path": "p.json" } } }
+            { "manifestFormatVersion": "0.3", "sections": { "policy": { "path": "p.json" } } }
             """,
             Text("p.json", """{ "baseUrl": "https://api.example.com" }"""));
 
@@ -333,7 +333,7 @@ public sealed class ManifestLoaderTests
     {
         var result = LoadBundle(
             """
-            { "manifestFormatVersion": "0.2",
+            { "manifestFormatVersion": "0.3",
               "sections": { "policy": { "path": "p.json", "sha256": "00" } } }
             """,
             Text("p.json", """{ "baseUrl": "https://api.example.com" }"""));
@@ -350,7 +350,7 @@ public sealed class ManifestLoaderTests
     {
         var result = LoadBundle(
             """
-            { "manifestFormatVersion": "0.2",
+            { "manifestFormatVersion": "0.3",
               "sections": { "policy": { "path": "p.json", "sha256": "00", "bytes": 999 } } }
             """,
             Text("p.json", """{ "baseUrl": "https://api.example.com" }"""));
@@ -365,7 +365,7 @@ public sealed class ManifestLoaderTests
     {
         var result = LoadBundle(
             """
-            { "manifestFormatVersion": "0.2",
+            { "manifestFormatVersion": "0.3",
               "sections": { "policy": { "path": "p.json", "bytes": "many" } } }
             """,
             Text("p.json", "{}"));
@@ -378,7 +378,7 @@ public sealed class ManifestLoaderTests
     {
         var result = LoadBundle(
             """
-            { "manifestFormatVersion": "0.2", "sections": { "policy": { "path": "absent.json" } } }
+            { "manifestFormatVersion": "0.3", "sections": { "policy": { "path": "absent.json" } } }
             """,
             new Dictionary<string, ReadOnlyMemory<byte>>(StringComparer.Ordinal));
 
@@ -397,7 +397,7 @@ public sealed class ManifestLoaderTests
     {
         var result = LoadBundle(
             $$"""
-            { "manifestFormatVersion": "0.2", "sections": { "policy": { "path": "{{declared.Replace("\\", "\\\\", StringComparison.Ordinal)}}" } } }
+            { "manifestFormatVersion": "0.3", "sections": { "policy": { "path": "{{declared.Replace("\\", "\\\\", StringComparison.Ordinal)}}" } } }
             """,
             new Dictionary<string, ReadOnlyMemory<byte>>(StringComparer.Ordinal));
 
@@ -412,7 +412,7 @@ public sealed class ManifestLoaderTests
     {
         var result = LoadBundle(
             """
-            { "manifestFormatVersion": "0.2", "sections": { "policy": { "path": "p.json" } } }
+            { "manifestFormatVersion": "0.3", "sections": { "policy": { "path": "p.json" } } }
             """,
             Text("p.json", "{ broken"));
 
@@ -429,7 +429,7 @@ public sealed class ManifestLoaderTests
 
         var result = LoadBundle(
             """
-            { "manifestFormatVersion": "0.2", "sections": { "policy": { "path": "p.json" } } }
+            { "manifestFormatVersion": "0.3", "sections": { "policy": { "path": "p.json" } } }
             """,
             new Dictionary<string, ReadOnlyMemory<byte>>(StringComparer.Ordinal) { ["p.json"] = payload },
             new ManifestLoadOptions { MaxSectionBytes = 64 });
@@ -496,7 +496,7 @@ public sealed class ManifestLoaderTests
         {
             ["sections"] = ReorderedSections(),
             ["completeness"] = new JsonObject { ["algorithm"] = "sha256", ["value"] = seal },
-            ["manifestFormatVersion"] = "0.2",
+            ["manifestFormatVersion"] = "0.3",
         };
 
         AssertNoErrors(Load(reordered.ToJsonString()));
@@ -522,7 +522,7 @@ public sealed class ManifestLoaderTests
     public void An_unknown_completeness_algorithm_is_refused(string algorithm)
     {
         var result = Load($$"""
-            { "manifestFormatVersion": "0.2", "sections": {},
+            { "manifestFormatVersion": "0.3", "sections": {},
               "completeness": { "algorithm": "{{algorithm}}", "value": "00" } }
             """);
 
@@ -535,7 +535,7 @@ public sealed class ManifestLoaderTests
     public void A_completeness_seal_without_a_value_is_refused()
     {
         var result = Load("""
-            { "manifestFormatVersion": "0.2", "sections": {},
+            { "manifestFormatVersion": "0.3", "sections": {},
               "completeness": { "algorithm": "sha256" } }
             """);
 
@@ -546,7 +546,7 @@ public sealed class ManifestLoaderTests
     public void Provenance_is_carried_opaquely_and_never_inspected()
     {
         var result = Load("""
-            { "manifestFormatVersion": "0.2",
+            { "manifestFormatVersion": "0.3",
               "sections": { "policy": { "inline": { "baseUrl": "https://api.example.com" } } },
               "provenance": { "connectorId": "abc", "anythingAtAll": [ 1, { "deep": true } ],
                               "polcy": "a member name that would be refused anywhere else" } }
@@ -561,7 +561,7 @@ public sealed class ManifestLoaderTests
     public void Provenance_must_still_be_an_object()
     {
         var result = Load("""
-            { "manifestFormatVersion": "0.2", "sections": {}, "provenance": [ 1 ] }
+            { "manifestFormatVersion": "0.3", "sections": {}, "provenance": [ 1 ] }
             """);
 
         Assert.Contains(result.Errors, e => e.Code == ManifestDiagnosticCodes.UnknownMember);
@@ -571,7 +571,7 @@ public sealed class ManifestLoaderTests
     public void Generator_information_is_read_for_diagnostics()
     {
         var result = Load("""
-            { "manifestFormatVersion": "0.2", "sections": {},
+            { "manifestFormatVersion": "0.3", "sections": {},
               "generator": { "name": "mcpiler-studio", "version": "0.6.0",
                              "producedAtUtc": "2026-09-07T10:00:00Z" } }
             """);
@@ -586,7 +586,7 @@ public sealed class ManifestLoaderTests
     public void A_malformed_generator_timestamp_only_warns_because_it_is_diagnostic_only()
     {
         var result = Load("""
-            { "manifestFormatVersion": "0.2", "sections": {},
+            { "manifestFormatVersion": "0.3", "sections": {},
               "generator": { "producedAtUtc": "yesterday" } }
             """);
 
@@ -599,7 +599,7 @@ public sealed class ManifestLoaderTests
     public void An_unknown_generator_member_is_refused()
     {
         var result = Load("""
-            { "manifestFormatVersion": "0.2", "sections": {},
+            { "manifestFormatVersion": "0.3", "sections": {},
               "generator": { "buildHost": "ci-01" } }
             """);
 
@@ -611,7 +611,7 @@ public sealed class ManifestLoaderTests
     [Fact]
     public void A_missing_sections_index_is_refused()
     {
-        var result = Load("""{ "manifestFormatVersion": "0.2" }""");
+        var result = Load("""{ "manifestFormatVersion": "0.3" }""");
 
         Assert.Equal(ManifestDiagnosticCodes.SectionMissing, Assert.Single(result.Errors).Code);
     }
@@ -622,7 +622,7 @@ public sealed class ManifestLoaderTests
         // The loader is also the authoring tool for hand-written manifests, so stopping at
         // the first error would make fixing a manifest an iterative guessing game.
         var result = Load("""
-            { "manifestFormatVersion": "0.2",
+            { "manifestFormatVersion": "0.3",
               "unknownOne": 1,
               "unknownTwo": 2,
               "sections": { "polcy": { "inline": {} }, "srvr": { "inline": {} } } }
@@ -639,11 +639,11 @@ public sealed class ManifestLoaderTests
         {
             Load("[ ]"),
             Load("{ broken"),
-            Load("""{ "manifestFormatVersion": "0.2" }"""),
+            Load("""{ "manifestFormatVersion": "0.3" }"""),
             Load("""{ "manifestFormatVersion": "9.9", "sections": {} }"""),
             Load(MinimalRoot),
             Load("""
-                { "manifestFormatVersion": "0.2", "unknown": 1,
+                { "manifestFormatVersion": "0.3", "unknown": 1,
                   "sections": { "vectors": { "inline": "x" }, "policy": { "inline": {}, "path": "p" } } }
                 """),
         };

@@ -13,7 +13,11 @@ namespace MCPiler.Engine.Manifest.Model;
 public sealed record CredentialsSection(IReadOnlyList<ManifestCredential> Credentials = null!)
 {
     /// <summary>The section format version this model represents.</summary>
-    public const int FormatVersion = 2;
+    /// <remarks>
+    /// Version 3 adds <c>fromProvider</c>, the managed-deployment reference that is resolved
+    /// only from the active generation's in-memory secret set.
+    /// </remarks>
+    public const int FormatVersion = 3;
 
     /// <summary>The declared credentials, never null.</summary>
     public IReadOnlyList<ManifestCredential> Credentials { get; init; } = Credentials ?? [];
@@ -112,13 +116,21 @@ public sealed record ManifestCredential(
     /// </summary>
     /// <remarks>
     /// Redirect sensitivity is derived, never authored, mirroring the existing outbound HTTP
-    /// factory behavior.
+    /// factory behavior. A dynamic-strategy credential is not applied directly, so it writes no
+    /// header here; it is reported sensitive anyway because the value is a secret that must
+    /// never travel across an undeclared origin, and the safe reading of that rule is that a
+    /// redirect strips nothing that carries one.
     /// </remarks>
     public bool IsRedirectSensitiveHeader => Scheme switch
     {
         CredentialScheme.Basic or CredentialScheme.Bearer => true,
         CredentialScheme.Header => true,
         CredentialScheme.ApiKey => EffectiveLocation is CredentialLocation.Header or CredentialLocation.Cookie,
+        CredentialScheme.OAuth2ClientCredentials => true,
+        CredentialScheme.OAuth2AuthorizationCode => true,
+        CredentialScheme.TokenSessionExchange => true,
+        CredentialScheme.ChallengeSession => true,
+        CredentialScheme.RequestSigning => true,
         _ => false,
     };
 }
@@ -138,6 +150,13 @@ public sealed record CredentialReference
 
     /// <summary>The environment variable name to read, when this is an env reference.</summary>
     public string? FromEnv { get; private init; }
+
+    /// <summary>
+    /// The opaque provider key to resolve from the active generation's in-memory secret set,
+    /// when this is a managed-provider reference. Carries no secret; the value lives only in
+    /// the separately delivered generation payload.
+    /// </summary>
+    public string? FromProvider { get; private init; }
 
     /// <summary>
     /// The absolute file path to read, when this is a file reference. A single trailing
@@ -162,6 +181,10 @@ public sealed record CredentialReference
     public static CredentialReference File(string path)
         => new() { FromFile = Require(path, nameof(path)) };
 
+    /// <summary>Creates a managed-provider reference.</summary>
+    public static CredentialReference Provider(string key)
+        => new() { FromProvider = Require(key, nameof(key)) };
+
     /// <summary>Creates a literal value.</summary>
     public static CredentialReference Literal(string value)
         => new() { Inline = Require(value, nameof(value)) };
@@ -177,6 +200,7 @@ public sealed record CredentialReference
     {
         { FromEnv: { } name } => $"fromEnv:{name}",
         { FromFile: { } path } => $"fromFile:{path}",
+        { FromProvider: { } key } => $"fromProvider:{key}",
         { Inline: not null } => "inline:(redacted)",
         _ => "(unset)",
     };

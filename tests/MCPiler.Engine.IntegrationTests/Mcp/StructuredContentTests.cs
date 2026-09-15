@@ -305,7 +305,7 @@ public sealed class StructuredContentTests : IDisposable
     private static string Manifest(Uri upstream, string advertise, bool capability, string outputSchema)
         => $$"""
         {
-          "manifestFormatVersion": "0.2",
+          "manifestFormatVersion": "0.3",
           "sections": {
             "server": {
               "inline": {

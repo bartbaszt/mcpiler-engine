@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:mcpiler:manifest:0.3:root",
+  "title": "MCPiler Manifest 0.3 root document",
+  "description": "The section index. Sections are inline or external; exactly one of the two per entry.",
+  "type": "object",
+  "required": ["manifestFormatVersion", "sections"],
+  "additionalProperties": false,
+  "properties": {
+    "manifestFormatVersion": {
+      "$ref": "#/$defs/formatVersion"
+    },
+    "generator": {
+      "description": "Diagnostic provenance about the producer. Engine never changes behaviour because of it.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" },
+        "producedAtUtc": { "type": "string" }
+      }
+    },
+    "sections": {
+      "type": "object",
+      "required": ["server", "policy", "operations", "agentSurface"],
+      "additionalProperties": false,
+      "properties": {
+        "server": { "$ref": "#/$defs/sectionEntry" },
+        "policy": { "$ref": "#/$defs/sectionEntry" },
+        "credentials": { "$ref": "#/$defs/sectionEntry" },
+        "authentication": { "$ref": "#/$defs/sectionEntry" },
+        "operations": { "$ref": "#/$defs/sectionEntry" },
+        "agentSurface": { "$ref": "#/$defs/sectionEntry" },
+        "tools": { "$ref": "#/$defs/sectionEntry" },
+        "search": { "$ref": "#/$defs/sectionEntry" },
+        "vectors": { "$ref": "#/$defs/vectorSectionEntry" }
+      }
+    },
+    "completeness": {
+      "description": "Present only in a sealed manifest. Covers the canonicalised section index, so a removed section is detected rather than inferred.",
+      "type": "object",
+      "required": ["algorithm", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": { "const": "sha256" },
+        "value": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "provenance": {
+      "description": "Opaque to Engine. Studio authoring identities live here so manifest correctness never depends on them.",
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "formatVersion": {
+      "description": "MAJOR.MINOR, decimal, no leading zeros. Independent of the Engine assembly version.",
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,8})\\.(0|[1-9][0-9]{0,8})$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "bundlePath": {
+      "description": "Relative, forward-slash separated, no parent segment, no scheme, resolving inside the bundle directory.",
+      "type": "string",
+      "pattern": "^(?![A-Za-z][A-Za-z0-9+.-]*:)(?!/)(?!(.*/)?\\.\\.(/|$))[^\\\\]+$"
+    },
+    "sectionEntry": {
+      "oneOf": [
+        {
+          "title": "inline payload",
+          "type": "object",
+          "required": ["inline"],
+          "additionalProperties": false,
+          "properties": {
+            "inline": true
+          }
+        },
+        {
+          "title": "external payload",
+          "type": "object",
+          "required": ["path"],
+          "additionalProperties": false,
+          "properties": {
+            "path": { "$ref": "#/$defs/bundlePath" },
+            "sha256": { "$ref": "#/$defs/sha256" },
+            "bytes": { "type": "integer", "minimum": 0 }
+          }
+        }
+      ]
+    },
+    "vectorSectionEntry": {
+      "description": "The packed embedding matrix is binary, so it is external only and never inline.",
+      "type": "object",
+      "required": ["path"],
+      "additionalProperties": false,
+      "properties": {
+        "inline": {
+          "$comment": "Named and then refused, rather than left undeclared, so an author who tries it is told what is wrong instead of being told there is an unexpected member.",
+          "description": "Never permitted here: the payload is binary.",
+          "not": true
+        },
+        "path": { "$ref": "#/$defs/bundlePath" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "model": { "type": "string" },
+        "dimension": { "type": "integer", "minimum": 1 }
+      }
+    }
+  }
+}

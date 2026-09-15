@@ -179,19 +179,19 @@ public sealed class ManifestFormatSupportTests
     [Fact]
     public void The_supported_range_is_the_single_current_version()
     {
-        Assert.Equal(new ManifestFormatVersion(0, 2), ManifestFormatSupport.Minimum);
-        Assert.Equal(new ManifestFormatVersion(0, 2), ManifestFormatSupport.Maximum);
-        Assert.True(ManifestFormatSupport.Evaluate("0.2").IsSupported);
+        Assert.Equal(new ManifestFormatVersion(0, 3), ManifestFormatSupport.Minimum);
+        Assert.Equal(new ManifestFormatVersion(0, 3), ManifestFormatSupport.Maximum);
+        Assert.True(ManifestFormatSupport.Evaluate("0.3").IsSupported);
     }
 
     [Fact]
     public void The_previous_format_version_is_refused_as_older()
     {
-        var evaluation = ManifestFormatSupport.Evaluate("0.1");
+        var evaluation = ManifestFormatSupport.Evaluate("0.2");
 
         Assert.False(evaluation.IsSupported);
         Assert.Equal(ManifestFormatCompatibility.Unsupported, evaluation.Compatibility);
-        Assert.Equal(new ManifestFormatVersion(0, 1), evaluation.Version);
+        Assert.Equal(new ManifestFormatVersion(0, 2), evaluation.Version);
         Assert.Contains("older", evaluation.Message, StringComparison.Ordinal);
         Assert.Contains(ManifestFormatSupport.SupportedRange, evaluation.Message, StringComparison.Ordinal);
     }
@@ -220,8 +220,9 @@ public sealed class SectionFormatVersionMatrixTests
         Assert.Equal(1, ServerSection.FormatVersion);
         Assert.Equal(1, PolicySection.FormatVersion);
         Assert.Equal(1, OperationsSection.FormatVersion);
-        Assert.Equal(2, AgentSurfaceSection.FormatVersion);
-        Assert.Equal(2, CredentialsSection.FormatVersion);
+        Assert.Equal(3, AgentSurfaceSection.FormatVersion);
+        Assert.Equal(3, CredentialsSection.FormatVersion);
+        Assert.Equal(1, AuthenticationSection.FormatVersion);
         Assert.Equal(1, ToolsSection.FormatVersion);
         Assert.Equal(1, SearchSection.FormatVersion);
     }
@@ -233,10 +234,12 @@ public sealed class SectionFormatVersionMatrixTests
     [InlineData("policy", 2, false)]
     [InlineData("operations", 1, true)]
     [InlineData("operations", 2, false)]
-    [InlineData("agentSurface", 2, true)]
-    [InlineData("agentSurface", 1, false)]
-    [InlineData("credentials", 2, true)]
-    [InlineData("credentials", 1, false)]
+    [InlineData("agentSurface", 3, true)]
+    [InlineData("agentSurface", 2, false)]
+    [InlineData("credentials", 3, true)]
+    [InlineData("credentials", 2, false)]
+    [InlineData("authentication", 1, true)]
+    [InlineData("authentication", 2, false)]
     [InlineData("tools", 1, true)]
     [InlineData("tools", 2, false)]
     [InlineData("search", 1, true)]
@@ -274,6 +277,7 @@ public sealed class SectionFormatVersionMatrixTests
     [InlineData("operations")]
     [InlineData("agentSurface")]
     [InlineData("credentials")]
+    [InlineData("authentication")]
     [InlineData("tools")]
     [InlineData("search")]
     public void An_absent_section_version_is_accepted(string section)
@@ -304,6 +308,9 @@ public sealed class SectionFormatVersionMatrixTests
                 break;
             case "credentials":
                 SectionReader.ReadCredentials(Json($"{{ {version}\"credentials\": [] }}"), _diagnostics);
+                break;
+            case "authentication":
+                SectionReader.ReadAuthentication(Json($"{{ {version}\"profiles\": [] }}"), _diagnostics);
                 break;
             case "tools":
                 SectionReader.ReadTools(Json($"{{ {version}\"surfaces\": {{}} }}"), _diagnostics);

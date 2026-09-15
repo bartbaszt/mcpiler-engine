@@ -1,0 +1,89 @@
+{
+  "manifestFormatVersion": "0.3",
+  "sections": {
+    "server": {
+      "inline": {
+        "name": "Token Session Exchange"
+      }
+    },
+    "policy": {
+      "inline": {
+        "baseUrl": "https://api.example.com/v1"
+      }
+    },
+    "operations": {
+      "inline": {
+        "operations": [
+          { "key": "GET /pets", "method": "GET", "path": "/pets" }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "operations": [
+          {
+            "slug": "list-pets",
+            "name": "List pets",
+            "binding": {
+              "type": "http",
+              "operation": "GET /pets",
+              "authenticationRef": "token-session-exchange"
+            }
+          }
+        ]
+      }
+    },
+    "credentials": {
+      "inline": {
+        "formatVersion": 3,
+        "credentials": [
+          {
+            "id": "exchange-api-key",
+            "scheme": "token-session-exchange",
+            "slot": "apiKey",
+            "value": { "fromEnv": "MCPILER_TOKEN_SESSION_EXCHANGE_APIKEY" }
+          }
+        ]
+      }
+    },
+    "authentication": {
+      "inline": {
+        "formatVersion": 1,
+        "profiles": [
+          {
+            "id": "token-session-exchange",
+            "kind": "token-session-exchange",
+            "configuration": {
+              "strategyId": "bounded-token-session-exchange",
+              "inputs": { "username": "example-user" },
+              "endpoint": "https://auth.example.com/session",
+              "method": "POST",
+              "request": {
+                "mediaType": "application/x-www-form-urlencoded",
+                "fields": {
+                  "username": { "source": "input", "slot": "username" },
+                  "apikey": { "source": "secret", "slot": "apiKey" }
+                },
+                "headers": {
+                  "X-Api-Version": { "source": "static", "value": "2" }
+                }
+              },
+              "response": {
+                "token": { "source": "jsonPointer", "selector": "/token" },
+                "expiry": { "kind": "relativeSeconds", "source": "jsonPointer", "selector": "/expires_in" }
+              },
+              "injection": { "location": "header", "name": "Authorization", "prefix": "Bearer " },
+              "defaultLifetimeSeconds": 300,
+              "safetySkewSeconds": 15,
+              "authFailureStatusCodes": [401, 403]
+            },
+            "authenticationOrigins": ["https://auth.example.com:443"],
+            "destinationOrigins": ["https://api.example.com:443"],
+            "credentialRef": ["exchange-api-key"],
+            "scopeFingerprint": "0000000000000000000000000000000000000000000000000000000000000004"
+          }
+        ]
+      }
+    }
+  }
+}

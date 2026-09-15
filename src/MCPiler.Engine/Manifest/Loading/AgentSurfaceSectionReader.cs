@@ -39,15 +39,18 @@ internal static class AgentSurfaceSectionReader
     internal static readonly string[] SearchMembers = ["aliases", "keywords", "exampleIntents"];
 
     internal static readonly string[] HttpBindingMembers =
-        ["type", "bindingId", "operation", "serverUrl", "credentialRef"];
+        ["type", "bindingId", "operation", "serverUrl", "credentialRef", "authenticationRef"];
 
-    internal static readonly string[] HttpBaseMembers = ["operation", "serverUrl", "credentialRef"];
+    internal static readonly string[] HttpBaseMembers = ["operation", "serverUrl", "credentialRef", "authenticationRef"];
 
     // 'credentialRef' is deliberately absent from the transformed and compound member sets.
     // A transformation rewrites arguments and never changes which upstream identity executes,
     // so its scope belongs to 'base'; a compound binding delegates to steps that each carry
     // their own. Leaving the member out means the existing unknown-member refusal catches a
-    // misplaced scope, which is stricter than accepting and ignoring it.
+    // misplaced scope, which is stricter than accepting and ignoring it. 'authenticationRef'
+    // is omitted for exactly the same reason: it names the profile that governs the base's
+    // credential, so a wrapper that declared a second one would be stating a choice nothing
+    // reads.
     internal static readonly string[] TransformedBindingMembers =
         ["type", "bindingId", "base", "inputProgram", "outputProgram"];
 
@@ -401,7 +404,8 @@ internal static class AgentSurfaceSectionReader
         return new HttpBinding(
             operation,
             ReadServerUrl(binding, pointer, context),
-            context.TextArray(binding, "credentialRef", pointer))
+            context.TextArray(binding, "credentialRef", pointer),
+            context.Text(binding, "authenticationRef", pointer))
         {
             BindingId = context.Text(binding, "bindingId", pointer) ?? slug,
         };
@@ -444,7 +448,8 @@ internal static class AgentSurfaceSectionReader
             new HttpBinding(
                 operation,
                 ReadServerUrl(baseObject, basePointer, context),
-                context.TextArray(baseObject, "credentialRef", basePointer)),
+                context.TextArray(baseObject, "credentialRef", basePointer),
+                context.Text(baseObject, "authenticationRef", basePointer)),
             // The program grammar is a separate versioned contract with its own validator and
             // its own diagnostic codes, so it is carried verbatim and validated separately.
             context.Object(binding, "inputProgram", pointer),

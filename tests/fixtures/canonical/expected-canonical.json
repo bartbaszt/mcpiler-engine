@@ -7,6 +7,6 @@
     "03-strings-and-escapes.input.json": { "canonicalBytes": 516, "sha256": "c8fc2fd01b728eed9a875528f2f5786d1b45a942e29d8405f9a3634d4a92e981" },
     "04-structure.input.json": { "canonicalBytes": 270, "sha256": "71760c157fcbc75b2329abb1ad692501a93fc9d79f198ec20a5fe060ffdefa52" },
     "05-deep-nesting.input.json": { "canonicalBytes": 918, "sha256": "a7d03d7a36bd96fd78febd5b8cabaeb412eba27695222c1f4d25a14e88a18d96" },
-    "06-manifest-shaped.input.json": { "canonicalBytes": 1585, "sha256": "4c12c263bc0971cea1e4c1335ded552378d21ec418517729db46a94d2f53c5f6" }
+    "06-manifest-shaped.input.json": { "canonicalBytes": 1585, "sha256": "ab29fafc1fbe602451fc0aa834ad53a908b9ba5b7771c4d36ccb64e0c8798f0c" }
   }
 }

@@ -24,6 +24,11 @@ namespace MCPiler.Engine.Host.Mcp;
 /// takes an object, so the map is rebuilt as one; a result carries content blocks and the seam
 /// returns text, so the text becomes one block. Neither step can branch on a Manifest value.
 /// </para>
+/// <para>
+/// The call leases a generation rather than using one captured at session handshake: a session
+/// outlives the generation it started in, so the surface is resolved again for this call and
+/// executed on the same generation that resolved it.
+/// </para>
 /// </remarks>
 internal static class ToolBridge
 {
@@ -31,20 +36,22 @@ internal static class ToolBridge
 
     /// <summary>Runs one call against the surface the request addressed.</summary>
     public static async ValueTask<CallToolResult> InvokeAsync(
-        SurfaceEndpoint addressed,
-        EngineExecution execution,
+        string address,
+        string resourceIdentity,
+        GenerationLeaseSource leases,
         DrainCoordinator drain,
         RequestContext<CallToolRequestParams> request,
         CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(addressed);
-        ArgumentNullException.ThrowIfNull(execution);
+        ArgumentException.ThrowIfNullOrWhiteSpace(address);
+        ArgumentException.ThrowIfNullOrWhiteSpace(resourceIdentity);
+        ArgumentNullException.ThrowIfNull(leases);
         ArgumentNullException.ThrowIfNull(drain);
         ArgumentNullException.ThrowIfNull(request);
 
         string tool = request.Params?.Name ?? string.Empty;
 
-        if (!drain.TryEnter(tool, cancellationToken, out DrainCoordinator.InvocationLease? lease))
+        if (!drain.TryEnter(tool, cancellationToken, out DrainCoordinator.InvocationLease? admitted))
         {
             return new CallToolResult
             {
@@ -53,32 +60,56 @@ internal static class ToolBridge
             };
         }
 
-        using (DrainCoordinator.InvocationLease admitted = lease!)
+        using (DrainCoordinator.InvocationLease lease = admitted!)
         {
-            ToolOutcome outcome = await execution
-                .InvokeAsync(
-                    addressed.Mount,
-                    addressed.Surface,
-                    addressed.ResourceIdentity,
-                    tool,
-                    Arguments(request.Params?.Arguments),
-                    request.Server?.NegotiatedProtocolVersion,
-                    admitted.CancellationToken)
-                .ConfigureAwait(false);
-
-            return new CallToolResult
+            if (leases() is not { } generation)
             {
-                // Set only when the call failed. A result carrying 'isError: false' and one
-                // omitting it mean the same thing to a client, and the Studio omits it.
-                IsError = outcome.IsError ? true : null,
-                Content = [new TextContentBlock { Text = outcome.Text }],
-                StructuredContent = outcome.StructuredContentJson is { } structured
-                    ? JsonSerializer.Deserialize<JsonElement>(structured)
-                    : null,
-                Meta = outcome.ErrorCode is { } errorCode
-                    ? new JsonObject { [ErrorCodeMetaKey] = errorCode }
-                    : null,
-            };
+                return new CallToolResult
+                {
+                    IsError = true,
+                    Content = [new TextContentBlock { Text = "This address is no longer served by any active generation." }],
+                };
+            }
+
+            using (generation)
+            {
+                if (!generation.Generation.TryResolve(address, out SurfaceResolution? resolved)
+                    || resolved is null)
+                {
+                    // The surface this session started against is no longer served: an activation
+                    // removed it. The answer is the same one a route that never existed gives.
+                    return new CallToolResult
+                    {
+                        IsError = true,
+                        Content = [new TextContentBlock { Text = "This address is no longer served by any active generation." }],
+                    };
+                }
+
+                ToolOutcome outcome = await generation.Generation.Execution
+                    .InvokeAsync(
+                        resolved.Mount,
+                        resolved.Surface,
+                        resourceIdentity,
+                        tool,
+                        Arguments(request.Params?.Arguments),
+                        request.Server?.NegotiatedProtocolVersion,
+                        lease.CancellationToken)
+                    .ConfigureAwait(false);
+
+                return new CallToolResult
+                {
+                    // Set only when the call failed. A result carrying 'isError: false' and one
+                    // omitting it mean the same thing to a client, and the Studio omits it.
+                    IsError = outcome.IsError ? true : null,
+                    Content = [new TextContentBlock { Text = outcome.Text }],
+                    StructuredContent = outcome.StructuredContentJson is { } structured
+                        ? JsonSerializer.Deserialize<JsonElement>(structured)
+                        : null,
+                    Meta = outcome.ErrorCode is { } errorCode
+                        ? new JsonObject { [ErrorCodeMetaKey] = errorCode }
+                        : null,
+                };
+            }
         }
     }
 

@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 
+using MCPiler.Engine.Host.Managed;
 using MCPiler.Engine.Runtime;
 
 namespace MCPiler.Engine.Host.Configuration;
@@ -49,6 +50,80 @@ public sealed record HostBinding(
         : this(runtime, listener, authorization, HostLifecycleOptions.Default)
     {
     }
+
+    /// <summary>
+    /// Which authority decides what this process serves.
+    /// </summary>
+    /// <remarks>
+    /// Defaults to <see cref="HostDeploymentMode.File"/> so every caller that predates managed mode
+    /// keeps its meaning: a process with local mounts is a file-mode process.
+    /// </remarks>
+    public HostDeploymentMode Mode { get; init; } = HostDeploymentMode.File;
+
+    /// <summary>
+    /// The managed synchronization settings, exactly when <see cref="Mode"/> is
+    /// <see cref="HostDeploymentMode.Managed"/>.
+    /// </summary>
+    /// <remarks>
+    /// One record rather than three loose settings because the three are one decision: an
+    /// endpoint with no deployment identity would poll nothing in particular, and a deployment
+    /// identity with no secret file would authenticate as nobody. Binding them together means a
+    /// managed process cannot be half-configured by construction.
+    /// </remarks>
+    public ManagedSyncOptions? Managed { get; init; }
+
+    /// <summary>
+    /// The addresses of reverse proxies whose forwarded headers this process trusts.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Empty means forwarded headers are ignored entirely, which is correct for a directly
+    /// reached process and for one whose proxy rewrites the address rather than forwarding it.
+    /// A non-empty list is what makes <c>X-Forwarded-Proto</c> and <c>X-Forwarded-For</c>
+    /// effective, and only for the listed addresses: a client that could set the scheme itself
+    /// could make the process believe it was reached over https and publish metadata naming a
+    /// scheme and authority no client actually used.
+    /// </para>
+    /// <para>
+    /// This is a listener fact, not a Manifest fact, so it lives beside the listen address
+    /// rather than in <see cref="RuntimeOptions"/>: it changes how a request is observed and
+    /// can change nothing a Manifest declares.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<string> TrustedProxies { get; init; } = [];
+
+    /// <summary>
+    /// The browser origins whose requests this process accepts on an MCP address.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Spec 11 requires the MCP endpoint to validate the <c>Origin</c> header when it is present
+    /// and reject an unexpected origin. The endpoint is served here, so the decision lives here.
+    /// Empty accepts no browser origin: the header is only sent by a browser, so a request that
+    /// carries one is a browser request that no configured origin authorizes, and a non-browser
+    /// client that sends no header is served normally.
+    /// </para>
+    /// <para>
+    /// Like the listen address this is a deployment fact, not a Manifest fact: it says who may
+    /// call the process, not what the process serves.
+    /// </para>
+    /// </remarks>
+    public IReadOnlyList<string> AllowedOrigins { get; init; } = [];
+}
+
+/// <summary>How a process decides which Manifests it serves.</summary>
+/// <remarks>
+/// The two modes are exclusive because each names a single authority for the served mount set.
+/// Accepting both would create a third, unwritten rule for which one wins, and the rule would
+/// decide what a client is served.
+/// </remarks>
+public enum HostDeploymentMode
+{
+    /// <summary>Local Manifest files/bundles supplied to the deployment are authoritative.</summary>
+    File = 0,
+
+    /// <summary>One configured Platform deployment is authoritative; local mounts are refused.</summary>
+    Managed = 1,
 }
 
 /// <summary>Host-only lifecycle settings that do not alter Manifest behavior.</summary>
@@ -158,6 +233,80 @@ public static class HostConfiguration
     /// <summary>Host-only shutdown drain window, in positive whole seconds.</summary>
     public const string DrainTimeoutSecondsKey = "drain-timeout-seconds";
 
+    /// <summary>Key naming the directory runtime-owned mutable authentication state is kept in.</summary>
+    /// <remarks>
+    /// A rotating refresh token must survive a restart, and its replacement is provider-
+    /// authoritative the moment the provider issues it. Engine encrypts that one class of value
+    /// here; it is not a credential database and holds nothing else. The pairing with
+    /// <see cref="RuntimeStateKeyFileKey"/> is both-or-neither.
+    /// </remarks>
+    public const string RuntimeStateRootKey = "runtime-state-root";
+
+    /// <summary>Key naming the file holding the Engine runtime-state key.</summary>
+    /// <remarks>
+    /// Exactly 32 raw bytes or their 64-character hexadecimal spelling. This is Engine's own key
+    /// and is never the Platform master key.
+    /// </remarks>
+    public const string RuntimeStateKeyFileKey = "runtime-state-key-file";
+
+    /// <summary>Key selecting the desired-state authority: <c>file</c> or <c>managed</c>.</summary>
+    /// <remarks>
+    /// Omitted means <c>file</c>, because a command line with local mounts is the shape every
+    /// deployment had before managed mode existed. Naming <c>managed</c> together with any
+    /// <c>--mount</c> is refused rather than resolved: the two are competing authorities, and
+    /// whichever one a tie-break rule chose would decide what a client is served.
+    /// </remarks>
+    public const string ModeKey = "mode";
+
+    /// <summary>The <c>file</c> spelling of <see cref="ModeKey"/>.</summary>
+    public const string FileModeName = "file";
+
+    /// <summary>The <c>managed</c> spelling of <see cref="ModeKey"/>.</summary>
+    public const string ManagedModeName = "managed";
+
+    /// <summary>Key naming the Platform management endpoint a managed process polls.</summary>
+    /// <remarks>
+    /// An absolute URI. HTTPS is required for every address except loopback, where the tests and
+    /// local diagnostics run: the deployment secret crosses this connection, and a scheme that
+    /// cannot protect it must be an explicit local choice rather than an operator typo.
+    /// </remarks>
+    public const string ManagementEndpointKey = "management-endpoint";
+
+    /// <summary>Key naming the deployment identity this process is configured for.</summary>
+    public const string DeploymentIdKey = "deployment-id";
+
+    /// <summary>Key naming the file holding the deployment-scoped bearer secret.</summary>
+    /// <remarks>
+    /// A file rather than a value, for the same reason the master key is: a secret on a command
+    /// line is visible to every process listing on the host.
+    /// </remarks>
+    public const string DeploymentSecretFileKey = "deployment-secret-file";
+
+    /// <summary>
+    /// Key naming a reverse-proxy address whose forwarded headers this process trusts.
+    /// </summary>
+    /// <remarks>
+    /// Repeatable. An IP address, because that is what a forwarded request carries and what the
+    /// hosting middleware compares; a host name would have to be resolved and a resolved name is
+    /// not an identity. Absent means no forwarded header is trusted, which is the safe default:
+    /// a process that honoured <c>X-Forwarded-Proto</c> from anyone could be told it was reached
+    /// over https and would then publish protected-resource metadata naming a scheme and
+    /// authority no client used.
+    /// </remarks>
+    public const string TrustedProxyKey = "trusted-proxy";
+
+    /// <summary>
+    /// Key naming an origin whose browser requests this process accepts on an MCP address.
+    /// </summary>
+    /// <remarks>
+    /// Repeatable. Empty means no browser origin is accepted: a request that carries an
+    /// <c>Origin</c> header is refused, while a non-browser client that sends none is served
+    /// normally. That default is what spec 11 requires of the MCP endpoint - an unexpected origin
+    /// is rejected - and a browser is the only client that sends the header at all, so an
+    /// operator who wants browser access names the origins that may have it.
+    /// </remarks>
+    public const string AllowedOriginKey = "allowed-origin";
+
     private static readonly string[] Simple =
     [
         FileStoreRootKey,
@@ -171,10 +320,42 @@ public static class HostConfiguration
         IntrospectionEndpointKey,
         JwksUriKey,
         DrainTimeoutSecondsKey,
+        RuntimeStateRootKey,
+        RuntimeStateKeyFileKey,
+        ModeKey,
+        ManagementEndpointKey,
+        DeploymentIdKey,
+        DeploymentSecretFileKey,
+        TrustedProxyKey,
+        AllowedOriginKey,
     ];
 
     /// <summary>Every key this deployable accepts, excluding the two prefixed families.</summary>
     public static IReadOnlyList<string> AcceptedKeys => Simple;
+
+    /// <summary>
+    /// Whether the settings ask for managed mode, before anything is bound.
+    /// </summary>
+    /// <remarks>
+    /// The serving verb needs this before binding so a managed process is not told to supply a
+    /// local mount. The mode spelling is read here rather than in the verb so the two places that
+    /// know the accepted spellings are one place.
+    /// </remarks>
+    public static bool RequestsManagedMode(IReadOnlyList<KeyValuePair<string, string>> settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+
+        foreach ((string key, string value) in settings)
+        {
+            if (string.Equals(key, ModeKey, StringComparison.Ordinal)
+                && string.Equals(value, ManagedModeName, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     /// <summary>
     /// Binds settings and mounts into runtime options, or reports why it cannot.
@@ -207,6 +388,15 @@ public static class HostConfiguration
         string? introspectionEndpoint = null;
         string? jwksUri = null;
         TimeSpan drainTimeout = HostLifecycleOptions.DefaultDrainTimeout;
+        string? runtimeStateRoot = null;
+        string? runtimeStateKeyFile = null;
+        HostDeploymentMode mode = HostDeploymentMode.File;
+        bool modeExplicit = false;
+        string? managementEndpoint = null;
+        string? deploymentId = null;
+        string? deploymentSecretFile = null;
+        List<string> trustedProxies = [];
+        List<string> allowedOrigins = [];
 
         foreach ((string key, string value) in settings)
         {
@@ -257,6 +447,43 @@ public static class HostConfiguration
                 case DrainTimeoutSecondsKey:
                     drainTimeout = PositiveWholeSeconds(key, value, rejected);
                     break;
+                case RuntimeStateRootKey:
+                    runtimeStateRoot = value;
+                    break;
+                case RuntimeStateKeyFileKey:
+                    runtimeStateKeyFile = value;
+                    break;
+                case ModeKey:
+                    if (DeploymentMode(key, value, rejected) is { } parsed)
+                    {
+                        mode = parsed;
+                        modeExplicit = true;
+                    }
+
+                    break;
+                case ManagementEndpointKey:
+                    managementEndpoint = UriSetting(key, value, rejected);
+                    break;
+                case DeploymentIdKey:
+                    deploymentId = value;
+                    break;
+                case DeploymentSecretFileKey:
+                    deploymentSecretFile = value;
+                    break;
+                case TrustedProxyKey:
+                    if (ProxyAddress(key, value, rejected) is { } proxy)
+                    {
+                        trustedProxies.Add(proxy);
+                    }
+
+                    break;
+                case AllowedOriginKey:
+                    if (BrowserOrigin(key, value, rejected) is { } origin)
+                    {
+                        allowedOrigins.Add(origin);
+                    }
+
+                    break;
                 default:
                     rejected.Add($"'{key}' is not a setting this host accepts. It accepts {string.Join(", ", Simple)}, '{MountNarrowingPrefix}{{prefix}}:{{bound}}' and '{FloorPrefix}{{bound}}'.");
                     break;
@@ -270,6 +497,13 @@ public static class HostConfiguration
 
         HostAuthorizationOptions? authorization = BindAuthorization(
             issuer, validation, introspectionEndpoint, jwksUri, rejected);
+
+        BindRuntimeState(runtimeStateRoot, runtimeStateKeyFile, rejected);
+
+        BindDeploymentMode(mode, modeExplicit, mounts.Count, rejected);
+
+        ManagedSyncOptions? managed = BindManaged(
+            mode, managementEndpoint, deploymentId, deploymentSecretFile, rejected);
 
         if (rejected.Count > 0)
         {
@@ -291,15 +525,217 @@ public static class HostConfiguration
             AllowInlineSecrets = allowInlineSecrets,
             Floors = floors,
             ServedContentRoots = served,
+            RuntimeStateRoot = runtimeStateRoot,
+            RuntimeStateKeyFile = runtimeStateKeyFile,
         };
 
         binding = new HostBinding(
             options,
             new HostListenOptions(listen, transport),
             authorization,
-            new HostLifecycleOptions(drainTimeout));
+            new HostLifecycleOptions(drainTimeout))
+        {
+            Mode = mode,
+            Managed = managed,
+            TrustedProxies = trustedProxies,
+            AllowedOrigins = allowedOrigins,
+        };
         refusals = [];
         return true;
+    }
+
+    /// <summary>
+    /// Reads a trusted reverse-proxy address, refusing anything that is not an IP literal.
+    /// </summary>
+    /// <remarks>
+    /// An IP literal rather than a host name because the hosting middleware compares the
+    /// forwarded request's peer address against the configured set: a name would have to be
+    /// resolved, and a resolved name is not an identity a request can be attributed to.
+    /// </remarks>
+    private static string? ProxyAddress(string key, string value, List<string> rejected)
+    {
+        if (System.Net.IPAddress.TryParse(value, out _))
+        {
+            return value;
+        }
+
+        rejected.Add($"'{key}' was given '{value}'. Name an IP address such as '172.28.0.2'.");
+        return null;
+    }
+
+    /// <summary>
+    /// Reads a browser origin, refusing anything that is not a bare http(s) origin.
+    /// </summary>
+    /// <remarks>
+    /// Only scheme, host and optional port are admitted, because that is exactly what a browser
+    /// puts in the <c>Origin</c> header: a path, query or fragment could never match a real
+    /// header value, so accepting one would look configured while refusing every browser. The
+    /// canonical spelling is returned so comparison does not depend on how the operator wrote
+    /// the trailing slash.
+    /// </remarks>
+    private static string? BrowserOrigin(string key, string value, List<string> rejected)
+    {
+        if (Uri.TryCreate(value, UriKind.Absolute, out Uri? parsed)
+            && parsed.Scheme is "http" or "https"
+            && !string.IsNullOrEmpty(parsed.Host)
+            && parsed.AbsolutePath is "" or "/"
+            && string.IsNullOrEmpty(parsed.Query)
+            && string.IsNullOrEmpty(parsed.Fragment)
+            && string.IsNullOrEmpty(parsed.UserInfo))
+        {
+            return parsed.GetLeftPart(UriPartial.Authority);
+        }
+
+        rejected.Add($"'{key}' was given '{value}'. Name an origin such as 'https://studio.example.test' with no path, query or fragment.");
+        return null;
+    }
+
+    /// <summary>
+    /// Binds the managed synchronization settings, refusing an incomplete or unsafe set.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// In managed mode all three settings are required: the endpoint says where to poll, the
+    /// deployment identity says which deployment this process is, and the secret file says how it
+    /// authenticates. Naming any subset would start a process that cannot synchronize and would
+    /// discover that as a timeout rather than as a startup refusal.
+    /// </para>
+    /// <para>
+    /// In file mode none of them is accepted. A management endpoint on a file-mode process names
+    /// work nothing does, and accepting it would suggest a synchronization that is not running.
+    /// </para>
+    /// <para>
+    /// A non-loopback <c>http://</c> endpoint is refused because the deployment secret is
+    /// presented on every poll. Loopback is admitted so tests and local diagnostics can run
+    /// without a certificate, but the plaintext exposure is bounded to the same machine.
+    /// </para>
+    /// </remarks>
+    private static ManagedSyncOptions? BindManaged(
+        HostDeploymentMode mode,
+        string? endpoint,
+        string? deploymentId,
+        string? secretFile,
+        List<string> rejected)
+    {
+        if (mode is HostDeploymentMode.File)
+        {
+            if (endpoint is not null || deploymentId is not null || secretFile is not null)
+            {
+                rejected.Add(
+                    $"'{ManagementEndpointKey}', '{DeploymentIdKey}' and '{DeploymentSecretFileKey}' "
+                    + $"configure managed synchronization, but '{ModeKey}' is '{FileModeName}'. "
+                    + $"Select '{ManagedModeName}' to synchronize from a deployment.");
+            }
+
+            return null;
+        }
+
+        bool complete = true;
+
+        if (endpoint is null)
+        {
+            rejected.Add($"'{ManagementEndpointKey}' is required when '{ModeKey}' is '{ManagedModeName}'. Name the Platform endpoint this process polls.");
+            complete = false;
+        }
+
+        if (deploymentId is null)
+        {
+            rejected.Add($"'{DeploymentIdKey}' is required when '{ModeKey}' is '{ManagedModeName}'. Name the deployment this process synchronizes with.");
+            complete = false;
+        }
+
+        if (secretFile is null)
+        {
+            rejected.Add($"'{DeploymentSecretFileKey}' is required when '{ModeKey}' is '{ManagedModeName}'. Name the file holding the deployment secret this process authenticates with.");
+            complete = false;
+        }
+
+        if (!complete)
+        {
+            return null;
+        }
+
+        string? address = UriSetting(ManagementEndpointKey, endpoint!, rejected);
+
+        if (address is null)
+        {
+            return null;
+        }
+
+        Uri parsed = new(address, UriKind.Absolute);
+
+        if (!ManagedSyncOptions.IsLoopback(parsed)
+            && !string.Equals(parsed.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal))
+        {
+            rejected.Add(
+                $"'{ManagementEndpointKey}' was given '{endpoint}', which is not an https address and "
+                + "does not name a loopback host. The deployment secret is presented on every poll, so "
+                + "a remote endpoint must be https.");
+            return null;
+        }
+
+        return new ManagedSyncOptions
+        {
+            Endpoint = parsed,
+            DeploymentId = deploymentId!,
+            SecretFile = secretFile!,
+        };
+    }
+
+    /// <summary>
+    /// Refuses a managed process that also names local mounts.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The refusal is the point of having a mode at all. A managed process that silently merged a
+    /// local mount would serve one mount set at startup and a different one after the first
+    /// synchronization, and which one a client saw would depend on timing rather than on
+    /// configuration.
+    /// </para>
+    /// <para>
+    /// A file-mode process with no mounts is not refused here: the library already refuses an empty
+    /// mount set with <c>host/no-mount</c>, and reporting the same absence twice would put two
+    /// codes on one cause.
+    /// </para>
+    /// </remarks>
+    private static void BindDeploymentMode(
+        HostDeploymentMode mode,
+        bool explicitMode,
+        int mountCount,
+        List<string> rejected)
+    {
+        if (mode is HostDeploymentMode.Managed && mountCount > 0)
+        {
+            rejected.Add(
+                $"'{ModeKey}' is '{ManagedModeName}', which makes the Platform deployment the only "
+                + $"authority for what this process serves, but {mountCount} '--mount' "
+                + (mountCount == 1 ? "input was" : "inputs were")
+                + " given. Remove them, or select "
+                + $"'{FileModeName}' to serve the local Manifests.");
+        }
+
+        if (explicitMode && mode is HostDeploymentMode.File && mountCount == 0)
+        {
+            rejected.Add(
+                $"'{ModeKey}' is '{FileModeName}', which serves the local Manifests, but none was "
+                + "given. Name at least one '--mount <prefix>=<dir>'.");
+        }
+    }
+
+    private static HostDeploymentMode? DeploymentMode(string key, string value, List<string> rejected)
+    {
+        if (string.Equals(value, FileModeName, StringComparison.Ordinal))
+        {
+            return HostDeploymentMode.File;
+        }
+
+        if (string.Equals(value, ManagedModeName, StringComparison.Ordinal))
+        {
+            return HostDeploymentMode.Managed;
+        }
+
+        rejected.Add($"'{key}' was given '{value}'. Choose '{FileModeName}' or '{ManagedModeName}'.");
+        return null;
     }
 
     /// <summary>
@@ -352,6 +788,30 @@ public static class HostConfiguration
         }
 
         return new HostAuthorizationOptions(issuer, mode, introspectionEndpoint, jwksUri);
+    }
+
+    /// <summary>
+    /// Binds the runtime-state root and key-file pair, refusing either half alone.
+    /// </summary>
+    /// <remarks>
+    /// Both-or-neither for the same reason the authorization pair is: a root with no key cannot
+    /// read what it writes, and a key with no root has nowhere to write. A half-configured pair
+    /// would start a process that believes its rotating credential is durable when it is not.
+    /// </remarks>
+    private static void BindRuntimeState(
+        string? root,
+        string? keyFile,
+        List<string> rejected)
+    {
+        if (root is not null && keyFile is null)
+        {
+            rejected.Add($"'{RuntimeStateRootKey}' was given without '{RuntimeStateKeyFileKey}'. Durable runtime state needs the key its records are encrypted with.");
+        }
+
+        if (keyFile is not null && root is null)
+        {
+            rejected.Add($"'{RuntimeStateKeyFileKey}' was given without '{RuntimeStateRootKey}'. Name the directory the key decrypts.");
+        }
     }
 
     /// <summary>

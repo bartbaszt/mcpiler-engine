@@ -76,21 +76,21 @@ internal static class StdioTransport
     /// <summary>Selects the only surface stdio can address.</summary>
     internal static bool TrySelectSurface(
         RuntimeStartResult started,
-        out SurfaceEndpoint? endpoint,
+        out string? address,
         out string? refusal)
     {
         ArgumentNullException.ThrowIfNull(started);
 
         if (!started.Started)
         {
-            endpoint = null;
+            address = null;
             refusal = "stdio cannot serve a runtime that startup refused.";
             return false;
         }
 
         if (started.Mounts.Count != 1)
         {
-            endpoint = null;
+            address = null;
             refusal = $"stdio requires exactly one mounted Manifest because it has no address with which to select one; found {started.Mounts.Count}.";
             return false;
         }
@@ -99,7 +99,7 @@ internal static class StdioTransport
 
         if (mount.Surfaces.Count != 1)
         {
-            endpoint = null;
+            address = null;
             refusal = $"stdio requires exactly one surface because it has no address with which to select one; mount '{mount.Prefix}' exposes {mount.Surfaces.Count}.";
             return false;
         }
@@ -107,8 +107,7 @@ internal static class StdioTransport
         // The scope deliberately is not an HTTP URI. There is no protected network resource
         // on stdio, and a fresh process-local value prevents a local handle scope from being
         // mistaken for a stable remote audience.
-        string resourceScope = "stdio-process-" + Guid.NewGuid().ToString("N");
-        endpoint = new SurfaceEndpoint(mount, mount.Surfaces[0], resourceScope);
+        address = mount.Prefix + "/" + mount.Surfaces[0].Slug;
         refusal = null;
         return true;
     }
@@ -125,7 +124,7 @@ internal static class StdioTransport
         ArgumentNullException.ThrowIfNull(execution);
         ArgumentNullException.ThrowIfNull(drain);
 
-        if (!TrySelectSurface(started, out SurfaceEndpoint? endpoint, out string? refusal))
+        if (!TrySelectSurface(started, out string? address, out string? refusal))
         {
             throw new InvalidOperationException(refusal);
         }
@@ -136,8 +135,23 @@ internal static class StdioTransport
         // emitted by the command runner on stderr, so the hosted SDK session needs no provider.
         builder.Logging.ClearProviders();
 
+        // Stdio serves the mount set this process started with, and serves it until the session
+        // ends. One generation that never changes gives the same leasing shape the HTTP listener
+        // uses, so session handlers take the same path in both transports.
+        using EngineGenerationManager generations = SingleGeneration(started, execution);
+
+        // The scope deliberately is not an HTTP URI. There is no protected network resource on
+        // stdio, and a fresh process-local value prevents a local handle scope from being
+        // mistaken for a stable remote audience.
+        string resourceIdentity = "stdio-process-" + Guid.NewGuid().ToString("N");
+
         IMcpServerBuilder server = builder.Services
-            .AddMcpServer(options => McpRegistration.ConfigureSurface(options, endpoint!, execution, drain));
+            .AddMcpServer(options => McpRegistration.ConfigureSurface(
+                options,
+                address!,
+                resourceIdentity,
+                generations.LeaseSource,
+                drain));
 
         if (input is null)
         {
@@ -152,6 +166,28 @@ internal static class StdioTransport
         await host.RunAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Wraps one started mount set in one generation that is never replaced.
+    /// </summary>
+    /// <remarks>
+    /// The execution graph belongs to the caller, which disposes it; the generation therefore
+    /// leases and resolves without owning disposal of what it wraps.
+    /// </remarks>
+    private static EngineGenerationManager SingleGeneration(RuntimeStartResult started, EngineExecution execution)
+    {
+        EngineGenerationManager generations = new(HostMode.File);
+
+        // One generation for the life of the process: nothing replaces it, so the retirement
+        // task it would return is deliberately not observed.
+        _ = generations.Activate(new EngineGeneration(
+            number: 0,
+            MountSet.From(started),
+            execution,
+            ownsExecution: false));
+
+        return generations;
+    }
+
     private static async Task<DrainReport> RunDrainingAsync(
         RuntimeStartResult started,
         EngineExecution execution,
@@ -163,7 +199,7 @@ internal static class StdioTransport
         ArgumentNullException.ThrowIfNull(execution);
         ArgumentNullException.ThrowIfNull(drain);
 
-        if (!TrySelectSurface(started, out SurfaceEndpoint? endpoint, out string? refusal))
+        if (!TrySelectSurface(started, out string? address, out string? refusal))
         {
             throw new InvalidOperationException(refusal);
         }
@@ -171,8 +207,17 @@ internal static class StdioTransport
         HostApplicationBuilder builder = Microsoft.Extensions.Hosting.Host.CreateApplicationBuilder();
         builder.Logging.ClearProviders();
 
+        using EngineGenerationManager generations = SingleGeneration(started, execution);
+
+        string resourceIdentity = "stdio-process-" + Guid.NewGuid().ToString("N");
+
         builder.Services
-            .AddMcpServer(options => McpRegistration.ConfigureSurface(options, endpoint!, execution, drain))
+            .AddMcpServer(options => McpRegistration.ConfigureSurface(
+                options,
+                address!,
+                resourceIdentity,
+                generations.LeaseSource,
+                drain))
             .WithStdioServerTransport();
 
         using IHost host = builder.Build();

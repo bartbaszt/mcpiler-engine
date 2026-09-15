@@ -1,10 +1,14 @@
 using System.Text.Json.Nodes;
 
+using MCPiler.Engine.Authentication;
+using MCPiler.Engine.Authentication.OAuth;
 using MCPiler.Engine.Execution;
 using MCPiler.Engine.Execution.Files;
 using MCPiler.Engine.Execution.Outbound;
+using MCPiler.Engine.Execution.Secrets;
 using MCPiler.Engine.Files;
 using MCPiler.Engine.Mcp;
+using MCPiler.Engine.Runtime.Managed;
 
 namespace MCPiler.Engine.Runtime;
 
@@ -79,6 +83,48 @@ public sealed class EngineExecution : IDisposable
         RuntimeStartResult started,
         OutboundConnectionPolicy connections,
         Action<RuntimeDiagnostic>? diagnostics = null)
+        => Create(started, providers: null, connections, diagnostics);
+
+    /// <summary>
+    /// Assembles the execution machinery for a managed runtime that delivered provider values.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A managed generation delivers the values its <c>fromProvider</c> references name in
+    /// memory, and this is where they enter execution. The map is keyed by mount prefix because
+    /// a value belongs to the generation that delivered it: two mounts can declare the same
+    /// provider key and must not resolve each other's value, so the lookup is per mount rather
+    /// than process-wide.
+    /// </para>
+    /// <para>
+    /// Every source is owned by the execution that received it. Disposing the execution clears
+    /// every held provider value, which is what makes a retired generation's secrets
+    /// unreachable instead of merely unreferenced.
+    /// </para>
+    /// </remarks>
+    /// <param name="started">A runtime whose every mount is ready.</param>
+    /// <param name="providers">
+    /// Provider values by mount prefix, or null when the process serves no managed generation.
+    /// A mount absent from the map is served without a provider source, so a manifest naming
+    /// one fails as unresolved rather than resolving from another mount's set.
+    /// </param>
+    /// <param name="connections">Which addresses a connection may be opened to.</param>
+    /// <param name="diagnostics">
+    /// Receives operational diagnostics the engine emits instead of failing a call. A sink
+    /// must not throw; a sink that throws is ignored after the outcome was already decided.
+    /// Sinks may be called concurrently and must be thread-safe.
+    /// </param>
+    /// <param name="rotations">
+    /// Receives one committed refresh-token rotation per mount, so a managed host can reconcile
+    /// it with the deployment that issued the profile. The mount prefix is supplied so a host
+    /// never has to guess which mount a manifest-local profile id belongs to.
+    /// </param>
+    public static EngineExecution Create(
+        RuntimeStartResult started,
+        IReadOnlyDictionary<string, GenerationSecretSource>? providers,
+        OutboundConnectionPolicy connections,
+        Action<RuntimeDiagnostic>? diagnostics = null,
+        RotationNotification? rotations = null)
     {
         ArgumentNullException.ThrowIfNull(started);
         ArgumentNullException.ThrowIfNull(connections);
@@ -100,12 +146,33 @@ public sealed class EngineExecution : IDisposable
                 // byte-identical limits must still receive distinct factories; otherwise one
                 // mount could occupy the other's MaxConnectionsPerServer slots.
                 UpstreamClientFactory clients = new(connections);
-                ExecutionService executions = new(
-                    new UpstreamSender(clients),
-                    new ManifestSecretResolver(new SecretResolutionOptions(started.AllowInlineSecrets)),
-                    started.Files);
+                UpstreamSender sender = new(clients);
 
-                mounts.Add(mount, new MountExecution(clients, executions));
+                // Durable runtime state is scoped to the mount, not the process: records are bound
+                // to the mount that wrote them, so a profile id that appears in two mounts cannot
+                // resolve the other mount's rotated credential. Without a configured runtime-state
+                // directory the runtime keeps its in-memory store, which is the supported
+                // non-durable configuration.
+                AuthenticationRuntime authentication = started.RuntimeState is { } state
+                    ? new AuthenticationRuntime(
+                        sender,
+                        slots: state.CreateForMount(mount.Prefix),
+                        rotationSink: RotationSink(mount.Prefix, rotations))
+                    : new AuthenticationRuntime(sender);
+
+                GenerationSecretSource? generation = null;
+                providers?.TryGetValue(mount.Prefix, out generation);
+
+                ExecutionService executions = new(
+                    sender,
+                    new ManifestSecretResolver(
+                        new SecretResolutionOptions(started.AllowInlineSecrets),
+                        new HostSecretSource(),
+                        generation),
+                    started.Files,
+                    authentication);
+
+                mounts.Add(mount, new MountExecution(clients, executions, authentication, generation));
             }
 
             return new EngineExecution(mounts, started.Files, diagnostics);
@@ -120,6 +187,25 @@ public sealed class EngineExecution : IDisposable
             throw;
         }
     }
+
+    /// <summary>
+    /// Binds the mount prefix onto the host's rotation callback, or supplies none when the host
+    /// does not reconcile. A rotation without a configured runtime-state directory is not
+    /// reconcilable: the value would change and disappear with the process.
+    /// </summary>
+    private static Func<RotatedRefreshToken, CancellationToken, ValueTask>? RotationSink(
+        string mountPrefix,
+        RotationNotification? rotations)
+        => rotations is null
+            ? null
+            : (rotated, token) => rotations(
+                mountPrefix,
+                rotated.ProfileId,
+                rotated.Slot,
+                rotated.AuthorityEpoch,
+                rotated.PreviousRuntimeRevision,
+                rotated.RuntimeRevision,
+                token);
 
     /// <summary>
     /// Streams one HTTP-transfer payload into the runtime's file store and issues its opaque
@@ -284,10 +370,19 @@ public sealed class EngineExecution : IDisposable
     /// <summary>The outbound execution state one independent mount owns.</summary>
     private sealed class MountExecution(
         UpstreamClientFactory clients,
-        ExecutionService executions) : IDisposable
+        ExecutionService executions,
+        AuthenticationRuntime authentication,
+        GenerationSecretSource? providers) : IDisposable
     {
         public ExecutionService Executions { get; } = executions;
 
-        public void Dispose() => clients.Dispose();
+        public void Dispose()
+        {
+            // Providers first: a retired generation's secrets must stop resolving before the
+            // execution that could still read them finishes disposing.
+            providers?.Dispose();
+            authentication.Dispose();
+            clients.Dispose();
+        }
     }
 }

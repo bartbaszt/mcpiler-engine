@@ -1,6 +1,11 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
+using MCPiler.Engine.Authentication;
+using MCPiler.Engine.Authentication.Challenge;
+using MCPiler.Engine.Authentication.Exchange;
+using MCPiler.Engine.Execution.RuntimeState;
+using MCPiler.Engine.Authentication.Signing;
 using MCPiler.Engine.Compound;
 using MCPiler.Engine.Execution.Files;
 using MCPiler.Engine.Files;
@@ -66,9 +71,20 @@ public sealed record ExecutionRequest(ManifestDocument Manifest, string Slug, Js
 /// </remarks>
 public sealed class ExecutionService
 {
+    /// <summary>
+    /// Prefixes an authentication failure reason.
+    /// </summary>
+    /// <remarks>
+    /// A challenge refusal and an ordinary transport fault can both surface as a non-success
+    /// response. The prefix is what lets a caller tell "the upstream refused this credential"
+    /// from "the request failed", which is the difference between reauthorizing and retrying.
+    /// </remarks>
+    public const string AuthFailurePrefix = "auth-failure: ";
+
     private readonly IUpstreamTransport _transport;
     private readonly IManifestSecretResolver _secrets;
     private readonly FileHandleStore? _files;
+    private readonly AuthenticationRuntime? _authentication;
 
     /// <summary>Creates a service over the supplied ports.</summary>
     /// <param name="transport">How an exchange reaches an upstream.</param>
@@ -77,10 +93,15 @@ public sealed class ExecutionService
     /// Where a binary response is stored. With none configured, a binary body is returned as
     /// bytes rather than as a handle.
     /// </param>
+    /// <param name="authentication">
+    /// The dynamic-auth runtime. With none configured, a manifest whose bindings reference an
+    /// authentication profile is refused rather than executed unauthenticated.
+    /// </param>
     public ExecutionService(
         IUpstreamTransport transport,
         IManifestSecretResolver secrets,
-        FileHandleStore? files = null)
+        FileHandleStore? files = null,
+        AuthenticationRuntime? authentication = null)
     {
         ArgumentNullException.ThrowIfNull(transport);
         ArgumentNullException.ThrowIfNull(secrets);
@@ -88,6 +109,7 @@ public sealed class ExecutionService
         _transport = transport;
         _secrets = secrets;
         _files = files;
+        _authentication = authentication;
     }
 
     /// <summary>Executes <paramref name="request"/> and returns what happened.</summary>
@@ -188,17 +210,65 @@ public sealed class ExecutionService
             return Failed(ExecutionFailureKind.Transformation, transformFailure);
         }
 
+        // The profile, when the binding names one, owns the credential references: a profiled
+        // binding declares no scope of its own, because the strategy decides which slots it
+        // reveals. Resolving from the binding's empty list instead would hand every dynamic
+        // strategy no secret at all.
+        AuthenticationProfile? profile = null;
+        if (ManifestBindingDispatcher.AuthenticationRefOf(entry.Binding) is { } profileId)
+        {
+            profile = manifest.EffectiveAuthentication.Profile(profileId);
+
+            if (profile is null)
+            {
+                return Failed(
+                    ExecutionFailureKind.Authentication,
+                    $"The binding references authentication profile '{profileId}', which the manifest does not declare.");
+            }
+        }
+
+        IReadOnlyList<string> credentialRefs = profile is not null
+            ? profile.CredentialRef
+            : ManifestBindingDispatcher.CredentialRefsOf(entry.Binding);
+
         IReadOnlyList<ResolvedCredential> credentials;
         try
         {
             credentials = await _secrets.ResolveAsync(
                 manifest.EffectiveCredentials,
-                ManifestBindingDispatcher.CredentialRefsOf(entry.Binding),
+                credentialRefs,
                 cancellationToken).ConfigureAwait(false);
         }
         catch (CredentialUnavailableException ex)
         {
             return Failed(ExecutionFailureKind.Authentication, ex.Message);
+        }
+
+        // Resolution happens before compilation so a token endpoint failure is reported without
+        // ever building the downstream request.
+        ResolvedAuthentication? authentication = null;
+        if (profile is not null)
+        {
+            if (_authentication is null)
+            {
+                return Failed(
+                    ExecutionFailureKind.Authentication,
+                    $"Authentication profile '{profile.Id}' needs the dynamic-auth runtime, which this execution was not given.");
+            }
+
+            try
+            {
+                authentication = await _authentication
+                    .ResolveAsync(profile, credentials, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is CredentialUnavailableException
+                or UnsupportedAuthenticationStrategyException
+                or AuthenticationPlanException
+                or RuntimeStateStoreException)
+            {
+                return Failed(ExecutionFailureKind.Authentication, ex.Message);
+            }
         }
 
         CompiledRequest compiled;
@@ -211,7 +281,12 @@ public sealed class ExecutionService
                 arguments,
                 request.Files);
 
-            upstream = CredentialApplier.Apply(compiled, credentials);
+            if (authentication?.DestinationAuthority is { } destination)
+            {
+                compiled = Rebind(compiled, destination);
+            }
+
+            upstream = CredentialApplier.Apply(compiled, authentication?.Credentials ?? credentials);
         }
         catch (CredentialUnavailableException ex)
         {
@@ -226,7 +301,7 @@ public sealed class ExecutionService
         }
 
         EngineExecutionResult outcome = await SendAsync(
-                request, operation, compiled, upstream, origins, limits, cancellationToken)
+                request, entry, operation, compiled, upstream, origins, limits, profile, authentication, cancellationToken)
             .ConfigureAwait(false);
 
         // After the exchange, and only for a response that arrived whole and inside the
@@ -252,11 +327,14 @@ public sealed class ExecutionService
 
     private async Task<EngineExecutionResult> SendAsync(
         ExecutionRequest request,
+        AgentOperationEntry entry,
         ManifestOperation operation,
         CompiledRequest compiled,
         UpstreamRequest upstream,
         OriginAllowList origins,
         ExecutionLimits limits,
+        AuthenticationProfile? profile,
+        ResolvedAuthentication? authentication,
         CancellationToken cancellationToken)
     {
         using var exchange = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -266,18 +344,119 @@ public sealed class ExecutionService
             exchange.CancelAfter(limits.UpstreamRequestTimeout);
         }
 
+        // One attempt per exchange, preserved across redirect hops. A provider signature carries
+        // its own timestamp and nonce, and re-deriving them per hop would make two hops of one
+        // chain look like two independent attempts to a nonce-rejecting upstream.
+        var signingAttempt = authentication?.Signing?.CreateAttempt();
+
+        var policy = SendPolicy(origins, limits, authentication?.Signing, signingAttempt);
+        var effective = compiled;
+
         UpstreamResponse response;
         try
         {
-            response = await _transport.SendAsync(upstream, new UpstreamSendPolicy(origins, OutboundLimits.From(limits)), exchange.Token).ConfigureAwait(false);
+            response = await _transport.SendAsync(upstream, policy, exchange.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (BudgetExpired(exchange, cancellationToken))
         {
-            return TimedOut(compiled, limits.UpstreamRequestTimeout);
+            return TimedOut(effective, limits.UpstreamRequestTimeout);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return Failed(Classify(ex), ex.Message) with { Request = compiled };
+            return Failed(Classify(ex), ex.Message) with { Request = effective };
+        }
+
+        // Response-driven negotiation. The first challenge may seed only the profile-scoped
+        // ephemeral session; a replay happens at most once and only for an operation the profile
+        // declares replay-safe. A refused acquisition is a classified authentication failure
+        // rather than an escaping exception.
+        if (profile is { Kind: AuthenticationKind.ChallengeSession } && _authentication is not null)
+        {
+            ChallengeSessionResult challenge;
+            try
+            {
+                challenge = _authentication.Challenge.ProcessResponse(
+                    profile,
+                    operation.Key,
+                    response.StatusCode,
+                    response.Headers,
+                    replayAttempt: 0,
+                    automaticReplayAllowed: true);
+            }
+            catch (Exception ex) when (ex is CredentialUnavailableException
+                or UnsupportedAuthenticationStrategyException
+                or AuthenticationPlanException)
+            {
+                await response.DisposeAsync().ConfigureAwait(false);
+                return Failed(ExecutionFailureKind.Authentication, ex.Message) with { Request = effective };
+            }
+
+            if (challenge.Disposition == ChallengeSessionDisposition.Replay)
+            {
+                await response.DisposeAsync().ConfigureAwait(false);
+
+                try
+                {
+                    ResolvedAuthentication replayed = await _authentication
+                        .ResolveAsync(profile, [], exchange.Token)
+                        .ConfigureAwait(false);
+
+                    if (replayed.DestinationAuthority is { } destination)
+                    {
+                        effective = Rebind(compiled, destination);
+                    }
+
+                    upstream = CredentialApplier.Apply(effective, replayed.Credentials);
+
+                    // A replay is a new exchange. The provider sees a fresh nonce and timestamp
+                    // because the previous attempt was already presented with the challenged
+                    // request the upstream refused.
+                    signingAttempt = replayed.Signing?.CreateAttempt();
+                    policy = SendPolicy(origins, limits, replayed.Signing, signingAttempt);
+
+                    response = await _transport.SendAsync(upstream, policy, exchange.Token).ConfigureAwait(false);
+
+                    challenge = _authentication.Challenge.ProcessResponse(
+                        profile,
+                        operation.Key,
+                        response.StatusCode,
+                        response.Headers,
+                        replayAttempt: 1,
+                        automaticReplayAllowed: true);
+                }
+                catch (OperationCanceledException) when (BudgetExpired(exchange, cancellationToken))
+                {
+                    return TimedOut(effective, limits.UpstreamRequestTimeout);
+                }
+                catch (Exception ex) when (ex is CredentialUnavailableException
+                    or UnsupportedAuthenticationStrategyException
+                    or AuthenticationPlanException
+                    or RuntimeStateStoreException)
+                {
+                    return Failed(ExecutionFailureKind.Authentication, ex.Message) with { Request = effective };
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    return Failed(Classify(ex), ex.Message) with { Request = effective };
+                }
+            }
+
+            if (challenge.Disposition != ChallengeSessionDisposition.None)
+            {
+                var message = challenge.PublicMessage
+                    ?? "Upstream authentication challenge could not be completed safely.";
+                var status = response.StatusCode;
+
+                await response.DisposeAsync().ConfigureAwait(false);
+
+                return new EngineExecutionResult
+                {
+                    Request = effective,
+                    StatusCode = status,
+                    Failure = ExecutionFailureKind.Authentication,
+                    FailureReason = AuthFailurePrefix + message,
+                };
+            }
         }
 
         await using (response.ConfigureAwait(false))
@@ -286,7 +465,7 @@ public sealed class ExecutionService
             // transport object happens to work today and is not a contract.
             var partial = new EngineExecutionResult
             {
-                Request = compiled,
+                Request = effective,
                 StatusCode = response.StatusCode,
                 ResponseHeaders = response.Headers,
                 ResponseMediaType = response.MediaType,
@@ -327,6 +506,45 @@ public sealed class ExecutionService
                 };
             }
         }
+    }
+
+    /// <summary>
+    /// The send policy, carrying the per-hop signing closure when the profile signs.
+    /// </summary>
+    /// <remarks>
+    /// The closure captures one attempt for the whole chain. The transport re-applies it per hop
+    /// because a redirect target is a different request that no signature has covered yet, while
+    /// a single timestamp and nonce keep the chain legible as one attempt.
+    /// </remarks>
+    private static UpstreamSendPolicy SendPolicy(
+        OriginAllowList origins,
+        ExecutionLimits limits,
+        ResolvedRequestSigning? signing,
+        RequestSigningAttempt? attempt)
+    {
+        var policy = new UpstreamSendPolicy(origins, OutboundLimits.From(limits));
+
+        if (signing is null || attempt is null)
+        {
+            return policy;
+        }
+
+        return policy with
+        {
+            SignRequest = (request, _, token) => signing.SignAsync(request, attempt, token),
+        };
+    }
+
+    /// <summary>Rebinds a compiled request onto a strategy-selected destination authority.</summary>
+    private static CompiledRequest Rebind(CompiledRequest compiled, Uri destination)
+    {
+        var uri = TokenSessionExchangeService.RebindUri(compiled.Uri, destination);
+
+        return compiled with
+        {
+            Uri = uri,
+            ExactUrl = uri.ToString(),
+        };
     }
 
     private async Task<EngineExecutionResult> ReadBodyAsync(
@@ -386,7 +604,7 @@ public sealed class ExecutionService
     /// </remarks>
     internal static ExecutionFailureKind Classify(Exception exception) => exception switch
     {
-        CredentialUnavailableException => ExecutionFailureKind.Authentication,
+        CredentialUnavailableException or RuntimeStateStoreException => ExecutionFailureKind.Authentication,
         OriginPolicyViolationException => ExecutionFailureKind.OriginPolicy,
         AddressPolicyViolationException or HostResolutionException => ExecutionFailureKind.AddressPolicy,
         RedirectLimitException => ExecutionFailureKind.RedirectLimit,

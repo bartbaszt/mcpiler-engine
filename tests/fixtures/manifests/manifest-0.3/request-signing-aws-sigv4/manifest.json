@@ -1,0 +1,69 @@
+{
+  "manifestFormatVersion": "0.3",
+  "sections": {
+    "server": {
+      "inline": {
+        "name": "Request Signing"
+      }
+    },
+    "policy": {
+      "inline": {
+        "baseUrl": "https://api.example.com/v1"
+      }
+    },
+    "operations": {
+      "inline": {
+        "operations": [
+          { "key": "GET /pets", "method": "GET", "path": "/pets" }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "operations": [
+          {
+            "slug": "list-pets",
+            "name": "List pets",
+            "binding": {
+              "type": "http",
+              "operation": "GET /pets",
+              "authenticationRef": "request-signing"
+            }
+          }
+        ]
+      }
+    },
+    "credentials": {
+      "inline": {
+        "formatVersion": 3,
+        "credentials": [
+          {
+            "id": "signing-aws-access-key",
+            "scheme": "request-signing",
+            "slot": "signingSecret",
+            "value": { "fromEnv": "MCPILER_SIGNING_SECRET" }
+          }
+        ]
+      }
+    },
+    "authentication": {
+      "inline": {
+        "formatVersion": 1,
+        "profiles": [
+          {
+            "id": "request-signing",
+            "kind": "request-signing",
+            "configuration": {
+              "strategyId": "request-signing-aws-sigv4",
+              "inputs": { "accessKeyId": "example-access-key" }
+            },
+            "authenticationOrigins": ["https://api.example.com:443"],
+            "destinationOrigins": ["https://api.example.com:443"],
+            "credentialRef": ["signing-aws-access-key"],
+            "scopeFingerprint": "0000000000000000000000000000000000000000000000000000000000000006"
+          }
+        ]
+      }
+    }
+  }
+}

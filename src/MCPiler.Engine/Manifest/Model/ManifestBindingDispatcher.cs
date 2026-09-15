@@ -77,6 +77,20 @@ public static class ManifestBindingDispatcher
         => TryResolveHttp(binding)?.CredentialRef ?? [];
 
     /// <summary>
+    /// Returns the authentication profile id governing <paramref name="binding"/>, or
+    /// <c>null</c> when it declares none.
+    /// </summary>
+    /// <remarks>
+    /// Profile scope resolves through the same seam as credential scope, for the same reason:
+    /// a validation gate that resolved the profile from a different binding than the one that
+    /// executes would approve an authentication path the runtime never takes. A transformed
+    /// binding inherits through its base and a compound binding declares none of its own,
+    /// because each step authenticates through its own operation.
+    /// </remarks>
+    public static string? AuthenticationRefOf(ManifestBinding? binding)
+        => TryResolveHttp(binding)?.AuthenticationRef;
+
+    /// <summary>
     /// Returns the program that maps agent arguments onto the request, or <c>null</c> when the
     /// binding declares none.
     /// </summary>

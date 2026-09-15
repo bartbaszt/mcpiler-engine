@@ -12,48 +12,32 @@ using ModelContextProtocol.Server;
 namespace MCPiler.Engine.Host.Mcp;
 
 /// <summary>
-/// One addressable surface, with its protocol definitions cached by negotiated revision.
+/// The address a route represents, without the surface that address resolves to.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Attached to the route as endpoint metadata, which is how a request finds the surface it
-/// addressed. The alternative — reading the path back apart into a mount and a slug — would
-/// make routing decide once and then decide again differently, and the second decision is the
-/// one that would accept a path a router had already normalized.
+/// Endpoint metadata must stay valid for the life of the listener, while the surface an address
+/// resolves to belongs to one immutable generation. Carrying the surface here would freeze the
+/// generation into the route table, so a request admitted after an activation would route under
+/// the new generation and execute against the old surface. The address is therefore the only
+/// thing a route states, and resolution happens through a lease taken for the admission.
 /// </para>
 /// <para>
-/// Definitions are built once for each revision this route actually negotiates. A listing
-/// therefore enumerates objects that already exist, while the revision-dependent advertisement
-/// decision remains request-scoped. Rebuilding on every listing would make byte-identity rest
-/// on repeated rendering rather than on there being one set of objects.
+/// <see cref="Address"/> is null for a managed template route, where the map is wide enough to
+/// carry any mount; the request path is then the address. It is non-null for a file-mode route,
+/// where the address is exactly what was mapped.
 /// </para>
 /// </remarks>
 internal sealed class SurfaceEndpoint
 {
-    private readonly Dictionary<string, IReadOnlyList<Tool>> _definitions =
-        new(StringComparer.Ordinal);
-    private readonly object _definitionsGate = new();
-
-    internal SurfaceEndpoint(
-        MountedManifest mount,
-        MountedSurface surface,
-        string resourceIdentity,
-        string? authorizationResourcePath = null)
+    internal SurfaceEndpoint(string? address, string? authorizationResourcePath = null)
     {
-        Mount = mount;
-        Surface = surface;
-        ResourceIdentity = resourceIdentity;
+        Address = address;
         AuthorizationResourcePath = authorizationResourcePath;
     }
 
-    /// <summary>The mount this surface belongs to.</summary>
-    public MountedManifest Mount { get; }
-
-    /// <summary>The surface addressed.</summary>
-    public MountedSurface Surface { get; }
-
-    /// <summary>The exact protected-resource identity this route represents.</summary>
-    public string ResourceIdentity { get; }
+    /// <summary>The mapped address, or null when the request path is the address.</summary>
+    public string? Address { get; }
 
     /// <summary>
     /// A parent resource path inherited by a child endpoint, or null when the request path itself
@@ -61,21 +45,52 @@ internal sealed class SurfaceEndpoint
     /// </summary>
     public string? AuthorizationResourcePath { get; }
 
-    /// <summary>Maps the compiled catalogue for one negotiated protocol revision.</summary>
-    public IReadOnlyList<Tool> Definitions(string? negotiatedProtocolRevision)
+    /// <summary>The address this request actually used.</summary>
+    /// <remarks>
+    /// A trailing slash is not part of an address. ASP.NET Core routing treats it as absent when
+    /// matching a literal pattern, and the mapped address never carries one, so it is removed here
+    /// before the address is compared.
+    /// </remarks>
+    public string ResolveAddress(HttpContext context)
     {
-        string key = negotiatedProtocolRevision ?? string.Empty;
-
-        lock (_definitionsGate)
+        if (Address is { } mapped)
         {
-            if (!_definitions.TryGetValue(key, out IReadOnlyList<Tool>? definitions))
-            {
-                definitions = SdkTranslation.Define(Surface, negotiatedProtocolRevision);
-                _definitions.Add(key, definitions);
-            }
-
-            return definitions;
+            return mapped;
         }
+
+        string path = context.Request.Path.Value ?? "/";
+
+        return path.Length > 1 && path.EndsWith('/') ? path[..^1] : path;
+    }
+}
+
+/// <summary>
+/// The address a request reached, once a transfer child is folded back onto its parent.
+/// </summary>
+/// <remarks>
+/// A managed listener maps one template, which also matches the transfer children. Those children
+/// are not protected resources of their own: they inherit the parent surface's identity and mount,
+/// so an authorization or dispatch decision must resolve them to the parent address rather than to
+/// the whole path.
+/// </remarks>
+internal static class RequestAddress
+{
+    /// <summary>Resolves the request to the surface address that governs it.</summary>
+    internal static string Resolve(HttpContext context, SurfaceEndpoint route)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(route);
+
+        if (route.Address is not null)
+        {
+            return route.Address;
+        }
+
+        string path = route.ResolveAddress(context);
+
+        return Files.TransferPath.TryParse(path, out Files.TransferPath transfer)
+            ? transfer.ParentAddress
+            : path;
     }
 }
 
@@ -103,6 +118,14 @@ internal sealed class SurfaceEndpoint
 /// </remarks>
 internal static class McpRegistration
 {
+    /// <summary>The template a managed listener maps once and resolves per request.</summary>
+    /// <remarks>
+    /// One template rather than one route per address: a managed activation may introduce a mount
+    /// the process has never seen, and a route added after the listener started would need the
+    /// endpoint table to grow. The address is what the lease resolves, so the map can stay wide.
+    /// </remarks>
+    public const string ManagedTemplate = "/{**path}";
+
     /// <summary>Registers the protocol server and its HTTP transport.</summary>
     public static void AddEngineMcp(IServiceCollection services)
     {
@@ -128,21 +151,16 @@ internal static class McpRegistration
 
         foreach (MountedSurfaceAddress address in mounts.Addresses)
         {
-            app.MapMcp(address.Path).WithMetadata(
-                new SurfaceEndpoint(
-                    address.Mount,
-                    address.Surface,
-                    ResourceIdentity(app, address.Path)));
+            app.MapMcp(address.Path).WithMetadata(new SurfaceEndpoint(address.Path));
         }
     }
 
-    private static string ResourceIdentity(WebApplication app, string path)
+    /// <summary>Maps the managed template an activation resolves through.</summary>
+    public static void MapManagedTemplate(WebApplication app)
     {
-        // The listener may bind port zero and learn its concrete authority only after start,
-        // so route registration cannot freeze scheme/host here. The path is the part routing
-        // decides. ConfigureSession replaces this provisional value with the request's exact
-        // canonical identity before a handler is installed.
-        return path;
+        ArgumentNullException.ThrowIfNull(app);
+
+        app.MapMcp(ManagedTemplate).WithMetadata(new SurfaceEndpoint(address: null));
     }
 
     /// <summary>
@@ -165,6 +183,11 @@ internal static class McpRegistration
     /// field. The default is this assembly's own name and version, which would tell a client
     /// connected to one Manifest exactly what a client connected to another is told.
     /// </para>
+    /// <para>
+    /// The session is not pinned to the generation it started in. Each listing and each call
+    /// takes a fresh lease and resolves its address again, so a surface an activation removed
+    /// cannot be reached through a session that predates the activation.
+    /// </para>
     /// </remarks>
     private static Task ConfigureSessionAsync(
         HttpContext context,
@@ -176,23 +199,24 @@ internal static class McpRegistration
             return Task.CompletedTask;
         }
 
-        SurfaceEndpoint addressed = new(
-            route.Mount,
-            route.Surface,
-            MountAuthorization.CanonicalResource(
-                context.Request.Scheme,
-                context.Request.Host.Value ?? string.Empty,
-                context.Request.Path.Value ?? "/"));
+        EngineGenerationManager generations =
+            context.RequestServices.GetRequiredService<EngineGenerationManager>();
 
-        EngineExecution execution = context.RequestServices.GetRequiredService<EngineExecution>();
+        string address = RequestAddress.Resolve(context, route);
+        string identity = MountAuthorization.CanonicalResource(
+            context.Request.Scheme,
+            context.Request.Host.Value ?? string.Empty,
+            route.AuthorizationResourcePath ?? address);
+
         DrainCoordinator drain = context.RequestServices.GetRequiredService<DrainCoordinator>();
-        ConfigureSurface(options, addressed, execution, drain);
+
+        ConfigureSurface(options, address, identity, generations.LeaseSource, drain);
 
         return Task.CompletedTask;
     }
 
     /// <summary>
-    /// Configures one protocol session from one already-derived surface.
+    /// Configures one protocol session from one already-derived address.
     /// </summary>
     /// <remarks>
     /// Both transports call this method. Keeping identity, listing and invocation handlers here
@@ -201,35 +225,73 @@ internal static class McpRegistration
     /// </remarks>
     internal static void ConfigureSurface(
         McpServerOptions options,
-        SurfaceEndpoint addressed,
-        EngineExecution execution,
+        string address,
+        string resourceIdentity,
+        GenerationLeaseSource leases,
         DrainCoordinator drain)
     {
         ArgumentNullException.ThrowIfNull(options);
-        ArgumentNullException.ThrowIfNull(addressed);
-        ArgumentNullException.ThrowIfNull(execution);
+        ArgumentException.ThrowIfNullOrWhiteSpace(address);
+        ArgumentException.ThrowIfNullOrWhiteSpace(resourceIdentity);
+        ArgumentNullException.ThrowIfNull(leases);
         ArgumentNullException.ThrowIfNull(drain);
 
-        ServerIdentity identity = addressed.Surface.Identity;
-
-        options.ServerInfo = new Implementation
+        if (leases() is not { } lease)
         {
-            Name = identity.Name,
-            Version = identity.Version,
-            Title = identity.Title,
-            Description = identity.Description,
-        };
+            return;
+        }
 
-        options.Capabilities ??= new ServerCapabilities();
-        options.Capabilities.Tools = new ToolsCapability();
-
-        options.Handlers.ListToolsHandler = (request, _)
-            => ValueTask.FromResult(new ListToolsResult
+        using (lease)
+        {
+            if (!lease.Generation.TryResolve(address, out SurfaceResolution? resolved) || resolved is null)
             {
-                Tools = [.. addressed.Definitions(request.Server?.NegotiatedProtocolVersion)],
-            });
+                return;
+            }
 
-        options.Handlers.CallToolHandler = (request, token)
-            => ToolBridge.InvokeAsync(addressed, execution, drain, request, token);
+            ServerIdentity identity = resolved.Surface.Identity;
+
+            options.ServerInfo = new Implementation
+            {
+                Name = identity.Name,
+                Version = identity.Version,
+                Title = identity.Title,
+                Description = identity.Description,
+            };
+
+            options.Capabilities ??= new ServerCapabilities();
+            options.Capabilities.Tools = new ToolsCapability();
+
+            options.Handlers.ListToolsHandler = (request, _)
+                => ListToolsAsync(address, leases, request.Server?.NegotiatedProtocolVersion);
+
+            options.Handlers.CallToolHandler = (request, token)
+                => ToolBridge.InvokeAsync(address, resourceIdentity, leases, drain, request, token);
+        }
+    }
+
+    private static ValueTask<ListToolsResult> ListToolsAsync(
+        string address,
+        GenerationLeaseSource leases,
+        string? negotiatedProtocolRevision)
+    {
+        if (leases() is not { } lease)
+        {
+            return ValueTask.FromResult(new ListToolsResult { Tools = [] });
+        }
+
+        using (lease)
+        {
+            if (!lease.Generation.TryResolve(address, out SurfaceResolution? resolved) || resolved is null)
+            {
+                // The surface this session started against is no longer served. An empty list is
+                // the answer a route that never existed would give.
+                return ValueTask.FromResult(new ListToolsResult { Tools = [] });
+            }
+
+            return ValueTask.FromResult(new ListToolsResult
+            {
+                Tools = [.. lease.Generation.Definitions(address, resolved.Surface, negotiatedProtocolRevision)],
+            });
+        }
     }
 }

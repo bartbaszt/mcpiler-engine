@@ -1,4 +1,5 @@
 using MCPiler.Engine.Execution.Files;
+using MCPiler.Engine.Execution.Secrets.RuntimeState;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Mcp.Navigator;
 
@@ -233,8 +234,30 @@ public sealed class RuntimeStartResult
     /// </remarks>
     internal bool AllowInlineSecrets { get; private init; }
 
+    /// <summary>
+    /// The opened runtime-state directory, present once the process may start. Null keeps
+    /// runtime-owned mutable state in memory only.
+    /// </summary>
+    /// <remarks>
+    /// Carried because the directory startup verified is the directory execution writes through.
+    /// Reopening it per invocation would re-read a key and re-check a root that was already
+    /// accepted, and the object that was checked would not be the object that stores anything.
+    /// </remarks>
+    internal RuntimeStateLocation? RuntimeState { get; private init; }
+
     /// <summary>Every mount, in configuration order. Empty when the process is refused.</summary>
     public IReadOnlyList<MountedManifest> Mounts { get; }
+
+    /// <summary>
+    /// Whether runtime-owned mutable authentication state survives a restart.
+    /// </summary>
+    /// <remarks>
+    /// Public because it is the one fact about the runtime-state configuration an operator needs
+    /// at startup: a deployment that leaves a rotating refresh token in memory loses it on
+    /// restart and must reauthorize, and that is a supported choice rather than a defect. Naming
+    /// it in the startup report is what keeps the choice visible.
+    /// </remarks>
+    public bool DurableRuntimeState => RuntimeState is not null;
 
     /// <summary>Every reason the process will not start. Empty on success.</summary>
     public IReadOnlyList<StartupRefusal> Refusals { get; }
@@ -249,8 +272,14 @@ public sealed class RuntimeStartResult
         IReadOnlyList<MountedManifest> mounts,
         IReadOnlyList<StartupRefusal> warnings,
         FileHandleStore files,
-        bool allowInlineSecrets)
-        => new(mounts, [], warnings) { Files = files, AllowInlineSecrets = allowInlineSecrets };
+        bool allowInlineSecrets,
+        RuntimeStateLocation? runtimeState)
+        => new(mounts, [], warnings)
+        {
+            Files = files,
+            AllowInlineSecrets = allowInlineSecrets,
+            RuntimeState = runtimeState,
+        };
 
     internal static RuntimeStartResult Refused(IReadOnlyList<StartupRefusal> refusals, IReadOnlyList<StartupRefusal> warnings)
         => new([], refusals, warnings);

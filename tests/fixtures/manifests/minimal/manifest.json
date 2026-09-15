@@ -1,5 +1,5 @@
 {
-  "manifestFormatVersion": "0.2",
+  "manifestFormatVersion": "0.3",
   "sections": {
     "server": { "inline": { "name": "Example API" } },
     "policy": { "inline": { "baseUrl": "https://api.example.com" } },
