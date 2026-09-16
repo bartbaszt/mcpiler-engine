@@ -240,6 +240,119 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_refused_candidate_is_reported_as_received_and_failed_on_the_next_poll()
+    {
+        var original = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+
+        // A mount whose bundle is not an archive, so the loader refuses the candidate whole.
+        var broken = new Dictionary<string, object?>
+        {
+            ["protocolVersion"] = 1,
+            ["generationId"] = "g2",
+            ["mounts"] = new[]
+            {
+                new { prefix = "/mcp/connector", bundle = Convert.ToBase64String(Encoding.UTF8.GetBytes("not an archive")) },
+            },
+            ["secrets"] = new Dictionary<string, string>(StringComparer.Ordinal),
+            ["metadata"] = new { desiredRevisionId = "g2", engineVersion = "fixture" },
+        };
+
+        var delivering = false;
+        var requests = new System.Collections.Concurrent.ConcurrentQueue<JsonObject>();
+        var originalBytes = JsonSerializer.SerializeToUtf8Bytes(original);
+        var brokenBytes = JsonSerializer.SerializeToUtf8Bytes(broken);
+
+        await using var platform = await PlatformAsync(request =>
+        {
+            requests.Enqueue(request);
+            return Response.Bytes(delivering ? brokenBytes : originalBytes, isGeneration: true);
+        });
+
+        await using ManagedProcess engine = await StartAsync(platform);
+
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+
+        // The next delivery is the candidate the loader refuses. Engine keeps serving g1.
+        delivering = true;
+
+        await WaitForAsync(() => requests.Any(request =>
+            string.Equals(request["lastCandidateOutcome"]?.GetValue<string>(), "candidate-failed", StringComparison.Ordinal)));
+
+        // The poll after the refusal must report the receipt AND the failure: the Platform
+        // distinguishes "offered and refused" from "never arrived", and the diagnostics are the
+        // only non-secret evidence an operator has of why it was refused.
+        var reporting = requests.Last(request =>
+            string.Equals(request["lastCandidateOutcome"]?.GetValue<string>(), "candidate-failed", StringComparison.Ordinal));
+
+        Assert.Equal("g2", reporting["deliveredGenerationId"]?.GetValue<string>());
+        Assert.Equal("g1", reporting["activeGenerationId"]?.GetValue<string>());
+
+        var diagnostics = Assert.IsType<JsonArray>(reporting["lastCandidateDiagnostics"]);
+        var diagnostic = Assert.IsType<JsonObject>(Assert.Single(diagnostics));
+        Assert.NotEmpty(diagnostic["code"]!.GetValue<string>());
+        Assert.NotEmpty(diagnostic["message"]!.GetValue<string>());
+
+        // The report carries a process identity and a monotonically increasing counter, which is
+        // what lets the Platform order reports from one process and refuse a delayed one.
+        Assert.False(string.IsNullOrWhiteSpace(reporting["engineInstanceId"]?.GetValue<string>()));
+        Assert.True(reporting["engineReportSequence"]?.GetValue<long>() > 0);
+
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+    }
+
+    [Fact]
+    public async Task The_pending_reconciliation_count_is_reported_until_the_platform_accepts_it()
+    {
+        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var requests = new System.Collections.Concurrent.ConcurrentQueue<JsonObject>();
+
+        await using var platform = await PlatformAsync(request =>
+        {
+            requests.Enqueue(request);
+            return Response.Generation(generation);
+        });
+
+        // The Platform refuses the report at first, so the rotation stays queued and the count must
+        // keep being reported rather than silently reading as converged.
+        platform.OnReconcile = _ => Response.Status(HttpStatusCode.ServiceUnavailable);
+
+        (ManagedGenerationLoader loader, FileMutableSlotStore slots) = await OpenLoaderWithStateAsync();
+
+        await using ManagedProcess process = await StartAsync(platform, loader);
+
+        await slots.ReplaceAsync(
+            new MutableSlotRecord(
+                "oauth2-client-credentials",
+                "clientSecret",
+                ScopeFingerprint: null,
+                AuthorityEpoch: 1,
+                RuntimeRevision: 1,
+                "CANARY-rotated-value-7f31"),
+            TestContext.Current.CancellationToken);
+
+        process.Worker.RotationCommitted(
+            "/mcp/connector",
+            "oauth2-client-credentials",
+            "clientSecret",
+            authorityEpoch: 1,
+            previousRuntimeRevision: 0,
+            runtimeRevision: 1);
+
+        await WaitForAsync(() => requests.Any(request =>
+            request["pendingReconciliationCount"]?.GetValue<int>() == 1));
+
+        // The Platform accepts the report, so the queue empties and the count returns to zero.
+        platform.OnReconcile = _ => Response.Status(HttpStatusCode.OK, "{\"outcome\":\"recorded\"}");
+
+        await process.Worker.ReconcilePendingAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, process.Worker.PendingReconciliations);
+
+        await WaitForAsync(() => requests.Any(request =>
+            request["pendingReconciliationCount"]?.GetValue<int>() == 0));
+    }
+
+    [Fact]
     public async Task A_missing_deployment_secret_file_is_a_retryable_fault_not_a_crash()
     {
         await using var platform = await PlatformAsync(_ => Response.Generation(
@@ -782,6 +895,9 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         public static Response Silent() => new(200, null, Delay: true);
 
         public static Response Status(HttpStatusCode status) => new((int)status, null, Delay: false);
+
+        public static Response Status(HttpStatusCode status, string body)
+            => new((int)status, Encoding.UTF8.GetBytes(body), Delay: false);
     }
 
     /// <summary>

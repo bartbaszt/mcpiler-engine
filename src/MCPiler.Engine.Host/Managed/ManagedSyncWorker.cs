@@ -36,9 +36,20 @@ internal sealed class ManagedSyncWorker : IDisposable
     private readonly string _engineVersion;
     private readonly PendingReconciliationQueue _reconciliations = new();
 
+    /// <summary>
+    /// Minted once per process. The Platform stores it with every report so it can order the
+    /// reports of one process monotonically, which is what lets a delayed poll be refused instead
+    /// of recorded over a newer observation.
+    /// </summary>
+    private readonly string _instanceId = Guid.NewGuid().ToString("N");
+
+    private long _reportSequence;
+
     private string? _activeGenerationId;
     private string? _deliveredGenerationId;
     private string? _lastCandidateOutcome;
+    private string? _lastCandidateCode;
+    private string? _lastCandidateMessage;
     private Task? _running;
     private CancellationTokenSource? _stopping;
     private bool _disposed;
@@ -381,6 +392,12 @@ internal sealed class ManagedSyncWorker : IDisposable
     /// </remarks>
     private async Task<bool> TryActivateAsync(ManagedGenerationDelivery delivery, CancellationToken cancellationToken)
     {
+        // Receipt is recorded the moment the payload is accepted, before any attempt to load it.
+        // The Platform distinguishes "received and refused" from "never arrived", and a refusal
+        // that left this unset would make the deployment read as pending when Engine had rejected
+        // the candidate outright.
+        _deliveredGenerationId = delivery.GenerationId;
+
         ManagedGenerationLoad loaded;
 
         try
@@ -436,8 +453,9 @@ internal sealed class ManagedSyncWorker : IDisposable
         Task retirement = _generations.Activate(candidate);
 
         _activeGenerationId = delivery.GenerationId;
-        _deliveredGenerationId = delivery.GenerationId;
         _lastCandidateOutcome = ManagedProtocol.Active;
+        _lastCandidateCode = null;
+        _lastCandidateMessage = null;
 
         _diagnostics?.Invoke(
             $"managed: activated generation {delivery.GenerationId} at address number {number}.");
@@ -470,7 +488,12 @@ internal sealed class ManagedSyncWorker : IDisposable
 
     private void CandidateRefused(string generationId, string code, string message)
     {
+        // The receipt was recorded before the load attempt, so this only records the outcome. The
+        // Platform distinguishes "received and refused" from "never arrived" using that receipt.
         _lastCandidateOutcome = ManagedProtocol.CandidateFailed;
+        _lastCandidateCode = code;
+        _lastCandidateMessage = message;
+
         _diagnostics?.Invoke($"managed: candidate {generationId} refused [{code}] {message}");
     }
 
@@ -482,7 +505,15 @@ internal sealed class ManagedSyncWorker : IDisposable
         ActiveGenerationId = _activeGenerationId,
         DeliveredGenerationId = _deliveredGenerationId,
         LastCandidateOutcome = _lastCandidateOutcome,
-        LastCandidateDiagnostics = [],
+        LastCandidateDiagnostics = _lastCandidateCode is null || _lastCandidateMessage is null
+            ? []
+            : [new ManagedDiagnosticMessage { Code = _lastCandidateCode, Message = _lastCandidateMessage }],
+
+        // Rotations still awaiting acknowledgement. The Platform records the count for the status
+        // surface, which is how an administrator sees a credential that has not converged.
+        PendingReconciliationCount = _reconciliations.Count,
+        EngineInstanceId = _instanceId,
+        EngineReportSequence = ++_reportSequence,
     };
 
     /// <inheritdoc />

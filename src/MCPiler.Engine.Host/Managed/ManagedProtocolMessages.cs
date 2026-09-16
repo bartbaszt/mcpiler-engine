@@ -104,6 +104,25 @@ public sealed class ManagedPollRequestMessage
     /// <summary>The previous candidate's sanitized diagnostics.</summary>
     [JsonPropertyName("lastCandidateDiagnostics")]
     public List<ManagedDiagnosticMessage> LastCandidateDiagnostics { get; set; } = [];
+
+    /// <summary>Rotations this Engine committed locally and has not seen the Platform accept.</summary>
+    [JsonPropertyName("pendingReconciliationCount")]
+    public int PendingReconciliationCount { get; set; }
+
+    /// <summary>
+    /// A random identity minted once per Engine process, so the Platform can order reports within
+    /// one process and recognize a restarted one.
+    /// </summary>
+    [JsonPropertyName("engineInstanceId")]
+    public string? EngineInstanceId { get; set; }
+
+    /// <summary>
+    /// This process's report counter, incremented for every poll it sends. Combined with
+    /// <see cref="EngineInstanceId"/> it gives every report a total order, which is what lets the
+    /// Platform refuse a delayed request rather than record it over a newer observation.
+    /// </summary>
+    [JsonPropertyName("engineReportSequence")]
+    public long EngineReportSequence { get; set; }
 }
 
 /// <summary>One bounded, sanitized diagnostic.</summary>
