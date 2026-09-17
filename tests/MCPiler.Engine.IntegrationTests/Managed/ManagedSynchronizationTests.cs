@@ -301,6 +301,60 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_refused_candidate_is_not_retried_in_a_hot_loop()
+    {
+        var original = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+
+        var broken = new Dictionary<string, object?>
+        {
+            ["protocolVersion"] = 1,
+            ["generationId"] = "g2",
+            ["mounts"] = new[]
+            {
+                new { prefix = "/mcp/connector", bundle = Convert.ToBase64String(Encoding.UTF8.GetBytes("not an archive")) },
+            },
+            ["secrets"] = new Dictionary<string, string>(StringComparer.Ordinal),
+            ["metadata"] = new { desiredRevisionId = "g2", engineVersion = "fixture" },
+        };
+
+        var delivering = false;
+        var requests = new System.Collections.Concurrent.ConcurrentQueue<JsonObject>();
+        var originalBytes = JsonSerializer.SerializeToUtf8Bytes(original);
+        var brokenBytes = JsonSerializer.SerializeToUtf8Bytes(broken);
+
+        await using var platform = await PlatformAsync(request =>
+        {
+            requests.Enqueue(request);
+            return Response.Bytes(delivering ? brokenBytes : originalBytes, isGeneration: true);
+        });
+
+        await using ManagedProcess engine = await StartAsync(platform);
+
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+
+        delivering = true;
+
+        await WaitForAsync(() => requests.Any(request =>
+            string.Equals(request["lastCandidateOutcome"]?.GetValue<string>(), "candidate-failed", StringComparison.Ordinal)));
+
+        // The Platform keeps offering the same desired generation until its state changes, so an
+        // unthrottled retry after a refusal would turn one bad candidate into a request storm: a
+        // smoke run observed roughly 150 polls per second, each one a full desired-state
+        // compilation on the control plane. The bounded backoff must apply instead. This test
+        // constructs the worker with a 20-50 ms backoff, whose jitter floor is 25 ms, so three
+        // seconds can admit at most about 120 delayed retries; a hot loop admits thousands.
+        var seen = requests.Count;
+
+        await Task.Delay(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+
+        var added = requests.Count - seen;
+
+        Assert.True(
+            added <= 200,
+            $"A refused candidate was retried {added} time(s) in three seconds; retries must be bounded by the backoff.");
+    }
+
+    [Fact]
     public async Task The_pending_reconciliation_count_is_reported_until_the_platform_accepts_it()
     {
         var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");

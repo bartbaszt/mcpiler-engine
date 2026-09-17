@@ -338,18 +338,29 @@ internal sealed class ManagedSyncWorker : IDisposable
                 switch (result.Outcome)
                 {
                     case ManagedPollOutcome.Delivered when result.Delivery is { } delivery:
-                        _backoff.Reset();
-
                         // A duplicate delivery of the generation already active is acknowledged,
                         // not rebuilt. Activating a second generation over an identical one would
                         // retire a generation whose leases are still executing, for no change.
                         if (string.Equals(delivery.GenerationId, _activeGenerationId, StringComparison.Ordinal))
                         {
                             _deliveredGenerationId = delivery.GenerationId;
+                            _backoff.Reset();
                             break;
                         }
 
-                        _ = await TryActivateAsync(delivery, cancellationToken).ConfigureAwait(false);
+                        if (await TryActivateAsync(delivery, cancellationToken).ConfigureAwait(false))
+                        {
+                            _backoff.Reset();
+                            break;
+                        }
+
+                        // A candidate the loader refused is retried, but never in a hot loop. The
+                        // Platform keeps offering the same desired generation until its state
+                        // changes, and every poll costs a full desired-state compilation there, so
+                        // an immediate retry would turn one bad candidate into a request storm
+                        // against the control plane. The bounded backoff applies instead, and the
+                        // refusal stays recorded for the next report.
+                        await Task.Delay(_backoff.Next(), cancellationToken).ConfigureAwait(false);
                         break;
 
                     case ManagedPollOutcome.Unchanged:
