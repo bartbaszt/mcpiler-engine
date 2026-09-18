@@ -439,6 +439,14 @@ public sealed class FileTransferTests : IDisposable
         string scopes = scoped ? ", \"requiredScopes\": [\"tools.invoke\"]" : string.Empty;
         List<string> fileSettings = [];
 
+        // A mount that declares a scope is a protected resource, so the fixture has to say so:
+        // the two members are independent, and a scope under an unprotected mount is refused.
+        // The authorization configuration is the caller's to supply — this suite serves over a
+        // local transport where no issuer is needed.
+        string protection = scoped
+            ? "\"authenticationRequired\": true,"
+            : "\"authenticationRequired\": false,";
+
         if (uploadLimitBytes is { } limit)
         {
             fileSettings.Add($"\"uploadSizeLimitBytes\": {limit}");
@@ -459,6 +467,7 @@ public sealed class FileTransferTests : IDisposable
               "sections": {
                 "server": { "inline": {
                   "name": "File API",
+                  {{protection}}
                   "surfaces": [
                     { "slug": "full", "isDefault": true{{scopes}},
                       "operations": [ { "operation": "upload-file" }, { "operation": "download-file" } ] }

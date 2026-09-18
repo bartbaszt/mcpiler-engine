@@ -1,4 +1,6 @@
 using MCPiler.Engine.Host.Configuration;
+using MCPiler.Engine.Host.Files;
+using MCPiler.Engine.Host.Hosting;
 using MCPiler.Engine.Runtime;
 
 using Microsoft.AspNetCore.Http;
@@ -37,7 +39,7 @@ internal static class AuthorizationRefusal
                 return new StartupRefusal(
                     mount.Prefix,
                     "auth/issuer-missing",
-                    $"Mount '{mount.Prefix}' declares a surface that requires a scope, so every request to it must carry a token, and no issuer is configured to validate one against. Set 'issuer' and 'token-validation'.")
+                    $"Mount '{mount.Prefix}' requires authorization, so every request to it must carry a token, and no issuer is configured to validate one against. Set 'issuer' and 'token-validation'.")
                 {
                     Manifest = mount.Path,
                 };
@@ -62,16 +64,71 @@ internal static class SurfaceMetadata
     /// <summary>The well-known prefix the SDK's handler mirrors the resource path under.</summary>
     private const string WellKnownPrefix = "/.well-known/oauth-protected-resource";
 
+    /// <summary>
+    /// Whether the mount an addressed resource belongs to requires a token, or <c>null</c> when
+    /// no mount serves the address this request named.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the same decision the mount middleware makes, taken from the same generation lease,
+    /// so the document a client fetches and the response it later receives cannot disagree about
+    /// whether the resource is protected. Reading protection from anywhere else here would
+    /// reintroduce exactly the divergence this change exists to remove.
+    /// </para>
+    /// <para>
+    /// A null is not a permission to serve metadata. An address no mount serves gets the same
+    /// answer an unprotected mount gets — no document — because publishing a document for an
+    /// address that names nothing would confirm the address exists.
+    /// </para>
+    /// </remarks>
+    internal static bool? MountRequiresAuthorization(
+        HttpContext context,
+        EngineGenerationManager generations)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(generations);
+
+        string resource = ResourceOf(context);
+        string address = string.IsNullOrEmpty(resource) ? "/" : resource;
+
+        // A transfer child is not a protected resource of its own: it inherits the mount that
+        // owns the surface it hangs off, which is the same resolution the middleware performs.
+        if (TransferPath.TryParse(address, out TransferPath transfer))
+        {
+            address = transfer.ParentAddress;
+        }
+
+        if (generations.LeaseSource() is not { } lease)
+        {
+            return null;
+        }
+
+        using (lease)
+        {
+            return lease.Generation.TryResolve(address, out SurfaceResolution? resolved)
+                && resolved is not null
+                ? resolved.Mount.RequiresAuthorization()
+                : null;
+        }
+    }
+
+    /// <summary>
+    /// The resource path a metadata request mirrors, with the well-known prefix removed.
+    /// </summary>
+    private static string ResourceOf(HttpContext context)
+    {
+        string path = context.Request.Path.Value ?? "/";
+
+        return path.StartsWith(WellKnownPrefix, StringComparison.Ordinal)
+            ? path[WellKnownPrefix.Length..]
+            : path;
+    }
+
     internal static ProtectedResourceMetadata Build(
         HttpContext context,
         HostAuthorizationOptions options)
     {
-        // The metadata request carries the well-known prefix ahead of the resource path it
-        // mirrors; the canonical identifier is the resource itself, prefix stripped.
-        string path = context.Request.Path.Value ?? "/";
-        string resource = path.StartsWith(WellKnownPrefix, StringComparison.Ordinal)
-            ? path[WellKnownPrefix.Length..]
-            : path;
+        string resource = ResourceOf(context);
 
         string canonical = MountAuthorization.CanonicalResource(
             context.Request.Scheme,

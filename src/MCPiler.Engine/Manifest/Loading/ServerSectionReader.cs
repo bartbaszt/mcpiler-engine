@@ -5,14 +5,18 @@ using MCPiler.Engine.Manifest.Validation;
 namespace MCPiler.Engine.Manifest.Loading;
 
 /// <summary>
-/// Reads the <c>server</c> section: display identity plus the surfaces that define routing
-/// and exposure.
+/// Reads the <c>server</c> section: display identity, the mount's authorization posture, and
+/// the surfaces that define routing and exposure.
 /// </summary>
 internal static class ServerSectionReader
 {
     internal static readonly string[] SectionMembers =
-        ["formatVersion", "name", "description", "version", "surfaces"];
+        ["formatVersion", "name", "description", "version", "authenticationRequired", "surfaces"];
 
+    // 'authenticationRequired' is deliberately absent from this list. The member describes the
+    // mount, and a surface that declared it would be stating a value that may never differ from
+    // its siblings'; leaving it out makes that an unknown member rather than a silently
+    // collapsed duplicate.
     internal static readonly string[] SurfaceMembers =
     [
         "slug",
@@ -40,7 +44,8 @@ internal static class ServerSectionReader
         context.VerifySectionFormatVersion(root, ServerSection.FormatVersion);
 
         var name = context.RequiredText(root, "name", string.Empty);
-        var surfaces = ReadSurfaces(root, context);
+        var authenticationRequired = context.Flag(root, "authenticationRequired", string.Empty, fallback: true);
+        var surfaces = ReadSurfaces(root, context, authenticationRequired);
 
         if (name is null)
         {
@@ -51,12 +56,14 @@ internal static class ServerSectionReader
             name,
             context.Text(root, "description", string.Empty),
             context.Text(root, "version", string.Empty),
-            surfaces);
+            surfaces,
+            authenticationRequired);
     }
 
     private static IReadOnlyList<ManifestSurface> ReadSurfaces(
         JsonObject root,
-        SectionReadContext context)
+        SectionReadContext context,
+        bool authenticationRequired)
     {
         var elements = context.ObjectArray(root, "surfaces", string.Empty);
 
@@ -108,13 +115,28 @@ internal static class ServerSectionReader
                     pointer);
             }
 
+            var requiredScopes = context.TextArray(element, "requiredScopes", pointer);
+
+            if (!authenticationRequired && requiredScopes.Count > 0)
+            {
+                // A scope restricts a token, and an unprotected mount requires none, so the
+                // combination has nothing to resolve. Refused rather than read as protection by
+                // implication: the mount member is the one spelling of that decision.
+                context.Error(
+                    ManifestDiagnosticCodes.ScopesWithoutAuthentication,
+                    $"Surface '{DiagnosticText.Echo(slug)}' declares required scopes while the mount "
+                        + "requires no authentication, so no token would ever carry them. A scope "
+                        + "restricts a token; either require authentication for the mount or remove the scopes.",
+                    SectionReadContext.Child(pointer, "requiredScopes"));
+            }
+
             surfaces.Add(new ManifestSurface(
                 slug,
                 operations,
                 context.Text(element, "name", pointer),
                 isDefault,
                 context.Flag(element, "enabled", pointer, fallback: true),
-                context.TextArray(element, "requiredScopes", pointer),
+                requiredScopes,
                 ReadNavigator(element, pointer, context),
                 context.Flag(element, "outputSchemas", pointer)));
         }

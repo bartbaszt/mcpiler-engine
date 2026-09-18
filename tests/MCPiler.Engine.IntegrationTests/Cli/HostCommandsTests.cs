@@ -8,6 +8,7 @@ using MCPiler.Engine.Execution;
 using MCPiler.Engine.Execution.Files;
 using MCPiler.Engine.Host.Cli;
 using MCPiler.Engine.Host.Hosting;
+using MCPiler.Engine.IntegrationTests.Mcp;
 using MCPiler.Engine.Runtime;
 
 using Xunit;
@@ -327,12 +328,13 @@ public sealed class HostCommandsTests : IDisposable
     }
 
     /// <summary>
-    /// A mount that requires a scope with no configured issuer is a configuration outcome.
+    /// A protected mount with no configured issuer is a configuration outcome.
     /// </summary>
     /// <remarks>
-    /// The listener refuses before it exists, and that refusal reaching the operator as a crash
-    /// (an unhandled exception and a non-configuration exit code) makes an ordinary setup mistake
-    /// look like a defect in Engine.
+    /// The manifest declares a scope and no <c>authenticationRequired</c>, so the mount is
+    /// protected by the member's default. The listener refuses before it exists, and that
+    /// refusal reaching the operator as a crash (an unhandled exception and a non-configuration
+    /// exit code) makes an ordinary setup mistake look like a defect in Engine.
     /// </remarks>
     [Fact]
     public async Task A_scoped_mount_without_an_issuer_is_refused_with_the_configuration_code()
@@ -346,6 +348,179 @@ public sealed class HostCommandsTests : IDisposable
         Assert.Contains("issuer", outcome.Output, StringComparison.Ordinal);
         Assert.DoesNotContain("Unhandled exception", outcome.Output, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// Inspection answers both questions: what would be exposed, and whether it would run.
+    /// </summary>
+    /// <remarks>
+    /// The mount path an inspection runs cannot see the host-side pairing rule, because that
+    /// rule depends on configuration rather than on the Manifest. An inspection that printed
+    /// only the surfaces would tell an operator everything about a configuration that would
+    /// refuse to start.
+    /// </remarks>
+    [Fact]
+    public async Task Inspect_reports_that_serving_a_protected_mount_without_an_issuer_would_be_refused()
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            ["inspect", "--file-store-root", Store(), "--mount", "/api=" + ScopedManifest("scoped")],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        // The inspection itself succeeded: it described a loadable mount.
+        Assert.Equal(ExitCodes.Success, outcome.ExitCode);
+        Assert.Contains("requires authorization", outcome.Output, StringComparison.Ordinal);
+        Assert.Contains("would be refused", outcome.Output, StringComparison.Ordinal);
+        Assert.Contains("auth/issuer-missing", outcome.Output, StringComparison.Ordinal);
+        Assert.Contains("issuer", outcome.Output, StringComparison.Ordinal);
+
+        // And it still described what would be served, rather than replacing that with the refusal.
+        Assert.Contains("fingerprint=", outcome.Output, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The same inspection with an issuer configured reports no refusal.
+    /// </summary>
+    /// <remarks>
+    /// Without this, the previous test would pass just as well against an inspection that always
+    /// printed the refusal line.
+    /// </remarks>
+    [Fact]
+    public async Task Inspect_reports_no_refusal_when_the_mount_is_configured_with_an_issuer()
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "inspect",
+                "--file-store-root", Store(),
+                "--mount", "/api=" + ScopedManifest("scoped"),
+                "--issuer", "https://issuer.example",
+                "--token-validation", "introspection",
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Success, outcome.ExitCode);
+        Assert.Contains("requires authorization", outcome.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("would be refused", outcome.Output, StringComparison.Ordinal);
+    }
+
+    /// <summary>An open mount inspects without any refusal, with no issuer configured.</summary>
+    [Fact]
+    public async Task Inspect_reports_an_open_mount_without_a_refusal()
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            ["inspect", "--file-store-root", Store(), "--mount", "/api=" + OpenManifest("open")],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Success, outcome.ExitCode);
+        Assert.Contains("served without authorization", outcome.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("would be refused", outcome.Output, StringComparison.Ordinal);
+    }
+
+    private string OpenManifest(string name)
+    {
+        string directory = Path.Combine(_root, name);
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "manifest.json"), OpenManifestText);
+        return directory;
+    }
+
+    /// <summary>
+    /// A validation mode the issuer cannot support refuses to start, naming the setting.
+    /// </summary>
+    /// <remarks>
+    /// An issuer that publishes no introspection endpoint can never vouch for a token, so every
+    /// protected request would be refused with the one answer a client cannot tell apart from its
+    /// own misconfiguration. The refusal happens before anything listens, and it reaches the
+    /// operator as a configuration outcome rather than as a crash.
+    /// </remarks>
+    [Fact]
+    public async Task Serve_refuses_when_the_issuer_publishes_no_introspection_endpoint()
+    {
+        await using FakeAuthorizationServer issuer = await FakeAuthorizationServer.StartAsync(
+            active: true,
+            TestContext.Current.CancellationToken,
+            publishesIntrospection: false);
+
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "serve",
+                "--file-store-root", Store(),
+                "--mount", "/api=" + ScopedManifest("scoped"),
+                "--issuer", issuer.Address.AbsoluteUri,
+                "--token-validation", "introspection",
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
+        Assert.Contains("auth/introspection-endpoint-missing", outcome.Output, StringComparison.Ordinal);
+        Assert.Contains("introspection-endpoint", outcome.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("Unhandled exception", outcome.Output, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Inspection answers the same question without serving, and succeeds as an inspection.
+    /// </summary>
+    /// <remarks>
+    /// The check needs the issuer, so it cannot be derived from the mount; an inspection that
+    /// omitted it would describe a configuration that could never run.
+    /// </remarks>
+    [Fact]
+    public async Task Inspect_reports_a_validation_mode_the_issuer_cannot_support()
+    {
+        await using FakeAuthorizationServer issuer = await FakeAuthorizationServer.StartAsync(
+            active: true,
+            TestContext.Current.CancellationToken,
+            publishesIntrospection: false);
+
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "inspect",
+                "--file-store-root", Store(),
+                "--mount", "/api=" + ScopedManifest("scoped"),
+                "--issuer", issuer.Address.AbsoluteUri,
+                "--token-validation", "introspection",
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Success, outcome.ExitCode);
+        Assert.Contains("would be refused", outcome.Output, StringComparison.Ordinal);
+        Assert.Contains("auth/introspection-endpoint-missing", outcome.Output, StringComparison.Ordinal);
+
+        // And it still described what would be served.
+        Assert.Contains("fingerprint=", outcome.Output, StringComparison.Ordinal);
+    }
+
+    private const string OpenManifestText = """
+        {
+          "manifestFormatVersion": "0.3",
+          "sections": {
+            "server": { "inline": {
+              "name": "Open API",
+              "authenticationRequired": false
+            } },
+            "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+            "operations": {
+              "inline": {
+                "operations": [ { "key": "GET /pets", "method": "GET", "path": "/pets" } ]
+              }
+            },
+            "agentSurface": {
+              "inline": {
+                "operations": [
+                  {
+                    "slug": "list-pets",
+                    "name": "List pets",
+                    "binding": { "type": "http", "operation": "GET /pets" }
+                  }
+                ]
+              }
+            }
+          }
+        }
+        """;
 
     private string ScopedManifest(string name)
     {

@@ -1,5 +1,5 @@
 {
-  "formatVersion": 1,
+  "formatVersion": 2,
   "name": "Sealed Example",
   "description": "A multi-section bundle with per-section digests and a completeness hash.",
   "version": "2.0.0",

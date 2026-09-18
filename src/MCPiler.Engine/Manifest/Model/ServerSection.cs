@@ -1,8 +1,8 @@
 namespace MCPiler.Engine.Manifest.Model;
 
 /// <summary>
-/// The <c>server</c> section: display identity plus the surfaces that define routing and
-/// exposure.
+/// The <c>server</c> section: display identity, the mount's authorization posture, and the
+/// surfaces that define routing and exposure.
 /// </summary>
 /// <param name="Name">
 /// Required. Used as the MCP server display name and as the outbound HTTP client name.
@@ -13,14 +13,38 @@ namespace MCPiler.Engine.Manifest.Model;
 /// The declared surfaces. An empty list means the minimal manifest applies and Engine
 /// synthesizes one default surface; see <see cref="ManifestSurface.Synthesize"/>.
 /// </param>
+/// <param name="AuthenticationRequired">
+/// Whether this mount is an OAuth 2.1 protected resource. Absent means protected.
+/// </param>
+/// <remarks>
+/// <para>
+/// Authentication is a property of the <b>mount</b>, not of a surface. Every surface of a
+/// mount answers under one prefix, and a mount that protected one surface while leaving a
+/// sibling open would disclose the protected sibling's tool names through a listing of the
+/// prefix the client could already read. The decision is therefore stated here, once, and a
+/// member of the same name declared on a surface is an unknown member.
+/// </para>
+/// <para>
+/// The default is protected. An absent member is the value a mount has without saying
+/// anything, so the only bytes that produce a public mount are bytes an author wrote for
+/// that purpose.
+/// </para>
+/// <para>
+/// This member is the protection decision itself. <c>requiredScopes</c> on a surface is a
+/// restriction applied <i>in addition to</i> the audience binding, and is meaningful only
+/// while the mount is protected; a scope declared under an unprotected mount is refused
+/// rather than read as an implication of protection.
+/// </para>
+/// </remarks>
 public sealed record ServerSection(
     string Name,
     string? Description = null,
     string? Version = null,
-    IReadOnlyList<ManifestSurface> Surfaces = null!)
+    IReadOnlyList<ManifestSurface> Surfaces = null!,
+    bool AuthenticationRequired = true)
 {
     /// <summary>The section format version this model represents.</summary>
-    public const int FormatVersion = 1;
+    public const int FormatVersion = 2;
 
     /// <summary>The declared surfaces, never null.</summary>
     public IReadOnlyList<ManifestSurface> Surfaces { get; init; } = Surfaces ?? [];
@@ -58,7 +82,9 @@ public sealed record ServerSection(
 /// current published-surface status behavior.
 /// </param>
 /// <param name="RequiredScopes">
-/// OAuth scopes required in addition to the byte-exact audience binding.
+/// OAuth scopes required in addition to the byte-exact audience binding. Meaningful only
+/// while the enclosing mount is a protected resource; see <see cref="ServerSection.AuthenticationRequired"/>.
+/// Whether it is enforced is the mount's decision, not this surface's.
 /// </param>
 /// <param name="Navigator">Navigator settings for this surface.</param>
 /// <param name="OutputSchemas">
@@ -90,6 +116,11 @@ public sealed record ManifestSurface(
     /// <summary>
     /// Builds the single surface implied by a manifest that declares no surface at all.
     /// </summary>
+    /// <remarks>
+    /// The synthesized surface declares no scope and carries no protection decision: whether
+    /// this surface requires a token is answered once, by the mount, from
+    /// <see cref="ServerSection.AuthenticationRequired"/>.
+    /// </remarks>
     /// <param name="serverName">The <c>server.name</c> value, used as the display name.</param>
     /// <param name="directOperationSlugs">
     /// Every agent-surface operation slug, exposed directly. A minimal manifest has no

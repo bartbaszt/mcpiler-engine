@@ -117,10 +117,18 @@ public sealed class StdioTransportTests : IDisposable
     [Fact]
     public async Task A_scoped_surface_is_served_locally_without_a_token()
     {
-        string scoped = ServedManifests.OneSurface.Replace(
-            "\"isDefault\": true,",
-            "\"isDefault\": true, \"requiredScopes\": [\"tools.invoke\"],",
-            StringComparison.Ordinal);
+        // A scoped surface is a protected one, so the fixture states protection explicitly and
+        // the standard-input/output transport still serves it with no token: the process
+        // boundary is the authorization there, which is what this test pins.
+        string scoped = ServedManifests.OneSurface
+            .Replace(
+                "\"authenticationRequired\": false,",
+                "\"authenticationRequired\": true,",
+                StringComparison.Ordinal)
+            .Replace(
+                "\"isDefault\": true,",
+                "\"isDefault\": true, \"requiredScopes\": [\"tools.invoke\"],",
+                StringComparison.Ordinal);
 
         string manifest = ServedManifests.Write(_root, "scoped", scoped);
         string response = await StdioListAsync(manifest, Store("scoped"), TestContext.Current.CancellationToken);

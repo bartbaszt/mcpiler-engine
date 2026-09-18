@@ -161,6 +161,7 @@ public sealed class ManifestSufficiencyTests : IDisposable
               "sections": {
                 "server": { "inline": {
                   "name": "Sufficiency API",
+                  "authenticationRequired": false,
                   "surfaces": [
                     { "slug": "full", "isDefault": true,
                       "operations": [ { "operation": "ping", "exposure": "direct" } ] }

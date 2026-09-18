@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 
 namespace MCPiler.Engine.Host.Authorization;
@@ -19,20 +20,34 @@ namespace MCPiler.Engine.Host.Authorization;
 /// that fell open when its authorization server was down would protect nothing exactly when
 /// protecting is hardest to verify.
 /// </para>
+/// <para>
+/// The endpoint is protected, so this server authenticates itself to it with the configured
+/// client identity, using HTTP Basic (<c>client_secret_basic</c>). The secret is read from a file,
+/// held in memory, and never appears in a log line, a diagnostic or a report.
+/// </para>
 /// </remarks>
 internal sealed class IntrospectionTokenValidator : ITokenValidator
 {
     private readonly HttpClient _client;
     private readonly string _issuer;
     private readonly string? _endpointOverride;
+    private readonly string? _clientId;
+    private readonly string? _clientSecret;
 
     private string? _endpoint;
 
-    internal IntrospectionTokenValidator(HttpClient client, string issuer, string? endpointOverride)
+    internal IntrospectionTokenValidator(
+        HttpClient client,
+        string issuer,
+        string? endpointOverride,
+        string? clientId = null,
+        string? clientSecret = null)
     {
         _client = client;
         _issuer = issuer;
         _endpointOverride = endpointOverride;
+        _clientId = clientId;
+        _clientSecret = clientSecret;
     }
 
     public async Task<TokenVerification> ValidateAsync(string token, CancellationToken cancellationToken)
@@ -53,6 +68,17 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
         };
 
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+        if (_clientId is { } clientId && _clientSecret is { } clientSecret)
+        {
+            // client_secret_basic: the two halves are form-urlencoded before they are base64'd,
+            // which RFC 6749 §2.3.1 requires because either may contain characters that are not
+            // valid in an HTTP header value.
+            string credentials = Convert.ToBase64String(Encoding.UTF8.GetBytes(
+                $"{Uri.EscapeDataString(clientId)}:{Uri.EscapeDataString(clientSecret)}"));
+
+            request.Headers.Authorization = new AuthenticationHeaderValue("Basic", credentials);
+        }
 
         try
         {

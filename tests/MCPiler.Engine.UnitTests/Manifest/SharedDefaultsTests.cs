@@ -93,6 +93,26 @@ public sealed class SharedDefaultsTests
             Vocabulary.Write(operation.Exposure));
     }
 
+    /// <summary>
+    /// A mount that states nothing is protected, and that default is the shared one.
+    /// </summary>
+    /// <remarks>
+    /// The absent member is the case that matters: a Manifest written before the member existed,
+    /// or one written by hand without it, must not become publicly served by omission.
+    /// </remarks>
+    [Fact]
+    public void A_mount_that_states_no_authentication_requirement_takes_the_shared_default()
+    {
+        var diagnostics = new List<ManifestDiagnostic>();
+        var section = SectionReader.ReadServer(
+            JsonNode.Parse("""{ "name": "Example API" }"""),
+            diagnostics);
+
+        Assert.DoesNotContain(diagnostics, static d => d.IsError);
+
+        Assert.Equal(Flag("server.authenticationRequired"), section!.AuthenticationRequired);
+    }
+
     [Fact]
     public void A_policy_that_states_only_a_base_url_takes_the_shared_bounds()
     {
@@ -318,6 +338,7 @@ public sealed class SharedDefaultsTests
     [
         "manifestFormatVersion",
         "server.formatVersion",
+        "server.authenticationRequired",
         "policy.formatVersion",
         "operations.formatVersion",
         "agentSurface.formatVersion",

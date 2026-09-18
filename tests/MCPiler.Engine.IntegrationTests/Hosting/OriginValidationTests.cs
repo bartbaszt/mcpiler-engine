@@ -140,7 +140,7 @@ public sealed class OriginValidationTests : IDisposable
         string manifest = ServedManifests.Write(
             _root,
             "origin-metadata-" + Guid.NewGuid().ToString("N"),
-            Manifest(upstream.Address));
+            Manifest(upstream.Address, authenticationRequired: true));
 
         await using ServedEngine engine = await ServedEngine.StartAsync(
             RuntimeOptionsFor(manifest),
@@ -171,12 +171,18 @@ public sealed class OriginValidationTests : IDisposable
         [new MountRequest("/api", manifest)],
         Directory.CreateDirectory(Path.Combine(_root, "files-" + Guid.NewGuid().ToString("N"))).FullName);
 
-    private static string Manifest(Uri upstream) => $$"""
+    /// <param name="authenticationRequired">
+    /// The protection the mount declares. Defaults to open, because these tests probe admission
+    /// and the origin rule rather than authorization; the metadata test states protection
+    /// explicitly, because an unprotected mount publishes no metadata document at all.
+    /// </param>
+    private static string Manifest(Uri upstream, bool authenticationRequired = false) => $$"""
         {
           "manifestFormatVersion": "0.3",
           "sections": {
             "server": { "inline": {
               "name": "Origin Probe",
+              "authenticationRequired": {{(authenticationRequired ? "true" : "false")}},
               "surfaces": [
                 { "slug": "full", "isDefault": true,
                   "operations": [ { "operation": "ping", "exposure": "direct" } ] }

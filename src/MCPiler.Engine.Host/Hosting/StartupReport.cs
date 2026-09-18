@@ -69,6 +69,14 @@ public static class StartupReport
                 text.AppendLine(string.Create(
                     CultureInfo.InvariantCulture,
                     $"mounted {mount.Prefix} -> {mount.ServerName} ({mount.Path})"));
+
+                // The mount's authorization state belongs beside its identity, in the mount's own
+                // vocabulary. Reporting a scope list said nothing about the common case — a
+                // protected mount that declares no specific scope — so an operator reading only
+                // that line would conclude the mount was open when it was not.
+                text.AppendLine(string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{mount.Prefix} {(mount.RequiresAuthorization() ? "requires authorization" : "served without authorization")}"));
             }
 
             // The durability of runtime-owned mutable authentication state is the one fact about
@@ -116,6 +124,28 @@ public static class StartupReport
         text.AppendLine(Line("refused", refusal));
         text.AppendLine("The process will not start. Nothing is served: a partially mounted process "
             + "answers some requests and refuses others in a way that reads as an upstream fault.");
+        return text.ToString();
+    }
+
+    /// <summary>
+    /// Renders one refusal a serving run would produce, for a verb that inspects instead of
+    /// serving.
+    /// </summary>
+    /// <remarks>
+    /// The wording is conditional on purpose. Nothing was refused here — the inspection
+    /// succeeded and the mount is described — and an operator reading a plain <c>refused</c>
+    /// line would conclude the command had failed. Stating that a serving run *would* refuse
+    /// is the answer the inspection exists to give, and it carries the same refusal object
+    /// the serving path throws, so the two readings cannot disagree.
+    /// </remarks>
+    public static string RenderUnstartable(StartupRefusal refusal)
+    {
+        ArgumentNullException.ThrowIfNull(refusal);
+
+        StringBuilder text = new();
+        text.AppendLine(Line("would be refused", refusal));
+        text.AppendLine("Serving this configuration would not start. The mount is described below "
+            + "because inspection succeeded; configure the named setting before running 'serve'.");
         return text.ToString();
     }
 

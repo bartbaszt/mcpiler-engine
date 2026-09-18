@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -12,6 +14,7 @@ using System.Threading.Tasks;
 using MCPiler.Engine.Host.Configuration;
 using MCPiler.Engine.Runtime;
 
+using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
 
@@ -82,14 +85,57 @@ public sealed class AuthorizationTests : IDisposable
         Assert.True(threw, "A scope-declaring mount without an issuer must refuse to start.");
     }
 
+    /// <summary>
+    /// A scope-free mount that declares nothing is protected, and refuses to start with no issuer.
+    /// </summary>
+    /// <remarks>
+    /// This test used to assert the opposite, and the assertion was the defect. Protection was
+    /// inferred from a non-empty scope list, so a Platform export — which deliberately declares no
+    /// scope — was served to anyone, and every protected-resource duty was vacuous for it. The
+    /// default is now protected, and the only way to serve openly is to say so.
+    /// </remarks>
     [Fact]
-    public async Task A_mount_without_declared_scopes_serves_without_a_token()
+    public async Task A_scope_free_mount_that_declares_nothing_is_protected_and_refuses_to_start()
+    {
+        await using LoopbackHost upstream = await Upstream();
+        string manifest = ServedManifests.Write(
+            _root,
+            "default-protected-" + Guid.NewGuid().ToString("N"),
+            Manifest(upstream.Address, scoped: false, authenticationRequired: null));
+
+        bool threw = false;
+
+        try
+        {
+            await using ServedEngine _ = await ServedEngine.StartAsync(
+                RuntimeOptionsFor("/api", manifest),
+                Token);
+        }
+        catch (InvalidOperationException failure)
+        {
+            threw = true;
+            Assert.Contains("/api", failure.Message, StringComparison.Ordinal);
+            Assert.Contains("issuer", failure.Message, StringComparison.OrdinalIgnoreCase);
+
+            // The refusal names the requirement in the mount's own vocabulary. A refusal that
+            // talked about a missing scope would send an operator to add one, which changes
+            // nothing about whether a token is required.
+            Assert.Contains("requires authorization", failure.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain("requires a scope", failure.Message, StringComparison.Ordinal);
+        }
+
+        Assert.True(threw, "A scope-free mount that declares nothing must be protected by default.");
+    }
+
+    /// <summary>A mount that states it is open is served without a token.</summary>
+    [Fact]
+    public async Task A_mount_that_declares_it_is_open_serves_without_a_token()
     {
         await using LoopbackHost upstream = await Upstream();
         string manifest = ServedManifests.Write(
             _root,
             "open-" + Guid.NewGuid().ToString("N"),
-            Manifest(upstream.Address, scoped: false));
+            Manifest(upstream.Address, scoped: false, authenticationRequired: false));
         await using ServedEngine engine = await ServedEngine.StartAsync(
             RuntimeOptionsFor("/api", manifest),
             Token);
@@ -98,6 +144,60 @@ public sealed class AuthorizationTests : IDisposable
         using HttpResponseMessage served = await client.GetAsync(engine.At("/api/full"), Token);
 
         AssertAdmitted(served);
+    }
+
+    /// <summary>
+    /// An open mount publishes no protected-resource metadata, and a protected one still does.
+    /// </summary>
+    /// <remarks>
+    /// The metadata document names an authorization server. Serving one for a resource that
+    /// requires no token would send a client through an authorization flow it does not need, and
+    /// would claim the resource is protected when the Manifest says otherwise.
+    /// </remarks>
+    [Fact]
+    public async Task An_open_mount_publishes_no_protected_resource_metadata()
+    {
+        await using LoopbackHost upstream = await Upstream();
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(active: true, Token);
+
+        string openManifest = ServedManifests.Write(
+            _root,
+            "open-metadata-" + Guid.NewGuid().ToString("N"),
+            Manifest(upstream.Address, scoped: false, authenticationRequired: false));
+        string protectedManifest = ServedManifests.Write(
+            _root,
+            "protected-metadata-" + Guid.NewGuid().ToString("N"),
+            Manifest(upstream.Address, scoped: true));
+
+        await using ServedEngine open = await ServedEngine.StartAsync(
+            RuntimeOptionsFor("/api", openManifest),
+            Token,
+            authorization: AuthorizationFor(authorization.Address));
+        await using ServedEngine guarded = await ServedEngine.StartAsync(
+            RuntimeOptionsFor("/api", protectedManifest),
+            Token,
+            authorization: AuthorizationFor(authorization.Address));
+
+        using HttpClient client = new();
+
+        using HttpResponseMessage openDocument = await client.GetAsync(
+            new Uri($"{open.Address.Scheme}://{open.Address.Authority}/.well-known/oauth-protected-resource/api/full"),
+            Token);
+        using HttpResponseMessage protectedDocument = await client.GetAsync(
+            new Uri($"{guarded.Address.Scheme}://{guarded.Address.Authority}/.well-known/oauth-protected-resource/api/full"),
+            Token);
+
+        Assert.NotEqual(HttpStatusCode.OK, openDocument.StatusCode);
+
+        // An open mount emits no challenge either: the 401 is the discovery step for a token
+        // that would be required.
+        Assert.Null(openDocument.Headers.WwwAuthenticate.FirstOrDefault());
+
+        Assert.Equal(HttpStatusCode.OK, protectedDocument.StatusCode);
+        Assert.Contains(
+            authorization.Address.AbsoluteUri.TrimEnd('/'),
+            await protectedDocument.Content.ReadAsStringAsync(Token),
+            StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -405,6 +505,70 @@ public sealed class AuthorizationTests : IDisposable
     }
 
     /// <summary>
+    /// The jwks mode contains an encrypted token as a refusal rather than as a failure.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// An issuer that encrypts its access tokens publishes no signal that it does: RFC 8414 has
+    /// no access-token-encryption member, and a symmetric encryption key is never published, so
+    /// discovery and JWKS look identical to an issuer that only signs. A resource server
+    /// therefore cannot detect the situation at startup and must contain it at validation time.
+    /// </para>
+    /// <para>
+    /// What is asserted here is containment, not detection: whatever the token handler throws
+    /// for a JWE it cannot decrypt, the answer must be a 401 that discloses nothing — never an
+    /// unhandled exception, which would answer a client with a 500 and read as a defect to an
+    /// operator.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task The_jwks_mode_refuses_an_encrypted_token_instead_of_failing()
+    {
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(active: true, Token);
+        await using LoopbackHost upstream = await Upstream();
+        await using ServedEngine engine = await ServeScopedAsync(
+            upstream.Address,
+            authorization.Address,
+            HostTokenValidation.Jwks);
+
+        using HttpClient client = new();
+        string full = $"{engine.Address.Scheme}://{engine.Address.Authority}/api/full";
+
+        using HttpResponseMessage response = await Authorized(
+            client,
+            engine.At("/api/full"),
+            authorization.MintEncrypted(full, "tools.invoke"));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    /// <summary>
+    /// The introspection mode treats an encrypted token as any other token it does not know.
+    /// </summary>
+    /// <remarks>
+    /// Introspection is the mode that can validate a token whose content cannot be read locally,
+    /// but only when the issuer recognizes it. A JWE this fake did not issue is therefore an
+    /// ordinary inactive token, and the fail-closed answer is a 401 rather than a failure.
+    /// </remarks>
+    [Fact]
+    public async Task The_introspection_mode_refuses_an_encrypted_token_it_did_not_issue()
+    {
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(active: false, Token);
+        await using LoopbackHost upstream = await Upstream();
+        await using ServedEngine engine = await ServeScopedAsync(upstream.Address, authorization.Address);
+
+        using HttpClient client = new();
+        string full = $"{engine.Address.Scheme}://{engine.Address.Authority}/api/full";
+
+        using HttpResponseMessage response = await Authorized(
+            client,
+            engine.At("/api/full"),
+            authorization.MintEncrypted(full, "tools.invoke"));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    /// <summary>
     /// Sends a tools/list through the addressed surface with a bearer token. POST, because
     /// Streamable HTTP answers only what the protocol defines; a GET of the MCP route is not
     /// a client this server serves.
@@ -506,7 +670,18 @@ public sealed class AuthorizationTests : IDisposable
         return parsed.RootElement.Clone();
     }
 
-    private static string Manifest(Uri upstream, bool scoped)
+    /// <summary>
+    /// A manifest whose protection and scopes the caller states independently.
+    /// </summary>
+    /// <param name="upstream">The loopback upstream the policy points at.</param>
+    /// <param name="scoped">
+    /// Whether the surfaces declare scopes. A scoped mount is a protected one, so this also
+    /// states <c>authenticationRequired: true</c>: a scope under an unprotected mount is refused.
+    /// </param>
+    /// <param name="authenticationRequired">
+    /// The protection the mount declares, or <c>null</c> to declare nothing and take the default.
+    /// </param>
+    private static string Manifest(Uri upstream, bool scoped, bool? authenticationRequired = null)
     {
         string scopesOnFull = scoped ? ", \"requiredScopes\": [\"tools.invoke\"]" : string.Empty;
         string scopesOnOther = scoped ? ", \"requiredScopes\": [\"tools.invoke\", \"tools.admin\"]" : string.Empty;
@@ -517,6 +692,15 @@ public sealed class AuthorizationTests : IDisposable
                 + ", \"operations\": [ { \"operation\": \"read-value\" } ] }"
             : "{ \"slug\": \"full\", \"isDefault\": true, \"operations\": [ { \"operation\": \"read-value\" } ] }";
 
+        // Null means the document declares no protection at all, which is what the protected
+        // default is asserted against. True and false are explicit statements.
+        string protection = authenticationRequired switch
+        {
+            true => "\"authenticationRequired\": true,",
+            false => "\"authenticationRequired\": false,",
+            null => string.Empty,
+        };
+
         return $$"""
             {
               "manifestFormatVersion": "0.3",
@@ -524,6 +708,7 @@ public sealed class AuthorizationTests : IDisposable
                 "server": {
                   "inline": {
                     "name": "Auth API",
+                    {{protection}}
                     "surfaces": [
                       {{surfaces}}
                     ]
@@ -560,10 +745,188 @@ public sealed class AuthorizationTests : IDisposable
         return new RuntimeOptions([new MountRequest(prefix, manifest)], store);
     }
 
+    /// <summary>
+    /// The resource server authenticates to an endpoint that demands a client credential.
+    /// </summary>
+    /// <remarks>
+    /// The fake refuses an unauthenticated introspection, so an engine that presented no
+    /// credential would treat every token as inactive and this test would see a 401 at the MCP
+    /// address. Accepting the token therefore proves the credential reached the endpoint.
+    /// </remarks>
+    [Fact]
+    public async Task A_configured_introspection_client_authenticates_to_a_protected_endpoint()
+    {
+        await using LoopbackHost upstream = await Upstream();
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(
+            active: true,
+            Token,
+            introspectionClientId: "engine-resource-server",
+            introspectionClientSecret: "s3cret");
+
+        string secretFile = SecretFile("s3cret");
+
+        await using ServedEngine engine = await ServeScopedAsync(
+            upstream.Address,
+            authorization.Address,
+            introspectionClientId: "engine-resource-server",
+            introspectionClientSecretFile: secretFile);
+
+        string token = authorization.Mint(engine.At("/api/full").ToString(), "tools.invoke");
+
+        using HttpClient client = new();
+
+        HttpResponseMessage response = await Authorized(client, engine.At("/api/full"), token);
+
+        AssertAdmitted(response);
+    }
+
+    /// <summary>
+    /// A wrong secret is refused by the endpoint, and the refusal is a refusal of the token.
+    /// </summary>
+    /// <remarks>
+    /// The engine must not fall open because its own credential was rejected: a resource server
+    /// that treated a 401 from the issuer as "cannot reach the issuer, admit anyway" would turn a
+    /// misconfigured client into an authentication bypass.
+    /// </remarks>
+    [Fact]
+    public async Task A_wrong_introspection_client_secret_leaves_every_token_inactive()
+    {
+        await using LoopbackHost upstream = await Upstream();
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(
+            active: true,
+            Token,
+            introspectionClientId: "engine-resource-server",
+            introspectionClientSecret: "s3cret");
+
+        string secretFile = SecretFile("not-the-secret");
+
+        await using ServedEngine engine = await ServeScopedAsync(
+            upstream.Address,
+            authorization.Address,
+            introspectionClientId: "engine-resource-server",
+            introspectionClientSecretFile: secretFile);
+
+        string token = authorization.Mint(engine.At("/api/full").ToString(), "tools.invoke");
+
+        using HttpClient client = new();
+
+        HttpResponseMessage response = await Authorized(client, engine.At("/api/full"), token);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    /// <summary>
+    /// An engine with no credential talking to an endpoint that demands one is refused, and the
+    /// refusal discloses nothing about the tool set.
+    /// </summary>
+    [Fact]
+    public async Task An_endpoint_that_demands_a_credential_refuses_an_unauthenticated_engine()
+    {
+        await using LoopbackHost upstream = await Upstream();
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(
+            active: true,
+            Token,
+            introspectionClientId: "engine-resource-server",
+            introspectionClientSecret: "s3cret");
+
+        await using ServedEngine engine = await ServeScopedAsync(upstream.Address, authorization.Address);
+
+        string token = authorization.Mint(engine.At("/api/full").ToString(), "tools.invoke");
+
+        using HttpClient client = new();
+
+        HttpResponseMessage response = await Authorized(client, engine.At("/api/full"), token);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Empty(await response.Content.ReadAsStringAsync(Token));
+    }
+
+    /// <summary>
+    /// The client secret never appears in the host's own log records.
+    /// </summary>
+    /// <remarks>
+    /// The canary is written to the file and then asserted absent from every record the host
+    /// emits while serving a request. A secret that reaches a log is a secret that reaches
+    /// whatever collects logs, which is a wider audience than the file's permissions describe.
+    /// </remarks>
+    [Fact]
+    public async Task The_introspection_client_secret_never_reaches_a_log_record()
+    {
+        const string canary = "canary-7f3c1d9e-introspection-secret";
+
+        await using LoopbackHost upstream = await Upstream();
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(
+            active: true,
+            Token,
+            introspectionClientId: "engine-resource-server",
+            introspectionClientSecret: canary);
+
+        string secretFile = SecretFile(canary);
+
+        RecordingLoggerProvider logs = new();
+
+        await using ServedEngine engine = await ServeScopedAsync(
+            upstream.Address,
+            authorization.Address,
+            introspectionClientId: "engine-resource-server",
+            introspectionClientSecretFile: secretFile,
+            loggerProvider: logs);
+
+        string token = authorization.Mint(engine.At("/api/full").ToString(), "tools.invoke");
+
+        using HttpClient client = new();
+        await Authorized(client, engine.At("/api/full"), token);
+
+        // The recorder has to be proven live, or the assertion below passes because nothing was
+        // ever captured rather than because the secret was kept out.
+        Assert.NotEmpty(logs.Text);
+        Assert.DoesNotContain(canary, logs.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An unresolvable secret file refuses before the listener opens rather than per request.
+    /// </summary>
+    /// <remarks>
+    /// A resource server that started and then failed every token would be indistinguishable at
+    /// the client from a misconfigured client, and an operator would debug the wrong end. The
+    /// refusal names the file, never its contents.
+    /// </remarks>
+    [Fact]
+    public async Task An_unreadable_introspection_client_secret_refuses_at_startup()
+    {
+        await using LoopbackHost upstream = await Upstream();
+
+        string missing = Path.Combine(_root, "absent-" + Guid.NewGuid().ToString("N"));
+
+        string manifest = ServedManifests.Write(
+            _root,
+            "scoped-missing-secret-" + Guid.NewGuid().ToString("N"),
+            Manifest(upstream.Address, scoped: true));
+
+        InvalidOperationException failure = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await ServedEngine.StartAsync(
+                RuntimeOptionsFor("/api", manifest),
+                Token,
+                authorization: new HostAuthorizationOptions(
+                    "https://issuer.example.test",
+                    HostTokenValidation.Introspection,
+                    IntrospectionClientId: "engine-resource-server",
+                    IntrospectionClientSecretFile: missing)));
+
+        Assert.Contains(missing, failure.Message, StringComparison.Ordinal);
+        Assert.Contains("does not exist", failure.Message, StringComparison.Ordinal);
+    }
+
+    private static HostAuthorizationOptions AuthorizationFor(Uri issuer)
+        => new(issuer.AbsoluteUri, HostTokenValidation.Introspection);
+
     private async Task<ServedEngine> ServeScopedAsync(
         Uri upstream,
         Uri issuer,
-        HostTokenValidation validation = HostTokenValidation.Introspection)
+        HostTokenValidation validation = HostTokenValidation.Introspection,
+        string? introspectionClientId = null,
+        string? introspectionClientSecretFile = null,
+        ILoggerProvider? loggerProvider = null)
     {
         string manifest = ServedManifests.Write(
             _root,
@@ -575,11 +938,78 @@ public sealed class AuthorizationTests : IDisposable
             Token,
             authorization: new HostAuthorizationOptions(
                 issuer.AbsoluteUri,
-                validation));
+                validation,
+                IntrospectionClientId: introspectionClientId,
+                IntrospectionClientSecretFile: introspectionClientSecretFile),
+            loggerProvider: loggerProvider);
     }
 
     private async Task<ServedEngine> ServeScopedAsync(Uri upstream, string issuer)
         => await ServeScopedAsync(upstream, new Uri(issuer, UriKind.Absolute));
+
+    /// <summary>
+    /// Writes a secret file with a canary value and returns its path.
+    /// </summary>
+    /// <remarks>
+    /// The value is deliberately recognizable in a log or a report, because the assertion that
+    /// matters is that it appears in none of them.
+    /// </remarks>
+    private string SecretFile(string canary)
+    {
+        string path = Path.Combine(_root, "secret-" + Guid.NewGuid().ToString("N"));
+        File.WriteAllText(path, canary + "\n");
+        return path;
+    }
+
+    /// <summary>Collects every log record a host emits, so a test can assert what is not in them.</summary>
+    private sealed class RecordingLoggerProvider : ILoggerProvider
+    {
+        private readonly StringBuilder _text = new();
+
+        public string Text
+        {
+            get
+            {
+                lock (_text)
+                {
+                    return _text.ToString();
+                }
+            }
+        }
+
+        public ILogger CreateLogger(string categoryName) => new Recorder(this, categoryName);
+
+        public void Dispose()
+        {
+        }
+
+        private void Record(string line)
+        {
+            lock (_text)
+            {
+                _text.AppendLine(line);
+            }
+        }
+
+        private sealed class Recorder(RecordingLoggerProvider owner, string category) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(
+                LogLevel logLevel,
+                EventId eventId,
+                TState state,
+                Exception? exception,
+                Func<TState, Exception?, string> formatter)
+            {
+                ArgumentNullException.ThrowIfNull(formatter);
+
+                owner.Record($"{logLevel} {category} {formatter(state, exception)} {exception}");
+            }
+        }
+    }
 
     /// <summary>A token no authorization server knows, for the fail-closed case.</summary>
     private static string FakeToken(string audience)

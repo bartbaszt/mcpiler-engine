@@ -215,6 +215,19 @@ public static class EngineWebHost
                     // connected to, which only the request knows.
                     options.Events.OnResourceMetadataRequest = context =>
                     {
+                        // A mount that declares it is not a protected resource publishes no
+                        // metadata: a document naming an authorization server for a resource that
+                        // requires no token would send a client through a flow it does not need.
+                        // The address is resolved through the same generation lease the mount
+                        // middleware uses, so the two can never disagree about protection.
+                        if (SurfaceMetadata.MountRequiresAuthorization(
+                                context.HttpContext,
+                                generations) is not true)
+                        {
+                            context.SkipHandler();
+                            return Task.CompletedTask;
+                        }
+
                         context.ResourceMetadata = SurfaceMetadata.Build(
                             context.HttpContext,
                             binding.Authorization!);

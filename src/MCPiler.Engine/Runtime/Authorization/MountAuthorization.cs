@@ -5,11 +5,18 @@ namespace MCPiler.Engine.Runtime;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A mount requires authorization exactly when one of its enabled surfaces declares a
-/// non-empty <c>requiredScopes</c> list. Scopes are the only authorization signal the
-/// Manifest format carries, so they are the whole decision: a deployment that wants a
-/// scope-free mount protected has a Manifest question, not a configuration question, and the
-/// format is the place it will be answered.
+/// A mount requires authorization exactly when its <c>server.authenticationRequired</c> member
+/// is true, which is also the meaning of the member being absent. The decision is the
+/// Manifest's, not the configuration's and not a surface's.
+/// </para>
+/// <para>
+/// The decision used to be read from <c>requiredScopes</c>: a mount was protected when any of
+/// its surfaces declared a scope. That made protection an implication of a member whose defined
+/// meaning is additive — scopes required <i>in addition to</i> the audience binding — so a
+/// manifest that required a token while declaring no specific scope could not say so, and every
+/// Platform export, which deliberately states no scope, was served publicly. Reading
+/// <c>RequiredScopes</c> as a protection signal is the defect this replaces; the mount member is
+/// the one spelling of the decision.
 /// </para>
 /// <para>
 /// The requirement is per mount rather than per surface deliberately. A token authorizes a
@@ -21,8 +28,8 @@ namespace MCPiler.Engine.Runtime;
 /// </para>
 /// <para>
 /// The decision lives in the library, on the seam, because it reads Manifest state. A host
-/// that read <c>requiredScopes</c> and decided for itself would be the deployable deciding
-/// what a Manifest means, which is the one thing the containment guard exists to prevent.
+/// that read the member and decided for itself would be the deployable deciding what a
+/// Manifest means, which is the one thing the containment guard exists to prevent.
 /// </para>
 /// </remarks>
 public static class MountAuthorization
@@ -32,15 +39,7 @@ public static class MountAuthorization
     {
         ArgumentNullException.ThrowIfNull(mount);
 
-        foreach (MountedSurface surface in mount.Surfaces)
-        {
-            if (surface.RequiredScopes.Count > 0)
-            {
-                return true;
-            }
-        }
-
-        return false;
+        return mount.RequiresAuthorization;
     }
 
     /// <summary>

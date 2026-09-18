@@ -157,11 +157,21 @@ public sealed record HostLifecycleOptions(TimeSpan DrainTimeout)
 /// <param name="Validation">How a presented token is validated against the issuer.</param>
 /// <param name="IntrospectionEndpoint">Overrides RFC 8414 discovery of the RFC 7662 endpoint.</param>
 /// <param name="JwksUri">Overrides the issuer metadata's <c>jwks_uri</c>.</param>
+/// <param name="IntrospectionClientId">
+/// The client identity this resource server authenticates with at the introspection endpoint.
+/// </param>
+/// <param name="IntrospectionClientSecretFile">
+/// The file holding that client's secret. A path rather than a value, for the reason
+/// <see cref="HostConfiguration.DeploymentSecretFileKey"/> states: a secret on a command line is
+/// visible to every process listing on the host.
+/// </param>
 public sealed record HostAuthorizationOptions(
     string Issuer,
     HostTokenValidation Validation,
     string? IntrospectionEndpoint = null,
-    string? JwksUri = null)
+    string? JwksUri = null,
+    string? IntrospectionClientId = null,
+    string? IntrospectionClientSecretFile = null)
 {
     /// <summary>
     /// The configuration for a process that trusts no issuer, which serves mounts that declare
@@ -209,8 +219,10 @@ public static class HostConfiguration
 
     /// <summary>Key naming the authorization server issuer this process trusts.</summary>
     /// <remarks>
-    /// An absolute http or https URI. Required exactly when a mounted Manifest declares a surface
-    /// scope; the pairing with <see cref="TokenValidationKey"/> is both-or-neither.
+    /// An absolute http or https URI. Required exactly when a mounted Manifest requires
+    /// authorization — a mount is protected unless it declares <c>authenticationRequired: false</c>,
+    /// whether or not any surface declares a scope; the pairing with <see cref="TokenValidationKey"/>
+    /// is both-or-neither.
     /// </remarks>
     public const string IssuerKey = "issuer";
 
@@ -229,6 +241,31 @@ public static class HostConfiguration
 
     /// <summary>Key naming the issuer's JWKS URI, overriding the <c>jwks_uri</c> in its published metadata.</summary>
     public const string JwksUriKey = "jwks-uri";
+
+    /// <summary>Key naming the client identity this resource server introspects as.</summary>
+    /// <remarks>
+    /// RFC 7662 requires the introspection endpoint to be protected, so a resource server that
+    /// authenticates itself needs an identity of its own. It is deliberately distinct from every
+    /// upstream credential and from the management bearer: the introspection client authenticates
+    /// a service to its issuer, and reusing another credential for that would widen what one
+    /// disclosure compromises.
+    /// </remarks>
+    public const string IntrospectionClientIdKey = "introspection-client-id";
+
+    /// <summary>Key naming the file holding the introspection client's secret.</summary>
+    /// <remarks>
+    /// A file rather than a value, for the same reason the deployment secret is: a secret on a
+    /// command line is visible to every process listing on the host, and an environment literal is
+    /// visible in a container's inspectable configuration. The pairing with
+    /// <see cref="IntrospectionClientIdKey"/> is both-or-neither.
+    /// </remarks>
+    public const string IntrospectionClientSecretFileKey = "introspection-client-secret-file";
+
+    /// <summary>Accepted value of <see cref="TokenValidationKey"/>: remote RFC 7662 introspection.</summary>
+    public const string IntrospectionModeName = "introspection";
+
+    /// <summary>Accepted value of <see cref="TokenValidationKey"/>: local signature validation.</summary>
+    public const string JwksModeName = "jwks";
 
     /// <summary>Host-only shutdown drain window, in positive whole seconds.</summary>
     public const string DrainTimeoutSecondsKey = "drain-timeout-seconds";
@@ -319,6 +356,8 @@ public static class HostConfiguration
         TokenValidationKey,
         IntrospectionEndpointKey,
         JwksUriKey,
+        IntrospectionClientIdKey,
+        IntrospectionClientSecretFileKey,
         DrainTimeoutSecondsKey,
         RuntimeStateRootKey,
         RuntimeStateKeyFileKey,
@@ -387,6 +426,8 @@ public static class HostConfiguration
         HostTokenValidation? validation = null;
         string? introspectionEndpoint = null;
         string? jwksUri = null;
+        string? introspectionClientId = null;
+        string? introspectionClientSecretFile = null;
         TimeSpan drainTimeout = HostLifecycleOptions.DefaultDrainTimeout;
         string? runtimeStateRoot = null;
         string? runtimeStateKeyFile = null;
@@ -444,6 +485,12 @@ public static class HostConfiguration
                 case JwksUriKey:
                     jwksUri = UriSetting(key, value, rejected);
                     break;
+                case IntrospectionClientIdKey:
+                    introspectionClientId = value;
+                    break;
+                case IntrospectionClientSecretFileKey:
+                    introspectionClientSecretFile = value;
+                    break;
                 case DrainTimeoutSecondsKey:
                     drainTimeout = PositiveWholeSeconds(key, value, rejected);
                     break;
@@ -496,7 +543,7 @@ public static class HostConfiguration
         }
 
         HostAuthorizationOptions? authorization = BindAuthorization(
-            issuer, validation, introspectionEndpoint, jwksUri, rejected);
+            issuer, validation, introspectionEndpoint, jwksUri, introspectionClientId, introspectionClientSecretFile, rejected);
 
         BindRuntimeState(runtimeStateRoot, runtimeStateKeyFile, rejected);
 
@@ -753,6 +800,8 @@ public static class HostConfiguration
         HostTokenValidation? validation,
         string? introspectionEndpoint,
         string? jwksUri,
+        string? introspectionClientId,
+        string? introspectionClientSecretFile,
         List<string> rejected)
     {
         if (issuer is null && validation is null)
@@ -760,6 +809,11 @@ public static class HostConfiguration
             if (introspectionEndpoint is not null || jwksUri is not null)
             {
                 rejected.Add($"'{IssuerKey}' is required with '{TokenValidationKey}'. An endpoint or a key set with no issuer to trust validates nothing.");
+            }
+
+            if (introspectionClientId is not null || introspectionClientSecretFile is not null)
+            {
+                rejected.Add($"'{IssuerKey}' is required with '{IntrospectionClientIdKey}' and '{IntrospectionClientSecretFileKey}'. A client identity with no issuer authenticates to nobody.");
             }
 
             return null;
@@ -787,7 +841,59 @@ public static class HostConfiguration
             rejected.Add($"'{IntrospectionEndpointKey}' names an endpoint nothing calls: '{TokenValidationKey}' is 'jwks'. Remove it, or select 'introspection'.");
         }
 
-        return new HostAuthorizationOptions(issuer, mode, introspectionEndpoint, jwksUri);
+        BindIntrospectionClient(
+            mode,
+            introspectionClientId,
+            introspectionClientSecretFile,
+            rejected);
+
+        return new HostAuthorizationOptions(
+            issuer,
+            mode,
+            introspectionEndpoint,
+            jwksUri,
+            introspectionClientId,
+            introspectionClientSecretFile);
+    }
+
+    /// <summary>
+    /// Binds the introspection client identity and its secret file, refusing either half alone or
+    /// the pair under a mode that never calls the endpoint.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Both-or-neither for the same reason the issuer pair is: an identity with no secret can
+    /// authenticate as nobody, and a secret with no identity has no one to authenticate as. Either
+    /// half alone would look configured and would fail at the first protected request.
+    /// </para>
+    /// <para>
+    /// Under <c>jwks</c> the pair names a client nothing ever presents, which is the same class of
+    /// mistake as an introspection endpoint under <c>jwks</c>: the operator believes a setting
+    /// applied and the process behaves as if it were never written.
+    /// </para>
+    /// </remarks>
+    private static void BindIntrospectionClient(
+        HostTokenValidation mode,
+        string? clientId,
+        string? secretFile,
+        List<string> rejected)
+    {
+        if (clientId is not null && secretFile is null)
+        {
+            rejected.Add($"'{IntrospectionClientIdKey}' was given without '{IntrospectionClientSecretFileKey}'. Name the file holding the secret this client authenticates with.");
+            return;
+        }
+
+        if (secretFile is not null && clientId is null)
+        {
+            rejected.Add($"'{IntrospectionClientSecretFileKey}' was given without '{IntrospectionClientIdKey}'. Name the client the secret authenticates as.");
+            return;
+        }
+
+        if (clientId is not null && mode is HostTokenValidation.Jwks)
+        {
+            rejected.Add($"'{IntrospectionClientIdKey}' and '{IntrospectionClientSecretFileKey}' name a client that presents itself at the introspection endpoint, but '{TokenValidationKey}' is 'jwks', which never calls it. Remove them, or select 'introspection'.");
+        }
     }
 
     /// <summary>
@@ -833,17 +939,17 @@ public static class HostConfiguration
 
     private static HostTokenValidation? Validation(string key, string value, List<string> rejected)
     {
-        if (string.Equals(value, "introspection", StringComparison.Ordinal))
+        if (string.Equals(value, IntrospectionModeName, StringComparison.Ordinal))
         {
             return HostTokenValidation.Introspection;
         }
 
-        if (string.Equals(value, "jwks", StringComparison.Ordinal))
+        if (string.Equals(value, JwksModeName, StringComparison.Ordinal))
         {
             return HostTokenValidation.Jwks;
         }
 
-        rejected.Add($"'{key}' was given '{value}'. Choose 'introspection' or 'jwks'.");
+        rejected.Add($"'{key}' was given '{value}'. Choose '{IntrospectionModeName}' or '{JwksModeName}'.");
         return null;
     }
 

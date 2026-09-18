@@ -837,6 +837,7 @@ The following codes are always warnings; every other code is an error:
 | `surface/operation-unknown` | An exposure entry names an undeclared slug. |
 | `surface/duplicate-operation` | A surface lists one operation twice. |
 | `surface/no-operations` | A surface exposes nothing. |
+| `surface/scopes-without-authentication` | A surface declares required scopes on a mount that requires no authentication, so no token would ever carry them. |
 
 ### `policy` — perimeter and bounds
 

@@ -495,6 +495,123 @@ public sealed class HostConfigurationTests
         Assert.Empty(binding!.AllowedOrigins);
     }
 
+    /// <summary>
+    /// The resource-server credential is one decision: an identity and the file holding its
+    /// secret, or neither.
+    /// </summary>
+    /// <remarks>
+    /// An identity with no secret authenticates to nobody and a secret with no identity has no
+    /// name to present, so each half alone is refused where it is written rather than as a 401
+    /// the operator would debug at the issuer.
+    /// </remarks>
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void A_half_configured_introspection_client_is_refused(bool withClientId, bool withSecretFile)
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.IssuerKey] = "https://issuer.example.test",
+            [HostConfiguration.TokenValidationKey] = "introspection",
+        };
+
+        if (withClientId)
+        {
+            settings[HostConfiguration.IntrospectionClientIdKey] = "engine-resource-server";
+        }
+
+        if (withSecretFile)
+        {
+            settings[HostConfiguration.IntrospectionClientSecretFileKey] = "/run/secrets/introspection";
+        }
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
+
+        string refusal = Assert.Single(refusals);
+        Assert.Contains(
+            withClientId
+                ? HostConfiguration.IntrospectionClientSecretFileKey
+                : HostConfiguration.IntrospectionClientIdKey,
+            refusal,
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>Both halves together bind and are carried through.</summary>
+    [Fact]
+    public void A_complete_introspection_client_binds()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.IssuerKey] = "https://issuer.example.test",
+            [HostConfiguration.TokenValidationKey] = "introspection",
+            [HostConfiguration.IntrospectionClientIdKey] = "engine-resource-server",
+            [HostConfiguration.IntrospectionClientSecretFileKey] = "/run/secrets/introspection",
+        };
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. settings], out HostBinding? binding, out IReadOnlyList<string> refusals));
+        Assert.Empty(refusals);
+        Assert.Equal("engine-resource-server", binding!.Authorization!.IntrospectionClientId);
+        Assert.Equal("/run/secrets/introspection", binding.Authorization.IntrospectionClientSecretFile);
+    }
+
+    /// <summary>An introspection credential under the jwks mode is refused.</summary>
+    /// <remarks>
+    /// The jwks mode never calls an introspection endpoint, so the credential could not be used.
+    /// Accepting it would tell an operator the resource identity is configured when every
+    /// validation takes the other path, which is the same class of mistake as an introspection
+    /// endpoint under jwks.
+    /// </remarks>
+    [Fact]
+    public void An_introspection_client_under_the_jwks_mode_is_refused()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.IssuerKey] = "https://issuer.example.test",
+            [HostConfiguration.TokenValidationKey] = "jwks",
+            [HostConfiguration.IntrospectionClientIdKey] = "engine-resource-server",
+            [HostConfiguration.IntrospectionClientSecretFileKey] = "/run/secrets/introspection",
+        };
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
+
+        string refusal = Assert.Single(refusals);
+        Assert.Contains(HostConfiguration.TokenValidationKey, refusal, StringComparison.Ordinal);
+    }
+
+    /// <summary>An introspection client without an issuer is refused: it authenticates to nobody.</summary>
+    [Fact]
+    public void An_introspection_client_without_an_issuer_is_refused()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.IntrospectionClientIdKey] = "engine-resource-server",
+            [HostConfiguration.IntrospectionClientSecretFileKey] = "/run/secrets/introspection",
+        };
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
+
+        string refusal = Assert.Single(refusals);
+        Assert.Contains(HostConfiguration.IssuerKey, refusal, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Both new keys are accepted settings rather than unknown ones.
+    /// </summary>
+    /// <remarks>
+    /// An unknown setting is refused by name, so a key that was added to the binder but not to
+    /// the accepted list would be reported as a typo in an otherwise valid deployment.
+    /// </remarks>
+    [Fact]
+    public void The_introspection_client_settings_are_accepted_keys()
+    {
+        Assert.Contains(HostConfiguration.IntrospectionClientIdKey, HostConfiguration.AcceptedKeys);
+        Assert.Contains(HostConfiguration.IntrospectionClientSecretFileKey, HostConfiguration.AcceptedKeys);
+    }
+
     private static List<KeyValuePair<string, string>> Mounts() => [new("/api", "/manifests/api")];
 
     private static Dictionary<string, string> Empty() => new(StringComparer.Ordinal);

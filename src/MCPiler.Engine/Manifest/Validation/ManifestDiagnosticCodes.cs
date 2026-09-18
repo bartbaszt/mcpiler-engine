@@ -228,6 +228,17 @@ public static class ManifestDiagnosticCodes
     /// </remarks>
     public const string DuplicateSurfaceOperation = "surface/duplicate-operation";
 
+    /// <summary>
+    /// A surface declares required scopes on a mount that requires no authentication.
+    /// </summary>
+    /// <remarks>
+    /// A scope restricts a token, so it is meaningful only where a token is required. The
+    /// combination is refused rather than resolved: reading scopes as an implication of
+    /// protection would give the format two ways to say "protected", which is the ambiguity
+    /// the mount-level <c>authenticationRequired</c> member exists to remove.
+    /// </remarks>
+    public const string ScopesWithoutAuthentication = "surface/scopes-without-authentication";
+
     // ---- policy ---------------------------------------------------------------------
 
     /// <summary>The base URL is absent or not an absolute HTTP or HTTPS URL.</summary>
@@ -534,6 +545,7 @@ public static class ManifestDiagnosticCodes
         SurfaceOperationUnknown,
         SurfaceHasNoOperations,
         DuplicateSurfaceOperation,
+        ScopesWithoutAuthentication,
         BaseUrlInvalid,
         OriginInvalid,
         LimitWidened,

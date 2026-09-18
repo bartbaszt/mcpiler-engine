@@ -230,16 +230,33 @@ internal static class MountAuthorizationSetup
         => authorization is not null;
 
     /// <summary>Builds the validator the configured validation mode selects.</summary>
+    /// <remarks>
+    /// <para>
+    /// A configured introspection client reads its secret first, before any client is
+    /// constructed, so an unusable file throws without leaving an undisposed <see cref="HttpClient"/>
+    /// behind. The refusal names the path and never the value.
+    /// </para>
+    /// <para>
+    /// The client's timeout is bounded well below the stock 100 seconds because this client sits
+    /// on the request path of every protected call. A validator that waited the default would hold
+    /// a client's connection open for over a minute while the issuer is unreachable, and the answer
+    /// in that case is already known: the token cannot be established, so it is inactive. The
+    /// validator's own catch turns the timeout into that inactive answer.
+    /// </para>
+    /// </remarks>
     internal static ITokenValidator Validator(HostAuthorizationOptions options)
     {
-        HttpClient client = new();
+        string? secret = ReadIntrospectionSecret(options);
+        HttpClient client = new() { Timeout = ValidationTimeout };
 
         return options.Validation switch
         {
             HostTokenValidation.Introspection => new IntrospectionTokenValidator(
                 client,
                 options.Issuer,
-                options.IntrospectionEndpoint),
+                options.IntrospectionEndpoint,
+                options.IntrospectionClientId,
+                secret),
             HostTokenValidation.Jwks => new JwksTokenValidator(
                 client,
                 options.Issuer,
@@ -247,5 +264,40 @@ internal static class MountAuthorizationSetup
             _ => throw new InvalidOperationException(
                 "The token validation configuration was validated at bind time; an unknown mode here is a bug."),
         };
+    }
+
+    /// <summary>
+    /// How long validation waits on the issuer.
+    /// </summary>
+    /// <remarks>
+    /// Chosen to sit inside the MCP request budget while still allowing a slow issuer on a
+    /// congested link to answer. A timeout is not an error condition here: it produces the same
+    /// inactive-token answer an unreachable issuer produces, because a token whose standing cannot
+    /// be established is one no resource server may admit.
+    /// </remarks>
+    private static readonly TimeSpan ValidationTimeout = TimeSpan.FromSeconds(10);
+
+    /// <summary>
+    /// The introspection client's secret, when one is configured.
+    /// </summary>
+    /// <remarks>
+    /// An unreadable file throws, which the caller turns into a startup refusal: a resource server
+    /// that started with an unusable credential would reject every token, and that is
+    /// indistinguishable at the client from a misconfigured client.
+    /// </remarks>
+    private static string? ReadIntrospectionSecret(HostAuthorizationOptions options)
+    {
+        if (options.IntrospectionClientSecretFile is not { } path)
+        {
+            return null;
+        }
+
+        if (!IntrospectionClientSecret.TryRead(path, out string secret, out string? refusal))
+        {
+            throw new InvalidOperationException(
+                $"The introspection client is configured but its secret is unusable: {refusal}");
+        }
+
+        return secret;
     }
 }

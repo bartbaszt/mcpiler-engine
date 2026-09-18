@@ -33,7 +33,7 @@ public sealed class SectionReaderTests
             Json(
                 """
                 {
-                  "formatVersion": 1,
+                  "formatVersion": 2,
                   "name": "Example API",
                   "description": "Pet inventory",
                   "version": "1.4.0",
@@ -87,6 +87,202 @@ public sealed class SectionReaderTests
         AssertNoErrors();
         Assert.NotNull(section);
         Assert.True(section.IsMinimal);
+    }
+
+    [Fact]
+    public void A_mount_that_states_no_protection_is_protected()
+    {
+        var section = SectionReader.ReadServer(Json("""{ "name": "Example API" }"""), _diagnostics);
+
+        AssertNoErrors();
+        Assert.True(section!.AuthenticationRequired);
+    }
+
+    [Fact]
+    public void A_mount_may_state_that_it_is_not_protected()
+    {
+        var section = SectionReader.ReadServer(
+            Json("""{ "name": "Example API", "authenticationRequired": false }"""),
+            _diagnostics);
+
+        AssertNoErrors();
+        Assert.False(section!.AuthenticationRequired);
+    }
+
+    [Fact]
+    public void A_mount_may_state_explicitly_that_it_is_protected()
+    {
+        var section = SectionReader.ReadServer(
+            Json("""{ "name": "Example API", "authenticationRequired": true }"""),
+            _diagnostics);
+
+        AssertNoErrors();
+        Assert.True(section!.AuthenticationRequired);
+    }
+
+    [Theory]
+    [InlineData("{ \"authenticationRequired\": true, \"name\": \"Example API\" }")]
+    [InlineData("{\n  \"description\": \"Unrelated\",\n  \"name\": \"Example API\",\n  \"version\": \"9.9\",\n  \"authenticationRequired\": true\n}")]
+    [InlineData("{\"name\":\"Example API\"}")]
+    public void Protection_semantics_are_independent_of_member_order_whitespace_and_unrelated_server_members(
+        string json)
+    {
+        var diagnostics = new List<ManifestDiagnostic>();
+        var section = SectionReader.ReadServer(Json(json), diagnostics);
+
+        Assert.DoesNotContain(diagnostics, static d => d.IsError);
+        Assert.True(section!.AuthenticationRequired);
+    }
+
+    [Theory]
+    [InlineData("{ \"authenticationRequired\": false, \"name\": \"Example API\", \"surfaces\": [{ \"slug\": \"default\", \"isDefault\": true, \"requiredScopes\": [\"mcp:invoke\"], \"operations\": [] }] }")]
+    [InlineData("{\n  \"surfaces\": [ { \"operations\": [], \"requiredScopes\": [ \"mcp:invoke\" ], \"isDefault\": true, \"slug\": \"default\" } ],\n  \"description\": \"Unrelated\",\n  \"name\": \"Example API\",\n  \"authenticationRequired\": false\n}")]
+    public void Scope_without_authentication_refusal_is_structural(string json)
+    {
+        var diagnostics = new List<ManifestDiagnostic>();
+
+        SectionReader.ReadServer(Json(json), diagnostics);
+
+        var diagnostic = Assert.Single(
+            diagnostics,
+            static d => string.Equals(
+                d.Code,
+                ManifestDiagnosticCodes.ScopesWithoutAuthentication,
+                StringComparison.Ordinal));
+
+        Assert.EndsWith("/requiredScopes", diagnostic.Pointer, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("{ \"name\": \"Example API\", \"surfaces\": [{ \"slug\": \"default\", \"isDefault\": true, \"authenticationRequired\": false, \"operations\": [] }] }")]
+    [InlineData("{\n  \"surfaces\": [ { \"operations\": [], \"authenticationRequired\": true, \"isDefault\": true, \"slug\": \"default\" } ],\n  \"version\": \"1.0\",\n  \"name\": \"Example API\"\n}")]
+    public void Surface_level_protection_refusal_is_structural(string json)
+    {
+        var diagnostics = new List<ManifestDiagnostic>();
+
+        SectionReader.ReadServer(Json(json), diagnostics);
+
+        var diagnostic = Assert.Single(
+            diagnostics,
+            static d => string.Equals(d.Code, ManifestDiagnosticCodes.UnknownMember, StringComparison.Ordinal));
+
+        Assert.Contains("authenticationRequired", diagnostic.Message, StringComparison.Ordinal);
+        Assert.EndsWith("/authenticationRequired", diagnostic.Pointer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_non_boolean_protection_member_is_a_type_error_and_does_not_default()
+    {
+        // Reading a wrongly typed member as if it were absent would turn an authoring typo into
+        // a silently changed security posture, in whichever direction the default happened to be.
+        var section = SectionReader.ReadServer(
+            Json("""{ "name": "Example API", "authenticationRequired": "yes" }"""),
+            _diagnostics);
+
+        Assert.NotNull(section);
+        Assert.Contains(ManifestDiagnosticCodes.MemberTypeInvalid, ErrorCodes, StringComparer.Ordinal);
+    }
+
+    [Fact]
+    public void Protection_is_a_mount_member_and_a_surface_may_not_declare_it()
+    {
+        // The rule is structural: a mount has one value, so a per-surface declaration is not a
+        // value that could ever differ — it is an unknown member.
+        SectionReader.ReadServer(
+            Json(
+                """
+                {
+                  "name": "Example API",
+                  "surfaces": [
+                    { "slug": "default", "isDefault": true, "authenticationRequired": false, "operations": [] }
+                  ]
+                }
+                """),
+            _diagnostics);
+
+        var diagnostic = Assert.Single(
+            _diagnostics,
+            static d => string.Equals(d.Code, ManifestDiagnosticCodes.UnknownMember, StringComparison.Ordinal));
+
+        Assert.Contains("authenticationRequired", diagnostic.Message, StringComparison.Ordinal);
+        Assert.EndsWith("/authenticationRequired", diagnostic.Pointer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Scopes_on_an_unprotected_mount_are_refused()
+    {
+        var section = SectionReader.ReadServer(
+            Json(
+                """
+                {
+                  "name": "Example API",
+                  "authenticationRequired": false,
+                  "surfaces": [
+                    {
+                      "slug": "default",
+                      "isDefault": true,
+                      "requiredScopes": ["mcp:invoke"],
+                      "operations": []
+                    }
+                  ]
+                }
+                """),
+            _diagnostics);
+
+        Assert.NotNull(section);
+        Assert.Contains(
+            ManifestDiagnosticCodes.ScopesWithoutAuthentication,
+            ErrorCodes,
+            StringComparer.Ordinal);
+    }
+
+    [Fact]
+    public void Scopes_on_a_protected_mount_are_accepted()
+    {
+        var section = SectionReader.ReadServer(
+            Json(
+                """
+                {
+                  "name": "Example API",
+                  "authenticationRequired": true,
+                  "surfaces": [
+                    {
+                      "slug": "default",
+                      "isDefault": true,
+                      "requiredScopes": ["mcp:invoke"],
+                      "operations": []
+                    }
+                  ]
+                }
+                """),
+            _diagnostics);
+
+        AssertNoErrors();
+        Assert.Equal(["mcp:invoke"], section!.Surfaces[0].RequiredScopes);
+    }
+
+    [Fact]
+    public void Scopes_on_a_mount_that_states_nothing_are_accepted_because_protected_is_the_default()
+    {
+        var section = SectionReader.ReadServer(
+            Json(
+                """
+                {
+                  "name": "Example API",
+                  "surfaces": [
+                    {
+                      "slug": "default",
+                      "isDefault": true,
+                      "requiredScopes": ["mcp:invoke"],
+                      "operations": []
+                    }
+                  ]
+                }
+                """),
+            _diagnostics);
+
+        AssertNoErrors();
+        Assert.True(section!.AuthenticationRequired);
     }
 
     [Fact]
@@ -223,7 +419,7 @@ public sealed class SectionReaderTests
 
         var later = new List<ManifestDiagnostic>();
 
-        SectionReader.ReadServer(Json("""{ "formatVersion": 2, "name": "A" }"""), later);
+        SectionReader.ReadServer(Json("""{ "formatVersion": 3, "name": "A" }"""), later);
 
         Assert.Contains(
             ManifestDiagnosticCodes.SectionFormatVersionUnsupported,

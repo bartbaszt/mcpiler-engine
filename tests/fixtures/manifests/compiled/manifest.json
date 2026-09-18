@@ -3,8 +3,9 @@
   "sections": {
     "server": {
       "inline": {
-        "formatVersion": 1,
+        "formatVersion": 2,
         "name": "Styles",
+        "authenticationRequired": true,
         "surfaces": [
           {
             "slug": "default",
@@ -161,7 +162,7 @@
   },
   "completeness": {
     "algorithm": "sha256",
-    "value": "440bad753467bab549be9245c193bc8fa0d154f84df1fe1cf3347b0734b134ae"
+    "value": "112391d47f43da1b10f2daad1834fcdba3412eb0c1d25fe06180b6f9dcce2728"
   },
   "provenance": {
     "connectorId": "7a1c0000000040008000000000000001",

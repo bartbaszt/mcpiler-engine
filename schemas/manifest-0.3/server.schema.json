@@ -2,15 +2,19 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:mcpiler:manifest:0.3:server",
   "title": "MCPiler Manifest 0.3 server section",
-  "description": "Routing identity plus the surfaces. A surface's operation list is the single runtime exposure authority.",
+  "description": "Routing identity, the mount's authorization posture, and the surfaces. A surface's operation list is the single runtime exposure authority; whether a token is required is decided once for the whole mount.",
   "type": "object",
   "required": ["name"],
   "additionalProperties": false,
   "properties": {
-    "formatVersion": { "const": 1 },
+    "formatVersion": { "const": 2 },
     "name": { "type": "string" },
     "description": { "type": "string" },
     "version": { "type": "string" },
+    "authenticationRequired": {
+      "description": "Whether this mount is an OAuth 2.1 protected resource. Absent means protected. Declared per mount, never per surface: every surface of a mount answers under one prefix, and a mount that protected one surface while leaving a sibling open would disclose the protected sibling's tool names through a listing. A surface's 'requiredScopes' is meaningful only while this is true.",
+      "type": "boolean"
+    },
     "surfaces": {
       "description": "Omit entirely to have one default surface synthesised over every declared agent operation.",
       "type": "array",

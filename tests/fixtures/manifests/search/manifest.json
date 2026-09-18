@@ -4,7 +4,7 @@
   "sections": {
     "server": {
       "inline": {
-        "formatVersion": 1,
+        "formatVersion": 2,
         "name": "Search Fixture",
         "description": "A manifest whose lexical index is pinned by hand.",
         "surfaces": [

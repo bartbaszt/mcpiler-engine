@@ -172,6 +172,7 @@ public sealed class MountedManifest
         Policy = policy;
         Surfaces = surfaces;
         Index = index;
+        RequiresAuthorization = document.Server.AuthenticationRequired;
     }
 
     /// <summary>The route prefix this Manifest answers on.</summary>
@@ -185,6 +186,24 @@ public sealed class MountedManifest
 
     /// <summary>Every enabled surface, in declaration order.</summary>
     public IReadOnlyList<MountedSurface> Surfaces { get; }
+
+    /// <summary>
+    /// Whether this mount is an OAuth 2.1 protected resource.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Read from the Manifest's own declared member (<c>server.authenticationRequired</c>,
+    /// absent meaning protected) at load, so a host that serves this mount and a host that
+    /// reports on it cannot disagree about the answer.
+    /// </para>
+    /// <para>
+    /// One value per mount by construction. A surface is not the unit an authorization decision
+    /// is made about: every surface answers under one prefix, and the format therefore does not
+    /// let a mount protect one surface and leave a sibling open. A surface's declared scopes
+    /// restrict a token; they never decide whether one is required.
+    /// </para>
+    /// </remarks>
+    public bool RequiresAuthorization { get; }
 
     internal ManifestDocument Document { get; }
 

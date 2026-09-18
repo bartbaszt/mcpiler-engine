@@ -4,7 +4,7 @@
   "sections": {
     "server": {
       "inline": {
-        "formatVersion": 1,
+        "formatVersion": 2,
         "name": "Pet Store",
         "description": "Two surfaces over the same operation set.",
         "version": "1.4.0",

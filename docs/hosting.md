@@ -49,9 +49,11 @@ The host accepts the following settings:
 | `--deployment-secret-file <file>` | File holding the deployment-scoped bearer secret for managed mode. Required with `--mode managed`. |
 | `--trusted-proxy <ip>` | Trusts `X-Forwarded-For`/`X-Forwarded-Proto` from this proxy address. Repeatable; IP literals only. |
 | `--allowed-origin <origin>` | Browser origin admitted on served MCP addresses. Repeatable; canonical origins only. Absent means no browser origin is admitted. |
-| `--issuer <url>` | Trusted OAuth issuer for mounts that require bearer authorization. |
+| `--issuer <url>` | Trusted OAuth issuer for mounts that require bearer authorization, or for any mount that does not declare `authenticationRequired: false`. |
 | `--token-validation introspection\|jwks` | Token-validation mode. Must be paired with `--issuer`. |
 | `--introspection-endpoint <url>` | Override the discovered RFC 7662 endpoint. |
+| `--introspection-client-id <id>` | Client identity the process authenticates as to the introspection endpoint. Paired with `--introspection-client-secret-file`. |
+| `--introspection-client-secret-file <file>` | File holding that client's secret. A path, never a value: a command-line secret is visible to every process listing. Paired with `--introspection-client-id`. |
 | `--jwks-uri <url>` | Override the issuer's published JWKS URI. |
 | `--drain-timeout-seconds <n>` | Positive whole-second shutdown drain window. Default: 100 seconds. |
 

@@ -310,6 +310,7 @@ public sealed class StructuredContentTests : IDisposable
             "server": {
               "inline": {
                 "name": "Structured API",
+                "authenticationRequired": false,
                 "surfaces": [
                   {
                     "slug": "full",

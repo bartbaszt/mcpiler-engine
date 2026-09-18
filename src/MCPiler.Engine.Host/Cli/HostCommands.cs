@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 
+using MCPiler.Engine.Host.Authorization;
 using MCPiler.Engine.Host.Configuration;
 using MCPiler.Engine.Host.Hosting;
 using MCPiler.Engine.Host.Managed;
@@ -72,7 +73,7 @@ public static class HostCommands
         {
             HostVerb.Version => new CommandOutcome(ExitCodes.Success, identity + Environment.NewLine),
             HostVerb.Serve => await ServeAsync(parsed, identity, progress, cancellationToken).ConfigureAwait(false),
-            HostVerb.Inspect => Inspect(parsed, identity),
+            HostVerb.Inspect => await InspectAsync(parsed, identity, cancellationToken).ConfigureAwait(false),
             _ => await FilesAsync(parsed, cancellationToken).ConfigureAwait(false),
         };
     }
@@ -96,6 +97,18 @@ public static class HostCommands
         if (!Bind(parsed, out HostBinding? binding, out refused))
         {
             return refused;
+        }
+
+        // Before either transport opens anything: a mode that needs an endpoint the issuer does
+        // not publish can only ever reject every token, and an operator should read that as a
+        // setting to change rather than as a client that cannot authenticate.
+        if (await IntrospectionEndpointCheck
+                .FindAsync(binding.Authorization, cancellationToken)
+                .ConfigureAwait(false) is { } unusable)
+        {
+            return new CommandOutcome(
+                ExitCodes.Configuration,
+                identity + Environment.NewLine + StartupReport.RenderRefusal(unusable) + Environment.NewLine);
         }
 
         if (binding.Mode is HostDeploymentMode.Managed)
@@ -348,7 +361,10 @@ public static class HostCommands
         progress?.Flush();
     }
 
-    private static CommandOutcome Inspect(CommandLineResult parsed, string identity)
+    private static async Task<CommandOutcome> InspectAsync(
+        CommandLineResult parsed,
+        string identity,
+        CancellationToken cancellationToken)
     {
         if (!HasManifestMount(parsed, out CommandOutcome? refused))
         {
@@ -372,6 +388,27 @@ public static class HostCommands
         StringBuilder text = new(identity);
         text.AppendLine();
         text.Append(StartupReport.Render(result));
+
+        // Inspection runs the same mount path as serving and stops before the listener. The one
+        // thing that path cannot report on its own is the host-side pairing rule, because it
+        // depends on configuration rather than on the Manifest: a protected mount with no
+        // configured issuer refuses to start. Reporting it here is the difference between an
+        // inspection that answers "will this endpoint demand a token" and one that answers "will
+        // this configuration run at all".
+        if (AuthorizationRefusal.Find(result.Mounts, binding.Authorization) is { } unstartable)
+        {
+            text.Append(StartupReport.RenderUnstartable(unstartable));
+        }
+
+        // The other host-side pairing rule: a configured validation mode whose issuer publishes
+        // no endpoint for it. Also invisible to the mount path, and also the difference between
+        // "what would be exposed" and "whether this configuration would run".
+        if (await IntrospectionEndpointCheck
+                .FindAsync(binding.Authorization, cancellationToken)
+                .ConfigureAwait(false) is { } unreachable)
+        {
+            text.Append(StartupReport.RenderUnstartable(unreachable));
+        }
 
         foreach (MountedManifest mount in result.Mounts)
         {

@@ -59,11 +59,44 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
     /// <summary>What the introspection endpoint answers for every presented token.</summary>
     public bool Active { get; }
 
-    /// <summary>Starts an authorization server whose introspection answers the fixed standing.</summary>
+    /// <summary>
+    /// Starts an authorization server whose introspection endpoint demands client
+    /// authentication when a credential is supplied, and accepts any caller when none is.
+    /// </summary>
+    /// <remarks>
+    /// The credential is optional rather than always required because the two configurations
+    /// are both legitimate and both need a server to talk to: a deployment may introspect
+    /// anonymously, and RFC 7662 deployments authenticate. Making the fake always require a
+    /// credential would leave the anonymous case untestable, and making it never require one
+    /// would leave the authenticated case unprovable.
+    /// </remarks>
+    /// <param name="active">The standing the endpoint reports for every presented token.</param>
+    /// <param name="cancellationToken">Cancels startup.</param>
+    /// <param name="introspectionClientId">
+    /// The client id the endpoint requires, or <c>null</c> to accept any caller.
+    /// </param>
+    /// <param name="introspectionClientSecret">
+    /// The secret the endpoint requires. Required with <paramref name="introspectionClientId"/>.
+    /// </param>
+    /// <param name="publishesIntrospection">
+    /// Whether the metadata document names an introspection endpoint at all. A real
+    /// authorization server that answers only signature validation publishes no such member,
+    /// and the engine is expected to refuse to start rather than reject every token.
+    /// </param>
     public static async Task<FakeAuthorizationServer> StartAsync(
         bool active,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? introspectionClientId = null,
+        string? introspectionClientSecret = null,
+        bool publishesIntrospection = true)
     {
+        if (introspectionClientId is null ^ introspectionClientSecret is null)
+        {
+            throw new ArgumentException(
+                "The introspection credential is one decision: supply both halves or neither.",
+                introspectionClientSecret is null ? nameof(introspectionClientId) : nameof(introspectionClientSecret));
+        }
+
         RSA signing = RSA.Create(2048);
         RsaSecurityKey parameters = new(signing.ExportParameters(true)) { KeyId = "test-key-1" };
 
@@ -73,6 +106,9 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
         WebApplication app = builder.Build();
 
         bool introspectionActive = active;
+        string? requiredClientId = introspectionClientId;
+        string? requiredSecret = introspectionClientSecret;
+        bool advertisesIntrospection = publishesIntrospection;
 
         app.Run(async context =>
         {
@@ -81,10 +117,15 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
 
             if (path.EndsWith("/.well-known/oauth-authorization-server", StringComparison.Ordinal))
             {
+                // token_endpoint_auth_methods_supported is stated because a resource server that
+                // has to authenticate needs to know the methods the issuer accepts, and a fake
+                // that omitted it would not describe the real one.
                 context.Response.StatusCode = 200;
                 context.Response.ContentType = "application/json";
                 await context.Response.WriteAsync(
-                    $$"""{ "issuer": "http://{{host}}", "introspection_endpoint": "http://{{host}}/introspect", "jwks_uri": "http://{{host}}/jwks" }""",
+                    advertisesIntrospection
+                        ? $$"""{ "issuer": "http://{{host}}", "introspection_endpoint": "http://{{host}}/introspect", "jwks_uri": "http://{{host}}/jwks", "introspection_endpoint_auth_methods_supported": ["client_secret_basic"] }"""
+                        : $$"""{ "issuer": "http://{{host}}", "jwks_uri": "http://{{host}}/jwks" }""",
                     context.RequestAborted);
                 return;
             }
@@ -97,6 +138,15 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
                 if (!context.Request.HasFormContentType)
                 {
                     context.Response.StatusCode = 400;
+                    return;
+                }
+
+                if (requiredClientId is not null
+                    && !Authenticates(context.Request, requiredClientId, requiredSecret!))
+                {
+                    // RFC 7662 requires the endpoint to be protected: a caller that cannot
+                    // authenticate learns nothing about the token, not even whether it exists.
+                    context.Response.StatusCode = 401;
                     return;
                 }
 
@@ -169,9 +219,60 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
         return $$"""{ "keys": [ { "kty": "{{key.Kty}}", "kid": "{{key.Kid}}", "n": "{{key.N}}", "e": "{{key.E}}", "alg": "RS256", "use": "sig" } ] }""";
     }
 
+    /// <summary>
+    /// Whether the request carries exactly the expected <c>client_secret_basic</c> credential.
+    /// </summary>
+    /// <remarks>
+    /// Both halves are compared, and the comparison is ordinal: an endpoint that accepted any
+    /// client id or any secret would let the negative cases pass while proving nothing.
+    /// </remarks>
+    private static bool Authenticates(HttpRequest request, string clientId, string secret)
+    {
+        string header = request.Headers.Authorization.ToString();
+
+        if (!header.StartsWith("Basic ", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        string decoded;
+
+        try
+        {
+            decoded = Encoding.UTF8.GetString(Convert.FromBase64String(header["Basic ".Length..].Trim()));
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+
+        int separator = decoded.IndexOf(':', StringComparison.Ordinal);
+
+        if (separator < 0)
+        {
+            return false;
+        }
+
+        string presentedId = Uri.UnescapeDataString(decoded[..separator]);
+        string presentedSecret = Uri.UnescapeDataString(decoded[(separator + 1)..]);
+
+        return string.Equals(presentedId, clientId, StringComparison.Ordinal)
+            && string.Equals(presentedSecret, secret, StringComparison.Ordinal);
+    }
+
     /// <summary>Reads the audience of a presented JWT without verifying it.</summary>
     private static string AudienceOf(string token)
     {
+        // A JWE carries five segments and its claims are encrypted, so there is nothing to read.
+        // The fake answers an empty audience for one, which the engine's byte-exact comparison
+        // then refuses: the same refusal a real opaque token would earn.
+        string[] parts = token.Split('.');
+
+        if (parts.Length != 3)
+        {
+            return string.Empty;
+        }
+
         string payload = Segment(token, 1);
         JsonNode? claims = JsonNode.Parse(payload);
 
@@ -181,9 +282,51 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
     /// <summary>Reads the scope claim of a presented JWT without verifying it.</summary>
     private static string ScopeOf(string token)
     {
+        if (token.Split('.').Length != 3)
+        {
+            return string.Empty;
+        }
+
         JsonNode? claims = JsonNode.Parse(Segment(token, 1));
 
         return claims?["scope"]?.GetValue<string>() ?? string.Empty;
+    }
+
+    /// <summary>
+    /// Mints a token that is signed and then encrypted, the way an issuer with an encryption
+    /// credential produces one.
+    /// </summary>
+    /// <remarks>
+    /// A JWE is the shape a resource server using signature-only validation cannot read. The
+    /// engine must contain that as a refusal, not as an unhandled failure: the difference is
+    /// between a 401 a client can act on and a 500 that reads as a defect.
+    /// </remarks>
+    /// <param name="audience">The resource the token is addressed to.</param>
+    /// <param name="scopes">The scopes the token carries.</param>
+    public string MintEncrypted(string audience, string scopes)
+    {
+        using Aes encryption = Aes.Create();
+        encryption.KeySize = 256;
+
+        JsonWebTokenHandler handler = new();
+
+        return handler.CreateToken(new SecurityTokenDescriptor
+        {
+            Issuer = Address.AbsoluteUri,
+            Audience = audience,
+            Claims = new Dictionary<string, object>
+            {
+                ["sub"] = "test-client",
+                ["scope"] = scopes,
+            },
+            NotBefore = DateTime.UtcNow.AddMinutes(-1),
+            Expires = DateTime.UtcNow.AddHours(1),
+            SigningCredentials = new SigningCredentials(SigningParameters, SecurityAlgorithms.RsaSha256),
+            EncryptingCredentials = new EncryptingCredentials(
+                new SymmetricSecurityKey(encryption.Key),
+                SecurityAlgorithms.Aes256KW,
+                SecurityAlgorithms.Aes128CbcHmacSha256),
+        });
     }
 
     /// <summary>The URL-safe base64 segment at <paramref name="index"/> of a compact JWT.</summary>

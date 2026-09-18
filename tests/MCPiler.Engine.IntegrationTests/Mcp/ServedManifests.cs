@@ -8,9 +8,19 @@ namespace MCPiler.Engine.IntegrationTests.Mcp;
 /// Manifests written to disk for the wire tests.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Written as JSON text rather than assembled from the model, so what the tests serve is what
 /// the readers accept. A fixture built by calling the model's constructors would skip the
 /// readers entirely and could describe a document no operator could author.
+/// </para>
+/// <para>
+/// These documents state <c>"authenticationRequired": false</c> explicitly. They exercise the
+/// protocol surface — listing, invocation, exposure, identity, Navigator — against a process
+/// that trusts no issuer, and a mount that requires a token cannot start without one. Stating
+/// the opt-out here is what keeps this suite about the wire rather than about authorization,
+/// and unlike the absent member it is a statement a reader can see. The authorization suite
+/// carries its own protected manifests and its own issuer.
+/// </para>
 /// </remarks>
 internal static class ServedManifests
 {
@@ -22,6 +32,7 @@ internal static class ServedManifests
             "server": {
               "inline": {
                 "name": "Pet API",
+                "authenticationRequired": false,
                 "surfaces": [
                   {
                     "slug": "full",
@@ -73,6 +84,7 @@ internal static class ServedManifests
             "server": {
               "inline": {
                 "name": "Pet API",
+                "authenticationRequired": false,
                 "surfaces": [
                   { "slug": "read", "operations": [ { "operation": "list-pets" } ] },
                   {
@@ -128,6 +140,7 @@ internal static class ServedManifests
             "server": {
               "inline": {
                 "name": "Pet API",
+                "authenticationRequired": false,
                 "surfaces": [
                   {
                     "slug": "full",
@@ -177,6 +190,7 @@ internal static class ServedManifests
             "server": {
               "inline": {
                 "name": "Pet API",
+                "authenticationRequired": false,
                 "description": "Everything about pets.",
                 "version": "3.1.4",
                 "surfaces": [
@@ -208,6 +222,7 @@ internal static class ServedManifests
             "server": {
               "inline": {
                 "name": "Weather API",
+                "authenticationRequired": false,
                 "surfaces": [
                   { "slug": "full", "isDefault": true, "operations": [ { "operation": "list-pets" } ] }
                 ]
@@ -242,6 +257,7 @@ internal static class ServedManifests
             "server": {
               "inline": {
                 "name": "Pet API",
+                "authenticationRequired": false,
                 "surfaces": [
                   { "slug": "read", "operations": [ { "operation": "list-pets" } ] },
                   { "slug": "write", "operations": [ { "operation": "list-pets" } ] }
@@ -271,6 +287,7 @@ internal static class ServedManifests
             "server": {
               "inline": {
                 "name": "Pet API",
+                "authenticationRequired": false,
                 "surfaces": [
                   { "slug": "read", "isDefault": true, "operations": [ { "operation": "list-pets" } ] },
                   { "slug": "write", "isDefault": true, "operations": [ { "operation": "list-pets" } ] }
@@ -332,6 +349,7 @@ internal static class ServedManifests
                 "server": {
                   "inline": {
                     "name": "Pet API",
+                    "authenticationRequired": false,
                     "surfaces": [
                       {
                         "slug": "full",
