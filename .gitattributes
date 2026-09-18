@@ -1,1 +1,6 @@
 *.sh text eol=lf
+
+# This managed-generation corpus is duplicated byte for byte into the MCPiler Platform tree.
+# Preserve the committed bytes on checkout so cross-repository byte-identity checks are stable
+# when core.autocrlf is enabled on Windows.
+tests/fixtures/managed/** -text
