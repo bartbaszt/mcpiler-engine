@@ -60,6 +60,39 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
     public bool Active { get; }
 
     /// <summary>
+    /// A deterministic barrier for an introspection request. It is intentionally owned by the
+    /// test rather than by the fake server: the test decides exactly when validation may finish,
+    /// which lets it place activation between request admission and downstream handling without
+    /// relying on scheduler timing.
+    /// </summary>
+    public sealed class IntrospectionGate
+    {
+        private readonly TaskCompletionSource _reached = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _armed;
+
+        /// <summary>Completes after a gated <c>/introspect</c> request has passed authentication.</summary>
+        public Task Reached => _reached.Task;
+
+        /// <summary>Releases the blocked introspection request.</summary>
+        public void Release() => _release.TrySetResult();
+
+        /// <summary>Arms the one test phase that must wait for an explicit release.</summary>
+        public void Arm() => Volatile.Write(ref _armed, 1);
+
+        internal async Task WaitAsync(HttpContext context)
+        {
+            if (Volatile.Read(ref _armed) == 0)
+            {
+                return;
+            }
+
+            _reached.TrySetResult();
+            await _release.Task.WaitAsync(context.RequestAborted).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
     /// Starts an authorization server whose introspection endpoint demands client
     /// authentication when a credential is supplied, and accepts any caller when none is.
     /// </summary>
@@ -83,12 +116,16 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
     /// authorization server that answers only signature validation publishes no such member,
     /// and the engine is expected to refuse to start rather than reject every token.
     /// </param>
+    /// <param name="introspectionGate">
+    /// An optional test barrier that pauses an authenticated introspection request until released.
+    /// </param>
     public static async Task<FakeAuthorizationServer> StartAsync(
         bool active,
         CancellationToken cancellationToken,
         string? introspectionClientId = null,
         string? introspectionClientSecret = null,
-        bool publishesIntrospection = true)
+        bool publishesIntrospection = true,
+        IntrospectionGate? introspectionGate = null)
     {
         if (introspectionClientId is null ^ introspectionClientSecret is null)
         {
@@ -148,6 +185,11 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
                     // authenticate learns nothing about the token, not even whether it exists.
                     context.Response.StatusCode = 401;
                     return;
+                }
+
+                if (introspectionGate is not null)
+                {
+                    await introspectionGate.WaitAsync(context).ConfigureAwait(false);
                 }
 
                 string presented = context.Request.Form["token"].ToString();

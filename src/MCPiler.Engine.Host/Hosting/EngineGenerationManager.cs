@@ -10,11 +10,11 @@ internal enum HostMode
     Managed,
 }
 
-/// <summary>Takes one generation lease for an admission.</summary>
+/// <summary>Takes one generation lease for a fixed-generation transport admission.</summary>
 /// <remarks>
-/// A session's handlers outlive the request that configured them, so they must lease per call
-/// through a delegate rather than capture the generation active at handshake; the generation they
-/// captured may have been retired and disposed by the time the call arrives.
+/// HTTP request admission is owned by <see cref="EngineRequestGenerationAdmissionMiddleware"/>.
+/// This source remains for stdio and other fixed-generation callers that do not have an HTTP
+/// request feature to consume.
 /// </remarks>
 internal delegate EngineGenerationLease? GenerationLeaseSource();
 
@@ -69,14 +69,11 @@ internal sealed class EngineGenerationManager : IDisposable
     internal bool HasGeneration => Current is not null;
 
     /// <summary>
-    /// A delegate that takes one lease from this manager, for a component that needs to lease
-    /// without holding the manager.
+    /// A lease source for fixed-generation callers that do not run inside HTTP admission.
     /// </summary>
     /// <remarks>
-    /// A session's handlers outlive the request that configured them. They must therefore take a
-    /// fresh lease per call rather than capture the generation that was active at handshake, and
-    /// they must do it through the manager, because the generation they captured may have been
-    /// retired and disposed by the time the call arrives.
+    /// HTTP MCP handlers use the current request's admission accessor instead. Keeping this source
+    /// on the manager preserves the stdio transport's independent, non-HTTP generation path.
     /// </remarks>
     internal GenerationLeaseSource LeaseSource => Lease;
 

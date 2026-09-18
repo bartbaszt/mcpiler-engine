@@ -139,6 +139,12 @@ internal static class McpRegistration
                 // differs between the two implementations should be a difference in our code,
                 // not in how the two configured one SDK.
                 transport.SessionMode = HttpServerSessionMode.StatefulForInitializeClients;
+                // Stateful handlers must flow with the current HTTP request so they can retrieve
+                // its generation admission. A session execution context would pin the initialize
+                // request's IHttpContextAccessor state.
+#pragma warning disable MCP9006 // The accepted request-admission design requires request execution context.
+                transport.PerSessionExecutionContext = false;
+#pragma warning restore MCP9006
                 transport.ConfigureSessionOptions = ConfigureSessionAsync;
             });
     }
@@ -184,9 +190,10 @@ internal static class McpRegistration
     /// connected to one Manifest exactly what a client connected to another is told.
     /// </para>
     /// <para>
-    /// The session is not pinned to the generation it started in. Each listing and each call
-    /// takes a fresh lease and resolves its address again, so a surface an activation removed
-    /// cannot be reached through a session that predates the activation.
+    /// The session is not pinned to the generation it started in. Each later HTTP request looks up
+    /// its own request admission and resolves the session address against that generation, so a surface
+    /// an activation removed cannot be reached through a session that predates the activation. Stdio
+    /// keeps its fixed-generation lease source because it has no HTTP request context.
     /// </para>
     /// </remarks>
     private static Task ConfigureSessionAsync(
@@ -194,25 +201,54 @@ internal static class McpRegistration
         McpServerOptions options,
         CancellationToken cancellationToken)
     {
-        if (context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>() is not { } route)
+        if (context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>() is null
+            || context.Features.Get<EngineRequestGenerationAdmission>() is not { } admission)
         {
             return Task.CompletedTask;
         }
 
-        EngineGenerationManager generations =
-            context.RequestServices.GetRequiredService<EngineGenerationManager>();
-
-        string address = RequestAddress.Resolve(context, route);
-        string identity = MountAuthorization.CanonicalResource(
-            context.Request.Scheme,
-            context.Request.Host.Value ?? string.Empty,
-            route.AuthorizationResourcePath ?? address);
+        string address = admission.Address;
+        string identity = admission.ResourceIdentity;
 
         DrainCoordinator drain = context.RequestServices.GetRequiredService<DrainCoordinator>();
+        EngineRequestGenerationAdmissionAccessor admissions =
+            context.RequestServices.GetRequiredService<EngineRequestGenerationAdmissionAccessor>();
 
-        ConfigureSurface(options, address, identity, generations.LeaseSource, drain);
+        ConfigureSurface(options, address, identity, admission, admissions, drain);
 
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Configures one HTTP session from the generation admitted by its initialize request.
+    /// </summary>
+    /// <remarks>
+    /// The admission is used only to derive immutable session identity and initial server
+    /// capabilities. The handlers capture the accessor, not this admission, and therefore look up
+    /// the admission belonging to each later HTTP request.
+    /// </remarks>
+    private static void ConfigureSurface(
+        McpServerOptions options,
+        string address,
+        string resourceIdentity,
+        EngineRequestGenerationAdmission admission,
+        EngineRequestGenerationAdmissionAccessor admissions,
+        DrainCoordinator drain)
+    {
+        ArgumentNullException.ThrowIfNull(admission);
+        ArgumentNullException.ThrowIfNull(admissions);
+
+        ConfigureResolvedSurface(
+            options,
+            admission.Resolution,
+            listRevision => ListToolsAsync(address, resourceIdentity, admissions, listRevision),
+            (request, token) => ToolBridge.InvokeAsync(
+                address,
+                resourceIdentity,
+                admissions,
+                drain,
+                request,
+                token));
     }
 
     /// <summary>
@@ -248,25 +284,44 @@ internal static class McpRegistration
                 return;
             }
 
-            ServerIdentity identity = resolved.Surface.Identity;
-
-            options.ServerInfo = new Implementation
-            {
-                Name = identity.Name,
-                Version = identity.Version,
-                Title = identity.Title,
-                Description = identity.Description,
-            };
-
-            options.Capabilities ??= new ServerCapabilities();
-            options.Capabilities.Tools = new ToolsCapability();
-
-            options.Handlers.ListToolsHandler = (request, _)
-                => ListToolsAsync(address, leases, request.Server?.NegotiatedProtocolVersion);
-
-            options.Handlers.CallToolHandler = (request, token)
-                => ToolBridge.InvokeAsync(address, resourceIdentity, leases, drain, request, token);
+            ConfigureResolvedSurface(
+                options,
+                resolved,
+                listRevision => ListToolsAsync(address, leases, listRevision),
+                (request, token) => ToolBridge.InvokeAsync(
+                    address,
+                    resourceIdentity,
+                    leases,
+                    drain,
+                    request,
+                    token));
         }
+    }
+
+    private static void ConfigureResolvedSurface(
+        McpServerOptions options,
+        SurfaceResolution resolved,
+        Func<string?, ValueTask<ListToolsResult>> listTools,
+        Func<RequestContext<CallToolRequestParams>, CancellationToken, ValueTask<CallToolResult>> callTool)
+    {
+        ServerIdentity identity = resolved.Surface.Identity;
+
+        options.ServerInfo = new Implementation
+        {
+            Name = identity.Name,
+            Version = identity.Version,
+            Title = identity.Title,
+            Description = identity.Description,
+        };
+
+        options.Capabilities ??= new ServerCapabilities();
+        options.Capabilities.Tools = new ToolsCapability();
+
+        options.Handlers.ListToolsHandler = (request, _)
+            => listTools(request.Server?.NegotiatedProtocolVersion);
+
+        options.Handlers.CallToolHandler = (request, token)
+            => callTool(request, token);
     }
 
     private static ValueTask<ListToolsResult> ListToolsAsync(
@@ -293,5 +348,29 @@ internal static class McpRegistration
                 Tools = [.. lease.Generation.Definitions(address, resolved.Surface, negotiatedProtocolRevision)],
             });
         }
+    }
+
+    private static ValueTask<ListToolsResult> ListToolsAsync(
+        string address,
+        string resourceIdentity,
+        EngineRequestGenerationAdmissionAccessor admissions,
+        string? negotiatedProtocolRevision)
+    {
+        if (admissions.Current is not { } admission
+            || !admission.MatchesSession(address, resourceIdentity))
+        {
+            // A stateful session belongs to the address and canonical HTTP resource on which it
+            // was initialized. Replaying its id on a sibling path or another authority must not
+            // expose the captured session's tool set.
+            return ValueTask.FromResult(new ListToolsResult { Tools = [] });
+        }
+
+        return ValueTask.FromResult(new ListToolsResult
+        {
+            Tools = [.. admission.Generation.Definitions(
+                admission.Address,
+                admission.Resolution.Surface,
+                negotiatedProtocolRevision)],
+        });
     }
 }

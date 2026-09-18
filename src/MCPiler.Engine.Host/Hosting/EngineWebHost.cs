@@ -196,6 +196,8 @@ public static class EngineWebHost
         builder.Services.AddSingleton(execution);
         builder.Services.AddSingleton(drain);
         builder.Services.AddSingleton(generations);
+        builder.Services.AddHttpContextAccessor();
+        builder.Services.AddSingleton<EngineRequestGenerationAdmissionAccessor>();
 
         McpRegistration.AddEngineMcp(builder.Services);
 
@@ -275,6 +277,12 @@ public static class EngineWebHost
             await next(context).ConfigureAwait(false);
         });
 
+        // Every Engine surface request, including an open surface and a transfer child, owns one
+        // generation lease from this point through response completion. Authorization, transfer
+        // dispatch and MCP handlers consume the non-owning admission feature instead of taking a
+        // second lease from the manager.
+        app.UseMiddleware<EngineRequestGenerationAdmissionMiddleware>();
+
         if (MountAuthorizationSetup.IsConfigured(binding.Authorization))
         {
             app.UseAuthentication();
@@ -297,29 +305,6 @@ public static class EngineWebHost
                 await next(context).ConfigureAwait(false);
             });
 
-            // An address the active generation does not serve is refused here, before the protocol
-            // handler can configure a session from it. The template matches every path, so without
-            // this an activation that removed a surface would leave its address reachable and the
-            // protocol handler would answer from a generation that was never asked. The refusal is
-            // the same empty 404 an unmapped address produces in file mode, because an address that
-            // names nothing must disclose nothing in either mode.
-            app.Use(async (context, next) =>
-            {
-                if (context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>() is not { } route)
-                {
-                    await next(context).ConfigureAwait(false);
-                    return;
-                }
-
-                if (!AddressIsServed(context, route, generations))
-                {
-                    context.Response.StatusCode = StatusCodes.Status404NotFound;
-                    return;
-                }
-
-                await next(context).ConfigureAwait(false);
-            });
-
             McpRegistration.MapManagedTemplate(app);
         }
         else
@@ -331,32 +316,6 @@ public static class EngineWebHost
         HealthEndpoints.Map(app, binding.Runtime.FileStoreRoot, drain);
 
         return app;
-    }
-
-    /// <summary>
-    /// Whether the active generation serves the address a request reached.
-    /// </summary>
-    /// <remarks>
-    /// Takes one lease for the decision and releases it immediately. The lease is what makes the
-    /// answer atomic with respect to an activation: the address is judged against exactly one
-    /// generation, so a request can never be admitted by the generation that is being replaced and
-    /// then answered by the one replacing it.
-    /// </remarks>
-    private static bool AddressIsServed(
-        HttpContext context,
-        SurfaceEndpoint route,
-        EngineGenerationManager generations)
-    {
-        if (generations.LeaseSource() is not { } lease)
-        {
-            return false;
-        }
-
-        using (lease)
-        {
-            return lease.Generation.TryResolve(Mcp.RequestAddress.Resolve(context, route), out SurfaceResolution? resolved)
-                && resolved is not null;
-        }
     }
 
     /// <summary>

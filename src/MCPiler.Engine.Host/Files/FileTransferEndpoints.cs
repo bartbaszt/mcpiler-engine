@@ -11,9 +11,9 @@ namespace MCPiler.Engine.Host.Files;
 /// <remarks>
 /// <para>
 /// A transfer child is addressed relative to its parent MCP surface, so its metadata states the
-/// parent address and the transfer handlers resolve the mount and surface through a generation
-/// lease. A file handle is issued and redeemed against the same execution graph that serves the
-/// surface, which is why the lease matters here as much as on the MCP routes themselves.
+/// parent address and the transfer handlers consume the request's generation admission. A file
+/// handle is issued and redeemed against the same execution graph that serves the surface, which
+/// is why the admission matters here as much as on the MCP routes themselves.
 /// </para>
 /// <para>
 /// File mode maps one route per child because the mount set never changes. A managed listener
@@ -102,17 +102,13 @@ internal static class FileTransferEndpoints
 
     private static async Task UploadAsync(HttpContext context, SurfaceEndpoint route)
     {
-        EngineGenerationManager generations = RequiredGenerations(context);
-
-        using EngineGenerationLease? lease = Lease(context, route, generations);
-
-        if (lease is null)
+        if (context.Features.Get<EngineRequestGenerationAdmission>() is not { } admission)
         {
             context.Response.StatusCode = StatusCodes.Status404NotFound;
             return;
         }
 
-        EngineExecution execution = lease.Generation.Execution;
+        EngineExecution execution = admission.Generation.Execution;
         string resource = CanonicalParent(context, route);
         string? fileName = context.Request.Query["fileName"].FirstOrDefault();
 
@@ -147,17 +143,13 @@ internal static class FileTransferEndpoints
 
     private static async Task DownloadAsync(HttpContext context, SurfaceEndpoint route, string capability)
     {
-        EngineGenerationManager generations = RequiredGenerations(context);
-
-        using EngineGenerationLease? lease = Lease(context, route, generations);
-
-        if (lease is null)
+        if (context.Features.Get<EngineRequestGenerationAdmission>() is not { } admission)
         {
             context.Response.StatusCode = StatusCodes.Status404NotFound;
             return;
         }
 
-        EngineExecution execution = lease.Generation.Execution;
+        EngineExecution execution = admission.Generation.Execution;
         string resource = CanonicalParent(context, route);
 
         await using RuntimeFileDownload download = await execution
@@ -198,41 +190,9 @@ internal static class FileTransferEndpoints
         return content.CopyToAsync(context.Response.Body, context.RequestAborted);
     }
 
-    /// <summary>
-    /// Takes the lease a transfer endpoint operates under, or null when the addressed parent is
-    /// not served by any active generation.
-    /// </summary>
-    /// <remarks>
-    /// An unserved parent is a 404: the transfer child exists only as a child of a served surface,
-    /// so an activation that removed the parent removes the child with it.
-    /// </remarks>
-    private static EngineGenerationLease? Lease(
-        HttpContext context,
-        SurfaceEndpoint route,
-        EngineGenerationManager generations)
-    {
-        if (!generations.TryLease(out EngineGenerationLease? lease) || lease is null)
-        {
-            return null;
-        }
-
-        if (!lease.Generation.TryResolve(route.ResolveAddress(context), out SurfaceResolution? resolved)
-            || resolved is null)
-        {
-            lease.Dispose();
-            return null;
-        }
-
-        return lease;
-    }
-
     private static SurfaceEndpoint RequiredSurface(HttpContext context)
         => context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>()
             ?? throw new InvalidOperationException("A mapped transfer endpoint has no parent surface metadata.");
-
-    private static EngineGenerationManager RequiredGenerations(HttpContext context)
-        => context.RequestServices.GetService(typeof(EngineGenerationManager)) as EngineGenerationManager
-            ?? throw new InvalidOperationException("A transfer endpoint has no generation manager registered.");
 
     private static string CanonicalParent(HttpContext context, SurfaceEndpoint route)
         => MountAuthorization.CanonicalResource(

@@ -25,9 +25,10 @@ namespace MCPiler.Engine.Host.Mcp;
 /// returns text, so the text becomes one block. Neither step can branch on a Manifest value.
 /// </para>
 /// <para>
-/// The call leases a generation rather than using one captured at session handshake: a session
-/// outlives the generation it started in, so the surface is resolved again for this call and
-/// executed on the same generation that resolved it.
+/// HTTP calls use the generation admission of the current request rather than one captured at
+/// session handshake. The current address/resource identity must still match the stateful session
+/// binding, after which the already-resolved request surface is executed directly. Stdio continues
+/// to use its fixed-generation lease source.
 /// </para>
 /// </remarks>
 internal static class ToolBridge
@@ -64,54 +65,131 @@ internal static class ToolBridge
         {
             if (leases() is not { } generation)
             {
-                return new CallToolResult
-                {
-                    IsError = true,
-                    Content = [new TextContentBlock { Text = "This address is no longer served by any active generation." }],
-                };
+                return NotServed();
             }
 
             using (generation)
             {
-                if (!generation.Generation.TryResolve(address, out SurfaceResolution? resolved)
-                    || resolved is null)
-                {
-                    // The surface this session started against is no longer served: an activation
-                    // removed it. The answer is the same one a route that never existed gives.
-                    return new CallToolResult
-                    {
-                        IsError = true,
-                        Content = [new TextContentBlock { Text = "This address is no longer served by any active generation." }],
-                    };
-                }
-
-                ToolOutcome outcome = await generation.Generation.Execution
-                    .InvokeAsync(
-                        resolved.Mount,
-                        resolved.Surface,
-                        resourceIdentity,
-                        tool,
-                        Arguments(request.Params?.Arguments),
-                        request.Server?.NegotiatedProtocolVersion,
-                        lease.CancellationToken)
-                    .ConfigureAwait(false);
-
-                return new CallToolResult
-                {
-                    // Set only when the call failed. A result carrying 'isError: false' and one
-                    // omitting it mean the same thing to a client, and the Studio omits it.
-                    IsError = outcome.IsError ? true : null,
-                    Content = [new TextContentBlock { Text = outcome.Text }],
-                    StructuredContent = outcome.StructuredContentJson is { } structured
-                        ? JsonSerializer.Deserialize<JsonElement>(structured)
-                        : null,
-                    Meta = outcome.ErrorCode is { } errorCode
-                        ? new JsonObject { [ErrorCodeMetaKey] = errorCode }
-                        : null,
-                };
+                return await ExecuteAsync(
+                    address,
+                    generation.Generation,
+                    resourceIdentity,
+                    tool,
+                    request,
+                    lease.CancellationToken).ConfigureAwait(false);
             }
         }
     }
+
+    /// <summary>Runs one HTTP call against the admission belonging to the current request.</summary>
+    internal static async ValueTask<CallToolResult> InvokeAsync(
+        string address,
+        string resourceIdentity,
+        EngineRequestGenerationAdmissionAccessor admissions,
+        DrainCoordinator drain,
+        RequestContext<CallToolRequestParams> request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(address);
+        ArgumentException.ThrowIfNullOrWhiteSpace(resourceIdentity);
+        ArgumentNullException.ThrowIfNull(admissions);
+        ArgumentNullException.ThrowIfNull(drain);
+        ArgumentNullException.ThrowIfNull(request);
+
+        string tool = request.Params?.Name ?? string.Empty;
+
+        if (admissions.Current is not { } admission
+            || !admission.MatchesSession(address, resourceIdentity))
+        {
+            return NotServed();
+        }
+
+        if (!drain.TryEnter(tool, cancellationToken, out DrainCoordinator.InvocationLease? admitted))
+        {
+            return new CallToolResult
+            {
+                IsError = true,
+                Content = [new TextContentBlock { Text = "Host shutdown is draining; this invocation was not accepted." }],
+            };
+        }
+
+        using (DrainCoordinator.InvocationLease lease = admitted!)
+        {
+            return await ExecuteResolvedAsync(
+                admission.Generation,
+                admission.Resolution,
+                admission.ResourceIdentity,
+                tool,
+                request,
+                lease.CancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static async ValueTask<CallToolResult> ExecuteAsync(
+        string address,
+        EngineGeneration generation,
+        string resourceIdentity,
+        string tool,
+        RequestContext<CallToolRequestParams> request,
+        CancellationToken cancellationToken)
+    {
+        if (!generation.TryResolve(address, out SurfaceResolution? resolved)
+            || resolved is null)
+        {
+            // The surface this session started against is no longer served: an activation removed
+            // it. The answer is the same one a route that never existed gives.
+            return NotServed();
+        }
+
+        return await ExecuteResolvedAsync(
+            generation,
+            resolved,
+            resourceIdentity,
+            tool,
+            request,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async ValueTask<CallToolResult> ExecuteResolvedAsync(
+        EngineGeneration generation,
+        SurfaceResolution resolved,
+        string resourceIdentity,
+        string tool,
+        RequestContext<CallToolRequestParams> request,
+        CancellationToken cancellationToken)
+    {
+        ToolOutcome outcome = await generation.Execution
+            .InvokeAsync(
+                resolved.Mount,
+                resolved.Surface,
+                resourceIdentity,
+                tool,
+                Arguments(request.Params?.Arguments),
+                request.Server?.NegotiatedProtocolVersion,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return new CallToolResult
+        {
+            // Set only when the call failed. A result carrying 'isError: false' and one
+            // omitting it mean the same thing to a client, and the Studio omits it.
+            IsError = outcome.IsError ? true : null,
+            Content = [new TextContentBlock { Text = outcome.Text }],
+            StructuredContent = outcome.StructuredContentJson is { } structured
+                ? JsonSerializer.Deserialize<JsonElement>(structured)
+                : null,
+            Meta = outcome.ErrorCode is { } errorCode
+                ? new JsonObject { [ErrorCodeMetaKey] = errorCode }
+                : null,
+        };
+    }
+
+    private static CallToolResult NotServed()
+        => new()
+        {
+            IsError = true,
+            Content = [new TextContentBlock { Text = "This address is no longer served by any active generation." }],
+        };
 
     /// <summary>Rebuilds the protocol's argument map as one object.</summary>
     /// <remarks>

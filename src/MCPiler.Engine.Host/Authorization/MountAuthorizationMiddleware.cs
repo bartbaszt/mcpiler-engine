@@ -32,30 +32,26 @@ namespace MCPiler.Engine.Host.Authorization;
 /// none of them widen anything where it does not.
 /// </para>
 /// <para>
-/// Authorization resolves through one generation lease taken for this request, so the mount
-/// state that decides whether a token is required and the surface whose scopes are checked
-/// both come from the same immutable generation.
+/// Authorization resolves through the request admission made before this middleware, so the mount
+/// state that decides whether a token is required and the surface whose scopes are checked both
+/// come from the same immutable generation.
 /// </para>
 /// </remarks>
 internal sealed class MountAuthorizationMiddleware
 {
     private readonly RequestDelegate _next;
     private readonly ITokenValidator _tokens;
-    private readonly EngineGenerationManager _generations;
 
     /// <summary>
     /// The middleware constructor. Public because the middleware convention requires it; the
-    /// validator and the generation manager are registered, the next delegate is supplied by the
-    /// pipeline.
+    /// validator is registered and the next delegate is supplied by the pipeline.
     /// </summary>
     public MountAuthorizationMiddleware(
         RequestDelegate next,
-        ITokenValidator tokens,
-        EngineGenerationManager generations)
+        ITokenValidator tokens)
     {
         _next = next;
         _tokens = tokens;
-        _generations = generations;
     }
 
     /// <summary>
@@ -64,77 +60,70 @@ internal sealed class MountAuthorizationMiddleware
     /// </summary>
     public async Task InvokeAsync(HttpContext context)
     {
-        if (context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>() is not { } route)
+        if (context.Features.Get<EngineRequestGenerationAdmission>() is not { } admission)
         {
-            // No surface metadata means the request matched no route, which routing already
-            // answers. Nothing here can disclose what no route reached.
+            // Admission is installed before this middleware for every surface and transfer child.
+            // A request without it is a non-surface host endpoint, so there is no mount decision
+            // to make here.
             await _next(context);
             return;
         }
 
-        if (!_generations.TryLease(out EngineGenerationLease? lease))
+        SurfaceEndpoint route = context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>()
+            ?? new SurfaceEndpoint(admission.Address, admission.Address);
+
+        if (!string.Equals(
+                admission.Address,
+                RequestAddress.Resolve(context, route),
+                StringComparison.Ordinal))
         {
-            // No generation is installed. The process is either shutting down or has not yet
-            // received one; either way the answer is the one an unknown resource gives.
             await RefuseSilentlyAsync(context).ConfigureAwait(false);
             return;
         }
 
-        using (lease)
+        if (!admission.Resolution.Mount.RequiresAuthorization())
         {
-            string address = RequestAddress.Resolve(context, route);
-
-            if (!lease!.Generation.TryResolve(address, out SurfaceResolution? resolved)
-                || resolved is null)
-            {
-                // The address is mapped but the leased generation does not serve it: a managed
-                // activation removed the surface. The refusal is byte-identical to the one for an
-                // address that was never mapped.
-                await RefuseSilentlyAsync(context).ConfigureAwait(false);
-                return;
-            }
-
-            if (!resolved.Mount.RequiresAuthorization())
-            {
-                await _next(context);
-                return;
-            }
-
-            TokenVerification verification = await VerifyAsync(context).ConfigureAwait(false);
-
-            if (!verification.Active)
-            {
-                await ChallengeAsync(context, route).ConfigureAwait(false);
-                return;
-            }
-
-            string resourcePath = route.AuthorizationResourcePath
-                ?? context.Request.Path.Value
-                ?? "/";
-
-            string canonical = MountAuthorization.CanonicalResource(
-                context.Request.Scheme,
-                context.Request.Host.Value ?? string.Empty,
-                resourcePath);
-
-            if (verification.Audience is null
-                || !MountAuthorization.AudienceNames(verification.Audience, canonical))
-            {
-                await RefuseSilentlyAsync(context).ConfigureAwait(false);
-                return;
-            }
-
-            foreach (string scope in resolved.Surface.RequiredScopes)
-            {
-                if (!verification.Scopes.Contains(scope, StringComparer.Ordinal))
-                {
-                    await RefuseSilentlyAsync(context).ConfigureAwait(false);
-                    return;
-                }
-            }
-
-            await _next(context).ConfigureAwait(false);
+            await _next(context);
+            return;
         }
+
+        TokenVerification verification = await VerifyAsync(context).ConfigureAwait(false);
+
+        if (!verification.Active)
+        {
+            await ChallengeAsync(context, route).ConfigureAwait(false);
+            return;
+        }
+
+        // The admission address is the parent MCP resource for both a surface request and a
+        // transfer child. A managed catch-all route has no parent metadata of its own, so using
+        // the raw transfer path here would reject a token whose audience correctly names the
+        // parent surface.
+        string resourcePath = route.AuthorizationResourcePath
+            ?? admission.Address;
+
+        string canonical = MountAuthorization.CanonicalResource(
+            context.Request.Scheme,
+            context.Request.Host.Value ?? string.Empty,
+            resourcePath);
+
+        if (verification.Audience is null
+            || !MountAuthorization.AudienceNames(verification.Audience, canonical))
+        {
+            await RefuseSilentlyAsync(context).ConfigureAwait(false);
+            return;
+        }
+
+        foreach (string scope in admission.Resolution.Surface.RequiredScopes)
+        {
+            if (!verification.Scopes.Contains(scope, StringComparer.Ordinal))
+            {
+                await RefuseSilentlyAsync(context).ConfigureAwait(false);
+                return;
+            }
+        }
+
+        await _next(context).ConfigureAwait(false);
     }
 
     /// <summary>

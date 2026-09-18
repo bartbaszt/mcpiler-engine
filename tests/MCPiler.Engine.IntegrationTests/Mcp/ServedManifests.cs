@@ -76,6 +76,101 @@ internal static class ServedManifests
         }
         """;
 
+    /// <summary>The one-surface wire fixture with the protected-mount default made explicit.</summary>
+    public static string ProtectedOneSurface
+        => OneSurface.Replace(
+            "\"authenticationRequired\": false",
+            "\"authenticationRequired\": true",
+            StringComparison.Ordinal);
+
+    /// <summary>
+    /// A protected, same-named probe whose definition, upstream and managed secret identify one
+    /// generation. The two generations used by activation tests differ only in those observable
+    /// values, so a mixed request cannot pass by returning a generic success.
+    /// </summary>
+    public static string ProtectedGeneration(
+        Uri upstream,
+        string generation,
+        string secretVariable,
+        string toolSlug = "probe")
+    {
+        ArgumentNullException.ThrowIfNull(upstream);
+        ArgumentException.ThrowIfNullOrWhiteSpace(generation);
+        ArgumentException.ThrowIfNullOrWhiteSpace(secretVariable);
+        ArgumentException.ThrowIfNullOrWhiteSpace(toolSlug);
+
+        return $$"""
+            {
+              "manifestFormatVersion": "0.3",
+              "sections": {
+                "server": { "inline": {
+                  "name": "Generation API",
+                  "authenticationRequired": true,
+                  "surfaces": [
+                    { "slug": "full", "isDefault": true,
+                      "operations": [ { "operation": "{{toolSlug}}" } ] }
+                  ]
+                } },
+                "policy": { "inline": { "baseUrl": "{{upstream.AbsoluteUri}}" } },
+                "operations": { "inline": { "operations": [
+                  { "key": "GET /generation", "method": "GET", "path": "/generation",
+                    "responses": { "200": { "content": {
+                      "application/json": { "schema": { "type": "object" } }
+                    } } } }
+                ] } },
+                "agentSurface": { "inline": { "operations": [
+                  { "slug": "{{toolSlug}}", "name": "{{generation}} probe",
+                    "summary": "{{generation}} definition",
+                    "binding": { "type": "http", "operation": "GET /generation",
+                      "credentialRef": ["generation-secret"] } }
+                ] } },
+                "credentials": { "inline": { "formatVersion": 3, "credentials": [
+                  { "id": "generation-secret", "scheme": "apiKey", "slot": "X-Generation-Secret",
+                    "location": "header", "value": { "fromEnv": "{{secretVariable}}" } }
+                ] } }
+              }
+            }
+            """;
+    }
+
+    /// <summary>
+    /// Two protected sibling surfaces whose advertised tools and executable paths are distinct.
+    /// Stateful-session tests use this to prove a session id cannot move one surface binding onto
+    /// a different HTTP resource.
+    /// </summary>
+    public static string ProtectedSiblingSurfaces(Uri upstream)
+    {
+        ArgumentNullException.ThrowIfNull(upstream);
+
+        return $$"""
+            {
+              "manifestFormatVersion": "0.3",
+              "sections": {
+                "server": { "inline": {
+                  "name": "Sibling API",
+                  "authenticationRequired": true,
+                  "surfaces": [
+                    { "slug": "read", "isDefault": true,
+                      "operations": [ { "operation": "read-probe" } ] },
+                    { "slug": "write", "operations": [ { "operation": "write-probe" } ] }
+                  ]
+                } },
+                "policy": { "inline": { "baseUrl": "{{upstream.AbsoluteUri}}" } },
+                "operations": { "inline": { "operations": [
+                  { "key": "GET /read-probe", "method": "GET", "path": "/read-probe" },
+                  { "key": "GET /write-probe", "method": "GET", "path": "/write-probe" }
+                ] } },
+                "agentSurface": { "inline": { "operations": [
+                  { "slug": "read-probe", "name": "Read probe",
+                    "binding": { "type": "http", "operation": "GET /read-probe" } },
+                  { "slug": "write-probe", "name": "Write probe",
+                    "binding": { "type": "http", "operation": "GET /write-probe" } }
+                ] } }
+              }
+            }
+            """;
+    }
+
     /// <summary>Three surfaces over one operation set, the middle one default.</summary>
     public const string ThreeSurfaces = """
         {
