@@ -9,21 +9,101 @@ mean, how long a handle lives, what happens when a write fails halfway, and what
 verdict on a record does and does not claim. It is written for an operator deciding where
 to point the root and for a reviewer deciding whether the failure behaviour is acceptable.
 
+It also defines the HTTP transfer surface that turns a handle into an out-of-band file
+capability. The routes are children of an MCP surface, not separate MCP resources:
+
+- `POST {surface}/files/upload` streams bytes into the Engine file store and returns an opaque
+  handle/capability in the JSON response;
+- `GET {surface}/files/{capability}` redeems that capability and streams the stored bytes back.
+
+The upload response contains the `handle`, sanitized `fileName`, `mediaType`, and byte `length`.
+Treat the handle as opaque: do not derive scope or storage information from its characters, and do
+not put file bytes in an MCP tool message. Upload and download bytes travel over these HTTP routes.
+
+Both routes inherit the parent surface's authorization contract in `file` and `managed` mode. Each
+request needs a bearer token when the parent mount is protected; the token audience is the exact
+canonical parent resource, required scopes come from the parent surface, and an unauthenticated
+request receives a protected-resource metadata challenge for the parent. The child URL is never an
+alternate audience. A capability is scoped to the parent resource and is authorized again on every
+download; unknown, expired, or cross-scope capabilities are refused without returning bytes.
+
+Successful downloads preserve the stored media type and exact bytes, set
+`X-Content-Type-Options: nosniff`, and set `Content-Disposition: attachment`.
+
 - Implementation: `src/MCPiler.Engine/Execution/Files/FileHandleStore.cs`
 - Options and the reference type: `src/MCPiler.Engine/Execution/FileHandleStoreOptions.cs`,
   `src/MCPiler.Engine/Execution/FileHandleReference.cs`
 
 ## Contents
 
-1. [The root](#the-root)
-2. [Names](#names)
-3. [What a record holds](#what-a-record-holds)
-4. [Write order and what a failure leaves](#write-order-and-what-a-failure-leaves)
-5. [Lifetime and expiry](#lifetime-and-expiry)
-6. [Removal and the sweep](#removal-and-the-sweep)
-7. [Refusals](#refusals)
-8. [Scan verdicts](#scan-verdicts)
-9. [What the store is not](#what-the-store-is-not)
+1. [HTTP transfer contract](#http-transfer-contract)
+2. [The root](#the-root)
+3. [Names](#names)
+4. [What a record holds](#what-a-record-holds)
+5. [Write order and what a failure leaves](#write-order-and-what-a-failure-leaves)
+6. [Lifetime and expiry](#lifetime-and-expiry)
+7. [Removal and the sweep](#removal-and-the-sweep)
+8. [Refusals](#refusals)
+9. [Scan verdicts](#scan-verdicts)
+10. [What the store is not](#what-the-store-is-not)
+
+## HTTP transfer contract
+
+### Upload
+
+Send the file bytes as the request body. The optional `fileName` query value is retained as
+sanitized metadata; the `Content-Type` header supplies the declared media type. The request must
+carry the parent surface's bearer token when that mount is protected:
+
+```http
+POST /api/petstore/files/upload?fileName=report.pdf HTTP/1.1
+Authorization: Bearer <parent-resource-token>
+Content-Type: application/pdf
+
+<file bytes>
+```
+
+The successful JSON response is a handle, not the file content:
+
+```json
+{
+  "handle": "<opaque-capability>",
+  "fileName": "report.pdf",
+  "mediaType": "application/pdf",
+  "length": 1234
+}
+```
+
+Pass the opaque `handle` to an operation that expects a file reference or retain it for a later
+download. It is not a filename, a storage path, or a bearer token.
+
+### Download
+
+Redeem the handle beneath the same parent surface with a bearer token for that parent resource:
+
+```http
+GET /api/petstore/files/<opaque-capability> HTTP/1.1
+Authorization: Bearer <parent-resource-token>
+```
+
+The response body is the exact stored byte sequence. `Content-Type` is the stored media type,
+`Content-Length` is the stored length, `X-Content-Type-Options` is `nosniff`, and
+`Content-Disposition` is `attachment`.
+
+### Parent-resource authorization
+
+`/files/upload` and `/files/{capability}` inherit the parent MCP surface's protected-resource
+identity. This means the same canonical parent resource controls:
+
+1. the token audience;
+2. the required scopes;
+3. the `401` `resource_metadata` challenge; and
+4. the authorization context used to issue or redeem the capability.
+
+The child URL is not independently discoverable or authorizable. File and managed mode use this
+same contract. In managed mode, the parent is the surface admitted for the current request; an
+activation that happens while authorization or streaming is in progress cannot move that request to
+another generation.
 
 ## The root
 

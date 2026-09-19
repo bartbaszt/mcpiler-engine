@@ -549,6 +549,166 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
         Assert.True(ContainsBytes(g1Store, Encoding.UTF8.GetBytes("g1 upload")));
     }
 
+    /// <summary>Managed transfer children inherit the parent resource for challenge, audience and scopes.</summary>
+    [Fact]
+    public async Task Managed_protected_transfer_uses_the_parent_resource_for_challenge_audience_and_scopes()
+    {
+        string manifest = ProtectedTransferManifest();
+
+        await using FakeAuthorizationServer inactiveAuthorization = await FakeAuthorizationServer.StartAsync(
+            active: false,
+            Token);
+        await using ManagedListener inactiveListener = await StartAsync(
+            manifest,
+            AuthorizationFor(inactiveAuthorization.Address));
+
+        string inactiveParent = inactiveListener.At("/api/full").AbsoluteUri.TrimEnd('/');
+        byte[] inactivePayload = Encoding.UTF8.GetBytes("inactive transfer");
+        RuntimeFileUploadResult inactiveIssued = await inactiveListener.Manager.Current!.Execution.UploadFileAsync(
+            new MemoryStream(inactivePayload),
+            "inactive.bin",
+            "application/octet-stream",
+            inactiveParent,
+            Token);
+        Assert.True(inactiveIssued.Succeeded);
+
+        using HttpClient http = new();
+        using HttpRequestMessage unauthenticatedUpload = new(
+            HttpMethod.Post,
+            inactiveListener.At("/api/full/files/upload"))
+        {
+            Content = new ByteArrayContent(inactivePayload),
+        };
+        unauthenticatedUpload.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        using HttpResponseMessage uploadChallenge = await http.SendAsync(unauthenticatedUpload, Token);
+        AssertParentChallenge(uploadChallenge, "/api/full");
+
+        using HttpRequestMessage inactiveUpload = new(
+            HttpMethod.Post,
+            inactiveListener.At("/api/full/files/upload"))
+        {
+            Content = new ByteArrayContent(inactivePayload),
+        };
+        inactiveUpload.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        inactiveUpload.Headers.Authorization = new AuthenticationHeaderValue(
+            "Bearer",
+            inactiveAuthorization.Mint(inactiveParent, "tools.invoke"));
+        using HttpResponseMessage inactiveUploadResponse = await http.SendAsync(inactiveUpload, Token);
+        AssertParentChallenge(inactiveUploadResponse, "/api/full");
+
+        using HttpResponseMessage downloadChallenge = await http.GetAsync(
+            inactiveListener.At("/api/full/files/" + inactiveIssued.Capability),
+            Token);
+        AssertParentChallenge(downloadChallenge, "/api/full");
+
+        using HttpRequestMessage inactiveDownload = new(
+            HttpMethod.Get,
+            inactiveListener.At("/api/full/files/" + inactiveIssued.Capability));
+        inactiveDownload.Headers.Authorization = new AuthenticationHeaderValue(
+            "Bearer",
+            inactiveAuthorization.Mint(inactiveParent, "tools.invoke"));
+        using HttpResponseMessage inactiveDownloadResponse = await http.SendAsync(inactiveDownload, Token);
+        AssertParentChallenge(inactiveDownloadResponse, "/api/full");
+
+        await using FakeAuthorizationServer activeAuthorization = await FakeAuthorizationServer.StartAsync(
+            active: true,
+            Token);
+        await using ManagedListener activeListener = await StartAsync(
+            manifest,
+            AuthorizationFor(activeAuthorization.Address));
+
+        string parent = activeListener.At("/api/full").AbsoluteUri.TrimEnd('/');
+        string child = parent + "/files/upload";
+        byte[] payload = Encoding.UTF8.GetBytes("managed parent transfer");
+        RuntimeFileUploadResult issued = await activeListener.Manager.Current!.Execution.UploadFileAsync(
+            new MemoryStream(payload),
+            "parent.bin",
+            "application/octet-stream",
+            parent,
+            Token);
+        Assert.True(issued.Succeeded);
+
+        using NeverSerializedContent childBody = new();
+        using HttpRequestMessage wrongAudienceUpload = new(
+            HttpMethod.Post,
+            activeListener.At("/api/full/files/upload"))
+        {
+            Content = childBody,
+        };
+        wrongAudienceUpload.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        wrongAudienceUpload.Headers.Authorization = new AuthenticationHeaderValue(
+            "Bearer",
+            activeAuthorization.Mint(child, "tools.invoke"));
+        wrongAudienceUpload.Headers.ExpectContinue = true;
+        using HttpResponseMessage wrongAudienceUploadResponse = await http.SendAsync(wrongAudienceUpload, Token);
+        Assert.Equal(HttpStatusCode.NotFound, wrongAudienceUploadResponse.StatusCode);
+        Assert.False(childBody.SerializationStarted);
+
+        using NeverSerializedContent missingScopeBody = new();
+        using HttpRequestMessage missingScopeUpload = new(
+            HttpMethod.Post,
+            activeListener.At("/api/full/files/upload"))
+        {
+            Content = missingScopeBody,
+        };
+        missingScopeUpload.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        missingScopeUpload.Headers.Authorization = new AuthenticationHeaderValue(
+            "Bearer",
+            activeAuthorization.Mint(parent, string.Empty));
+        missingScopeUpload.Headers.ExpectContinue = true;
+        using HttpResponseMessage missingScopeUploadResponse = await http.SendAsync(missingScopeUpload, Token);
+        Assert.Equal(HttpStatusCode.NotFound, missingScopeUploadResponse.StatusCode);
+        Assert.False(missingScopeBody.SerializationStarted);
+
+        using HttpResponseMessage wrongAudienceDownload = await http.SendAsync(
+            new HttpRequestMessage(
+                HttpMethod.Get,
+                activeListener.At("/api/full/files/" + issued.Capability))
+            {
+                Headers =
+                {
+                    Authorization = new AuthenticationHeaderValue(
+                        "Bearer",
+                        activeAuthorization.Mint(parent + "/files/" + issued.Capability, "tools.invoke")),
+                },
+            },
+            Token);
+        Assert.Equal(HttpStatusCode.NotFound, wrongAudienceDownload.StatusCode);
+
+        using HttpResponseMessage missingScopeDownload = await http.SendAsync(
+            new HttpRequestMessage(
+                HttpMethod.Get,
+                activeListener.At("/api/full/files/" + issued.Capability))
+            {
+                Headers =
+                {
+                    Authorization = new AuthenticationHeaderValue(
+                        "Bearer",
+                        activeAuthorization.Mint(parent, string.Empty)),
+                },
+            },
+            Token);
+        Assert.Equal(HttpStatusCode.NotFound, missingScopeDownload.StatusCode);
+
+        string validToken = activeAuthorization.Mint(parent, "tools.invoke");
+        using HttpResponseMessage admittedUpload = await http.SendAsync(
+            new HttpRequestMessage(HttpMethod.Post, activeListener.At("/api/full/files/upload"))
+            {
+                Content = new ByteArrayContent(payload),
+                Headers = { Authorization = new AuthenticationHeaderValue("Bearer", validToken) },
+            },
+            Token);
+        Assert.Equal(HttpStatusCode.OK, admittedUpload.StatusCode);
+
+        using HttpRequestMessage admittedDownloadRequest = new(
+            HttpMethod.Get,
+            activeListener.At("/api/full/files/" + issued.Capability));
+        admittedDownloadRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", validToken);
+        using HttpResponseMessage admittedDownload = await http.SendAsync(admittedDownloadRequest, Token);
+        Assert.Equal(HttpStatusCode.OK, admittedDownload.StatusCode);
+        Assert.Equal(payload, await admittedDownload.Content.ReadAsByteArrayAsync(Token));
+    }
+
     /// <summary>
     /// An open surface is admitted before MCP dispatch even without authorization middleware. The
     /// request body gate holds protocol parsing while activation swaps the current generation.
@@ -929,6 +1089,20 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
     private static HostAuthorizationOptions AuthorizationFor(Uri issuer)
         => new(issuer.AbsoluteUri, HostTokenValidation.Introspection);
 
+    private static string ProtectedTransferManifest()
+        => ServedManifests.ProtectedOneSurface.Replace(
+            "\"isDefault\": true,",
+            "\"isDefault\": true, \"requiredScopes\": [\"tools.invoke\"],",
+            StringComparison.Ordinal);
+
+    private static void AssertParentChallenge(HttpResponseMessage response, string parentPath)
+    {
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        string challenge = response.Headers.WwwAuthenticate.Single().ToString();
+        Assert.Contains("/.well-known/oauth-protected-resource" + parentPath, challenge, StringComparison.Ordinal);
+        Assert.DoesNotContain("/files/", challenge, StringComparison.Ordinal);
+    }
+
     private static string Open(string manifest)
         => manifest.Replace(
             "\"authenticationRequired\": true",
@@ -980,6 +1154,33 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
             _prefixWritten.TrySetResult();
             await _release.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
             await stream.WriteAsync(_suffix, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private sealed class NeverSerializedContent : HttpContent
+    {
+        public bool SerializationStarted { get; private set; }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 4096;
+            return true;
+        }
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+        {
+            SerializationStarted = true;
+            throw new InvalidOperationException("Authorization should refuse before request content is serialized.");
+        }
+
+        protected override Task SerializeToStreamAsync(
+            Stream stream,
+            TransportContext? context,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            SerializationStarted = true;
+            throw new InvalidOperationException("Authorization should refuse before request content is serialized.");
         }
     }
 

@@ -81,6 +81,12 @@ internal sealed class MountAuthorizationMiddleware
             return;
         }
 
+        // File-mode transfer children carry their parent in endpoint metadata. A managed catch-all
+        // has no such metadata, so the request admission's folded parent address is the binding.
+        // Establish it once and use it for both discovery and audience validation.
+        string resourcePath = route.AuthorizationResourcePath
+            ?? admission.Address;
+
         if (!admission.Resolution.Mount.RequiresAuthorization())
         {
             await _next(context);
@@ -91,16 +97,9 @@ internal sealed class MountAuthorizationMiddleware
 
         if (!verification.Active)
         {
-            await ChallengeAsync(context, route).ConfigureAwait(false);
+            await ChallengeAsync(context, resourcePath).ConfigureAwait(false);
             return;
         }
-
-        // The admission address is the parent MCP resource for both a surface request and a
-        // transfer child. A managed catch-all route has no parent metadata of its own, so using
-        // the raw transfer path here would reject a token whose audience correctly names the
-        // parent surface.
-        string resourcePath = route.AuthorizationResourcePath
-            ?? admission.Address;
 
         string canonical = MountAuthorization.CanonicalResource(
             context.Request.Scheme,
@@ -157,17 +156,14 @@ internal sealed class MountAuthorizationMiddleware
     /// ever come back authorized, and an unknown resource would answer with nothing, which is
     /// what "unknown" has to mean to a client that has not authenticated yet.
     /// </summary>
-    private static Task ChallengeAsync(HttpContext context, SurfaceEndpoint addressed)
+    private static Task ChallengeAsync(HttpContext context, string resourcePath)
     {
         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
 
-        string resourcePath = addressed.AuthorizationResourcePath
-            ?? context.Request.Path.Value
-            ?? "/";
-
         // The resource_metadata URI mirrors the request path under the well-known prefix,
         // except for transfer children, which inherit their parent MCP surface rather than
-        // becoming protected resources of their own.
+        // becoming protected resources of their own. The caller has already resolved that
+        // parent path from request admission or endpoint metadata; no route is re-resolved here.
         string metadata = $"{context.Request.Scheme}://{context.Request.Host.Value}"
             + "/.well-known/oauth-protected-resource"
             + resourcePath;

@@ -92,6 +92,8 @@ public sealed class FileTransferTests : IDisposable
         Assert.Equal(HttpStatusCode.OK, downloaded.StatusCode);
         Assert.Equal("application/octet-stream", downloaded.Content.Headers.ContentType?.MediaType);
         Assert.Equal(DownloadPayload.LongLength, downloaded.Content.Headers.ContentLength);
+        Assert.Equal("nosniff", downloaded.Headers.GetValues("X-Content-Type-Options").Single());
+        Assert.Equal("attachment", downloaded.Content.Headers.ContentDisposition?.DispositionType);
         Assert.Equal(DownloadPayload, await downloaded.Content.ReadAsByteArrayAsync(Token));
 
         string renderedLogs = string.Join('\n', logs.Messages);
@@ -184,6 +186,18 @@ public sealed class FileTransferTests : IDisposable
             authorization.Mint(child, "tools.invoke"));
         Assert.Equal(HttpStatusCode.NotFound, wrongAudience.StatusCode);
 
+        Uri download = engine.At("/api/full/files/" + NeverIssuedCapability());
+        using HttpResponseMessage challengedDownload = await http.GetAsync(download, Token);
+        Assert.Equal(HttpStatusCode.Unauthorized, challengedDownload.StatusCode);
+        Assert.Contains(
+            "/.well-known/oauth-protected-resource/api/full",
+            challengedDownload.Headers.WwwAuthenticate.Single().ToString(),
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "/files/",
+            challengedDownload.Headers.WwwAuthenticate.Single().ToString(),
+            StringComparison.Ordinal);
+
         using NeverSerializedContent unopened = new();
         using HttpRequestMessage refusedBeforeBody = new(HttpMethod.Post, upload) { Content = unopened };
         refusedBeforeBody.Headers.Authorization = new AuthenticationHeaderValue(
@@ -199,6 +213,36 @@ public sealed class FileTransferTests : IDisposable
             upload,
             authorization.Mint(parent, "tools.invoke"));
         Assert.Equal(HttpStatusCode.OK, admitted.StatusCode);
+
+        using HttpResponseMessage wrongDownloadAudience = await http.SendAsync(
+            new HttpRequestMessage(HttpMethod.Get, download)
+            {
+                Headers = { Authorization = new AuthenticationHeaderValue("Bearer", authorization.Mint(child, "tools.invoke")) },
+            },
+            Token);
+        Assert.Equal(HttpStatusCode.NotFound, wrongDownloadAudience.StatusCode);
+
+        using HttpResponseMessage missingScope = await http.SendAsync(
+            new HttpRequestMessage(HttpMethod.Get, download)
+            {
+                Headers = { Authorization = new AuthenticationHeaderValue("Bearer", authorization.Mint(parent, string.Empty)) },
+            },
+            Token);
+        Assert.Equal(HttpStatusCode.NotFound, missingScope.StatusCode);
+
+        string handle = await UploadAsync(
+            http,
+            upload,
+            UploadPayload,
+            authorization.Mint(parent, "tools.invoke"));
+        Uri admittedDownload = engine.At("/api/full/files/" + handle);
+        using HttpResponseMessage admittedDownloadResponse = await http.SendAsync(
+            new HttpRequestMessage(HttpMethod.Get, admittedDownload)
+            {
+                Headers = { Authorization = new AuthenticationHeaderValue("Bearer", authorization.Mint(parent, "tools.invoke")) },
+            },
+            Token);
+        Assert.Equal(HttpStatusCode.OK, admittedDownloadResponse.StatusCode);
     }
 
     [Fact]

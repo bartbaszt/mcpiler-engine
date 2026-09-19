@@ -2,7 +2,8 @@
 
 MCPiler Engine is a standalone process. It mounts one or more MCPiler Manifest bundles,
 keeps binary file handles in a local store, and serves the derived MCP surfaces over
-Streamable HTTP or standard input/output.
+Streamable HTTP or standard input/output. The client-facing upload/download route contract is
+documented in [File handles — HTTP transfer contract](file-handles.md#http-transfer-contract).
 
 ## Basic HTTP hosting
 
@@ -169,6 +170,16 @@ in-memory secret values are disposed once its leases drain.
 Platform/channel failure does not stop the running generation. Engine keeps serving its last
 active generation and retries with bounded exponential backoff, so an unreachable Platform
 degrades synchronization latency but never serving.
+
+### File transfer in both modes
+
+The transfer surface is the same in `file` and `managed` mode:
+`POST {surface}/files/upload` issues an opaque handle and
+`GET {surface}/files/{capability}` redeems it. Both routes are children of the parent MCP resource
+and inherit its audience, required scopes, protected-resource challenge and capability scope. See
+[File handles — HTTP transfer contract](file-handles.md#http-transfer-contract) for the request,
+response, authorization and out-of-band byte-transfer details. Managed activation does not change
+the generation of an already admitted upload or download request.
 
 ## Proxy deployments
 

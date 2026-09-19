@@ -176,6 +176,8 @@ internal static class FileTransferEndpoints
 
         context.Response.ContentType = download.MediaType ?? "application/octet-stream";
         context.Response.ContentLength = download.Length;
+        context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+        context.Response.Headers["Content-Disposition"] = "attachment";
         await StreamContentAsync(context, download.Content).ConfigureAwait(false);
     }
 
