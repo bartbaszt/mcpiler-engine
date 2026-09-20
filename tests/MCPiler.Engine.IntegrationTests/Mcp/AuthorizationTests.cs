@@ -445,6 +445,21 @@ public sealed class AuthorizationTests : IDisposable
 
         Assert.Equal(HttpStatusCode.Unauthorized, refused.StatusCode);
 
+        string validToken = authorization.Mint(
+            $"{engine.Address.Scheme}://{engine.Address.Authority}/api/full",
+            "tools.invoke");
+        using HttpRequestMessage bearerToAdministrativeEndpoint = new(
+            HttpMethod.Post,
+            new Uri(new Uri($"{engine.Address.Scheme}://{engine.Address.Authority}"), "/connect/token"))
+        {
+            Content = new FormUrlEncodedContent([]),
+        };
+        bearerToAdministrativeEndpoint.Headers.Authorization = new AuthenticationHeaderValue("Bearer", validToken);
+        using HttpResponseMessage administrativeResponse = await client.SendAsync(
+            bearerToAdministrativeEndpoint,
+            Token);
+        Assert.Equal(HttpStatusCode.NotFound, administrativeResponse.StatusCode);
+
         foreach (string endpoint in new[] { "/connect/token", "/authorize", "/connect/introspect" })
         {
             using HttpResponseMessage absent = await client.PostAsync(

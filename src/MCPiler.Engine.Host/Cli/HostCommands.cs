@@ -102,7 +102,7 @@ public static class HostCommands
         // Before either transport opens anything: a mode that needs an endpoint the issuer does
         // not publish can only ever reject every token, and an operator should read that as a
         // setting to change rather than as a client that cannot authenticate.
-        if (await IntrospectionEndpointCheck
+        if (await AuthorizationEndpointCheck
                 .FindAsync(binding.Authorization, cancellationToken)
                 .ConfigureAwait(false) is { } unusable)
         {
@@ -117,7 +117,7 @@ public static class HostCommands
         }
 
         RuntimeStartResult result = EngineRuntime.Start(binding.Runtime);
-        string report = identity + Environment.NewLine + StartupReport.Render(result);
+        string report = identity + Environment.NewLine + StartupReport.Render(result, binding.Authorization);
 
         if (!result.Started)
         {
@@ -271,7 +271,8 @@ public static class HostCommands
         progress?.Write(identity + Environment.NewLine + StartupReport.RenderManaged(
             options.Describe(),
             initial.GenerationId!,
-            generationsLoader.DurableRuntimeState));
+            generationsLoader.DurableRuntimeState,
+            binding.Authorization));
         progress?.Flush();
 
         await using WebApplication? app = BuildManagedOrRefuse(binding, drain, generations, out CommandOutcome? buildRefusal);
@@ -403,7 +404,7 @@ public static class HostCommands
         // The other host-side pairing rule: a configured validation mode whose issuer publishes
         // no endpoint for it. Also invisible to the mount path, and also the difference between
         // "what would be exposed" and "whether this configuration would run".
-        if (await IntrospectionEndpointCheck
+        if (await AuthorizationEndpointCheck
                 .FindAsync(binding.Authorization, cancellationToken)
                 .ConfigureAwait(false) is { } unreachable)
         {

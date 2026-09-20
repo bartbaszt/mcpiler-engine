@@ -39,12 +39,18 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
 
     private readonly WebApplication _app;
 
-    private FakeAuthorizationServer(WebApplication app, RSA signingKey, RsaSecurityKey parameters, bool active)
+    private FakeAuthorizationServer(
+        WebApplication app,
+        RSA signingKey,
+        RsaSecurityKey parameters,
+        bool active,
+        Func<int> introspectionCalls)
     {
         _app = app;
         Key = signingKey;
         SigningParameters = parameters;
         Active = active;
+        _introspectionCalls = introspectionCalls;
     }
 
     /// <summary>The loopback address the server bound, which is also the issuer identifier.</summary>
@@ -58,6 +64,11 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
 
     /// <summary>What the introspection endpoint answers for every presented token.</summary>
     public bool Active { get; }
+
+    /// <summary>How many introspection requests this fake has received.</summary>
+    public int IntrospectionCalls => _introspectionCalls();
+
+    private readonly Func<int> _introspectionCalls;
 
     /// <summary>
     /// A deterministic barrier for an introspection request. It is intentionally owned by the
@@ -119,13 +130,18 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
     /// <param name="introspectionGate">
     /// An optional test barrier that pauses an authenticated introspection request until released.
     /// </param>
+    /// <param name="introspectionExpiresInSeconds">
+    /// An optional future <c>exp</c> claim on successful introspection responses. Supplying it
+    /// lets cache-boundary tests prove that an active response is eligible for positive caching.
+    /// </param>
     public static async Task<FakeAuthorizationServer> StartAsync(
         bool active,
         CancellationToken cancellationToken,
         string? introspectionClientId = null,
         string? introspectionClientSecret = null,
         bool publishesIntrospection = true,
-        IntrospectionGate? introspectionGate = null)
+        IntrospectionGate? introspectionGate = null,
+        int? introspectionExpiresInSeconds = null)
     {
         if (introspectionClientId is null ^ introspectionClientSecret is null)
         {
@@ -146,6 +162,8 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
         string? requiredClientId = introspectionClientId;
         string? requiredSecret = introspectionClientSecret;
         bool advertisesIntrospection = publishesIntrospection;
+        int? expirationSeconds = introspectionExpiresInSeconds;
+        int introspectionCalls = 0;
 
         app.Run(async context =>
         {
@@ -169,6 +187,8 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
 
             if (string.Equals(path, "/introspect", StringComparison.Ordinal))
             {
+                Interlocked.Increment(ref introspectionCalls);
+
                 // A real introspection endpoint echoes the claims of the presented token.
                 // The audience and scopes are read from the token itself, unverified: this
                 // fake answers whatever standing the test declared about the token.
@@ -195,11 +215,14 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
                 string presented = context.Request.Form["token"].ToString();
                 string audience = AudienceOf(presented);
                 string scopes = ScopeOf(presented);
+                string expiration = expirationSeconds is { } seconds
+                    ? $", \"exp\": {DateTimeOffset.UtcNow.AddSeconds(seconds).ToUnixTimeSeconds()}"
+                    : string.Empty;
 
                 context.Response.StatusCode = 200;
                 context.Response.ContentType = "application/json";
                 await context.Response.WriteAsync(
-                    $$"""{ "active": {{introspectionActive.ToString().ToLowerInvariant()}}, "aud": "{{audience}}", "scope": "{{scopes}}" }""",
+                    $$"""{ "active": {{introspectionActive.ToString().ToLowerInvariant()}}, "aud": "{{audience}}", "scope": "{{scopes}}"{{expiration}} }""",
                     context.RequestAborted);
                 return;
             }
@@ -221,7 +244,12 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
 
         string bound = app.Urls.Single();
 
-        return new FakeAuthorizationServer(app, signing, parameters, active)
+        return new FakeAuthorizationServer(
+            app,
+            signing,
+            parameters,
+            active,
+            () => Volatile.Read(ref introspectionCalls))
         {
             Address = new Uri(bound, UriKind.Absolute),
         };

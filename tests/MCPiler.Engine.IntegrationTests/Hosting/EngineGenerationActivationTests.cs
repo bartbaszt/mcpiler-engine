@@ -887,6 +887,51 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
     }
 
     /// <summary>
+    /// A cached issuer standing result cannot bypass the replacement generation's scope policy.
+    /// </summary>
+    /// <remarks>
+    /// The first request warms the process-local introspection cache with a token that carries
+    /// <c>generation.read</c>. The replacement generation requires <c>generation.write</c> at the
+    /// same address. The issuer is deliberately not contacted again: the cached standing fact is
+    /// reused, but the current leased generation still makes the scope decision for the request.
+    /// </remarks>
+    [Fact]
+    public async Task A_cached_token_standing_is_checked_against_the_replacement_generation()
+    {
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(
+            active: true,
+            TestContext.Current.CancellationToken,
+            introspectionExpiresInSeconds: 300);
+
+        HostAuthorizationOptions options = new(
+            authorization.Address.AbsoluteUri,
+            HostTokenValidation.Introspection)
+        {
+            IntrospectionCacheTtlSeconds = 30,
+        };
+
+        await using ManagedListener listener = await StartAsync(options);
+        string token = authorization.Mint(listener.At("/api/full").AbsoluteUri, "generation.read");
+
+        using McpHttpSession session = await McpHttpSession.OpenAsync(
+            listener.At("/api/full"),
+            TestContext.Current.CancellationToken,
+            bearerToken: token);
+
+        Assert.Equal(1, authorization.IntrospectionCalls);
+
+        await listener.ActivateAsync(Load("/api", ProtectedManifest("generation.write")));
+
+        McpExchange refused = await session.RequestAsync(
+            "tools/list",
+            3,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.NotFound, refused.Status);
+        Assert.Equal(1, authorization.IntrospectionCalls);
+    }
+
+    /// <summary>
     /// An address the active generation never served is refused by the managed listener.
     /// </summary>
     /// <remarks>
@@ -993,6 +1038,9 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
     private Task<ManagedListener> StartAsync()
         => StartAsync(ServedManifests.ThreeSurfaces, authorization: null, fileStoreRoot: null);
 
+    private Task<ManagedListener> StartAsync(HostAuthorizationOptions authorization)
+        => StartAsync(ProtectedManifest("generation.read"), authorization, fileStoreRoot: null);
+
     private async Task<ManagedListener> StartAsync(
         string manifest,
         HostAuthorizationOptions? authorization = null,
@@ -1032,6 +1080,46 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
     }
 
     private string Write(string name, string manifest) => ServedManifests.Write(_root, name, manifest);
+
+    private static string ProtectedManifest(string requiredScope)
+        => $$"""
+            {
+              "manifestFormatVersion": "0.3",
+              "sections": {
+                "server": {
+                  "inline": {
+                    "name": "Generation API",
+                    "authenticationRequired": true,
+                    "surfaces": [
+                      {
+                        "slug": "full",
+                        "isDefault": true,
+                        "requiredScopes": ["{{requiredScope}}"],
+                        "operations": [ { "operation": "list-pets" } ]
+                      }
+                    ]
+                  }
+                },
+                "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+                "operations": {
+                  "inline": {
+                    "operations": [ { "key": "GET /pets", "method": "GET", "path": "/pets" } ]
+                  }
+                },
+                "agentSurface": {
+                  "inline": {
+                    "operations": [
+                      {
+                        "slug": "list-pets",
+                        "name": "List pets",
+                        "binding": { "type": "http", "operation": "GET /pets" }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
 
     private string Store()
     {

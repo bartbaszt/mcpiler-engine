@@ -232,7 +232,7 @@ internal static class MountAuthorizationSetup
     internal static ITokenValidator Validator(HostAuthorizationOptions options)
     {
         string? secret = ReadIntrospectionSecret(options);
-        HttpClient client = new() { Timeout = ValidationTimeout };
+        HttpClient client = AuthorizationHttpClientFactory.Create(ValidationTimeout);
 
         return options.Validation switch
         {
@@ -241,7 +241,8 @@ internal static class MountAuthorizationSetup
                 options.Issuer,
                 options.IntrospectionEndpoint,
                 options.IntrospectionClientId,
-                secret),
+                secret,
+                options.IntrospectionCacheTtlSeconds),
             HostTokenValidation.Jwks => new JwksTokenValidator(
                 client,
                 options.Issuer,

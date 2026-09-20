@@ -598,6 +598,113 @@ public sealed class HostConfigurationTests
         Assert.Contains(HostConfiguration.IssuerKey, refusal, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Introspection_cache_ttl_defaults_to_thirty_seconds()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.IssuerKey] = "https://issuer.example.test",
+            [HostConfiguration.TokenValidationKey] = HostConfiguration.IntrospectionModeName,
+        };
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. settings], out HostBinding? binding, out _));
+        Assert.Equal(30, binding!.Authorization!.IntrospectionCacheTtlSeconds);
+    }
+
+    [Theory]
+    [InlineData("0", 0)]
+    [InlineData("45", 45)]
+    public void Introspection_cache_ttl_accepts_zero_and_positive_whole_seconds(string value, int expected)
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.IssuerKey] = "https://issuer.example.test",
+            [HostConfiguration.TokenValidationKey] = HostConfiguration.IntrospectionModeName,
+            [HostConfiguration.IntrospectionCacheTtlSecondsKey] = value,
+        };
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. settings], out HostBinding? binding, out _));
+        Assert.Equal(expected, binding!.Authorization!.IntrospectionCacheTtlSeconds);
+    }
+
+    [Theory]
+    [InlineData("-1")]
+    [InlineData("1.5")]
+    [InlineData("later")]
+    public void Introspection_cache_ttl_refuses_negative_or_non_integer_values(string value)
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.IssuerKey] = "https://issuer.example.test",
+            [HostConfiguration.TokenValidationKey] = HostConfiguration.IntrospectionModeName,
+            [HostConfiguration.IntrospectionCacheTtlSecondsKey] = value,
+        };
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
+        string refusal = Assert.Single(refusals);
+        Assert.Contains(HostConfiguration.IntrospectionCacheTtlSecondsKey, refusal, StringComparison.Ordinal);
+        Assert.Contains("non-negative whole number", refusal, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Introspection_cache_ttl_is_refused_under_jwks_mode()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.IssuerKey] = "https://issuer.example.test",
+            [HostConfiguration.TokenValidationKey] = HostConfiguration.JwksModeName,
+            [HostConfiguration.IntrospectionCacheTtlSecondsKey] = "30",
+        };
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
+        string refusal = Assert.Single(refusals);
+        Assert.Contains(HostConfiguration.IntrospectionCacheTtlSecondsKey, refusal, StringComparison.Ordinal);
+        Assert.Contains(HostConfiguration.JwksModeName, refusal, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(HostConfiguration.IssuerKey, "http://issuer.example.test", HostConfiguration.IntrospectionModeName)]
+    [InlineData(HostConfiguration.IntrospectionEndpointKey, "http://issuer.example.test/introspect", HostConfiguration.IntrospectionModeName)]
+    [InlineData(HostConfiguration.JwksUriKey, "http://issuer.example.test/jwks", HostConfiguration.JwksModeName)]
+    public void A_remote_http_authorization_trust_address_is_refused(
+        string key,
+        string address,
+        string validation)
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.IssuerKey] = "https://issuer.example.test",
+            [HostConfiguration.TokenValidationKey] = validation,
+            [key] = address,
+        };
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
+        Assert.Contains(
+            refusals,
+            refusal => refusal.Contains($"'{key}'", StringComparison.Ordinal)
+                && refusal.Contains("https", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Loopback_http_authorization_trust_addresses_are_allowed()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.IssuerKey] = "http://127.0.0.1:5099",
+            [HostConfiguration.TokenValidationKey] = HostConfiguration.IntrospectionModeName,
+            [HostConfiguration.IntrospectionEndpointKey] = "http://localhost:5100/introspect",
+        };
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
+        Assert.Empty(refusals);
+    }
+
     /// <summary>
     /// Both new keys are accepted settings rather than unknown ones.
     /// </summary>

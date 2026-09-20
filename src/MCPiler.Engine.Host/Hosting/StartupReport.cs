@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 
+using MCPiler.Engine.Host.Configuration;
 using MCPiler.Engine.Runtime;
 
 namespace MCPiler.Engine.Host.Hosting;
@@ -51,7 +52,10 @@ public static class ExitCodes
 public static class StartupReport
 {
     /// <summary>Renders every refusal and warning, in the order the runtime reported them.</summary>
-    public static string Render(RuntimeStartResult result)
+    /// <param name="authorization">The bound authorization policy, when serving is configured to validate tokens.</param>
+    public static string Render(
+        RuntimeStartResult result,
+        HostAuthorizationOptions? authorization = null)
     {
         ArgumentNullException.ThrowIfNull(result);
 
@@ -86,6 +90,8 @@ public static class StartupReport
             text.AppendLine(result.DurableRuntimeState
                 ? "runtime state: durable (rotated authentication state survives a restart)"
                 : "runtime state: memory-only (a rotated refresh token is lost on restart)");
+
+            AppendAuthorizationPolicy(text, authorization);
 
             return text.ToString();
         }
@@ -155,7 +161,11 @@ public static class StartupReport
     /// recoverable from the address it listens on. It is stated once at startup rather than on
     /// every activation, because the progress stream is read by a person watching a boot.
     /// </remarks>
-    public static string RenderManaged(string endpoint, string generationId, bool durableRuntimeState)
+    public static string RenderManaged(
+        string endpoint,
+        string generationId,
+        bool durableRuntimeState,
+        HostAuthorizationOptions? authorization = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(endpoint);
         ArgumentException.ThrowIfNullOrEmpty(generationId);
@@ -170,7 +180,44 @@ public static class StartupReport
             ? "runtime state: durable (rotated authentication state survives a restart)"
             : "runtime state: memory-only (a rotated refresh token is lost on restart)");
 
+        AppendAuthorizationPolicy(text, authorization);
+
         return text.ToString();
+    }
+
+    /// <summary>
+    /// Renders the one operator-visible consequence of the configured introspection policy.
+    /// </summary>
+    /// <remarks>
+    /// The line is deliberately sourced from the already-bound authorization options. There is no
+    /// second report-only parse of the command line, so the bound the operator reads is the bound
+    /// the validator actually receives. JWKS validation and an absent issuer have no introspection
+    /// cache policy to report.
+    /// </remarks>
+    public static string RenderAuthorizationPolicy(HostAuthorizationOptions? authorization)
+    {
+        if (authorization is not { Validation: HostTokenValidation.Introspection })
+        {
+            return string.Empty;
+        }
+
+        return authorization.IntrospectionCacheTtlSeconds > 0
+            ? string.Create(
+                CultureInfo.InvariantCulture,
+                $"introspection revalidation bound: {authorization.IntrospectionCacheTtlSeconds} seconds")
+            : "introspection revalidation bound: caching disabled (fresh issuer validation per request)";
+    }
+
+    private static void AppendAuthorizationPolicy(
+        StringBuilder text,
+        HostAuthorizationOptions? authorization)
+    {
+        string policy = RenderAuthorizationPolicy(authorization);
+
+        if (policy.Length > 0)
+        {
+            text.AppendLine(policy);
+        }
     }
 
     private static string Line(string severity, StartupRefusal refusal)

@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 
+using MCPiler.Engine.Host.Authorization;
 using MCPiler.Engine.Host.Managed;
 using MCPiler.Engine.Runtime;
 
@@ -174,6 +175,12 @@ public sealed record HostAuthorizationOptions(
     string? IntrospectionClientSecretFile = null)
 {
     /// <summary>
+    /// The maximum positive introspection result age in seconds. Zero disables both result caches.
+    /// The value is meaningful only in introspection mode.
+    /// </summary>
+    public int IntrospectionCacheTtlSeconds { get; init; } = 30;
+
+    /// <summary>
     /// The configuration for a process that trusts no issuer, which serves mounts that declare
     /// no surface scope and refuses mounts that do.
     /// </summary>
@@ -238,6 +245,9 @@ public static class HostConfiguration
 
     /// <summary>Key naming the RFC 7662 introspection endpoint, overriding RFC 8414 discovery.</summary>
     public const string IntrospectionEndpointKey = "introspection-endpoint";
+
+    /// <summary>Key bounding positive and negative introspection result caching in seconds.</summary>
+    public const string IntrospectionCacheTtlSecondsKey = "introspection-cache-ttl-seconds";
 
     /// <summary>Key naming the issuer's JWKS URI, overriding the <c>jwks_uri</c> in its published metadata.</summary>
     public const string JwksUriKey = "jwks-uri";
@@ -355,6 +365,7 @@ public static class HostConfiguration
         IssuerKey,
         TokenValidationKey,
         IntrospectionEndpointKey,
+        IntrospectionCacheTtlSecondsKey,
         JwksUriKey,
         IntrospectionClientIdKey,
         IntrospectionClientSecretFileKey,
@@ -425,6 +436,7 @@ public static class HostConfiguration
         string? issuer = null;
         HostTokenValidation? validation = null;
         string? introspectionEndpoint = null;
+        int? introspectionCacheTtlSeconds = null;
         string? jwksUri = null;
         string? introspectionClientId = null;
         string? introspectionClientSecretFile = null;
@@ -474,16 +486,19 @@ public static class HostConfiguration
                     transport = Transport(key, value, rejected);
                     break;
                 case IssuerKey:
-                    issuer = UriSetting(key, value, rejected);
+                    issuer = AuthorizationUriSetting(key, value, rejected);
                     break;
                 case TokenValidationKey:
                     validation = Validation(key, value, rejected);
                     break;
                 case IntrospectionEndpointKey:
-                    introspectionEndpoint = UriSetting(key, value, rejected);
+                    introspectionEndpoint = AuthorizationUriSetting(key, value, rejected);
+                    break;
+                case IntrospectionCacheTtlSecondsKey:
+                    introspectionCacheTtlSeconds = NonNegativeWholeSeconds(key, value, rejected);
                     break;
                 case JwksUriKey:
-                    jwksUri = UriSetting(key, value, rejected);
+                    jwksUri = AuthorizationUriSetting(key, value, rejected);
                     break;
                 case IntrospectionClientIdKey:
                     introspectionClientId = value;
@@ -543,7 +558,14 @@ public static class HostConfiguration
         }
 
         HostAuthorizationOptions? authorization = BindAuthorization(
-            issuer, validation, introspectionEndpoint, jwksUri, introspectionClientId, introspectionClientSecretFile, rejected);
+            issuer,
+            validation,
+            introspectionEndpoint,
+            introspectionCacheTtlSeconds,
+            jwksUri,
+            introspectionClientId,
+            introspectionClientSecretFile,
+            rejected);
 
         BindRuntimeState(runtimeStateRoot, runtimeStateKeyFile, rejected);
 
@@ -799,6 +821,7 @@ public static class HostConfiguration
         string? issuer,
         HostTokenValidation? validation,
         string? introspectionEndpoint,
+        int? introspectionCacheTtlSeconds,
         string? jwksUri,
         string? introspectionClientId,
         string? introspectionClientSecretFile,
@@ -814,6 +837,11 @@ public static class HostConfiguration
             if (introspectionClientId is not null || introspectionClientSecretFile is not null)
             {
                 rejected.Add($"'{IssuerKey}' is required with '{IntrospectionClientIdKey}' and '{IntrospectionClientSecretFileKey}'. A client identity with no issuer authenticates to nobody.");
+            }
+
+            if (introspectionCacheTtlSeconds is not null)
+            {
+                rejected.Add($"'{IntrospectionCacheTtlSecondsKey}' requires '{TokenValidationKey}' to be '{IntrospectionModeName}'. It is unused when no issuer validation is configured.");
             }
 
             return null;
@@ -841,19 +869,29 @@ public static class HostConfiguration
             rejected.Add($"'{IntrospectionEndpointKey}' names an endpoint nothing calls: '{TokenValidationKey}' is 'jwks'. Remove it, or select 'introspection'.");
         }
 
+        if (mode is HostTokenValidation.Jwks && introspectionCacheTtlSeconds is not null)
+        {
+            rejected.Add($"'{IntrospectionCacheTtlSecondsKey}' names a cache nothing uses: '{TokenValidationKey}' is 'jwks'. Remove it, or select 'introspection'.");
+        }
+
         BindIntrospectionClient(
             mode,
             introspectionClientId,
             introspectionClientSecretFile,
             rejected);
 
-        return new HostAuthorizationOptions(
+        HostAuthorizationOptions options = new(
             issuer,
             mode,
             introspectionEndpoint,
             jwksUri,
             introspectionClientId,
             introspectionClientSecretFile);
+
+        return options with
+        {
+            IntrospectionCacheTtlSeconds = introspectionCacheTtlSeconds ?? options.IntrospectionCacheTtlSeconds,
+        };
     }
 
     /// <summary>
@@ -935,6 +973,30 @@ public static class HostConfiguration
 
         rejected.Add($"'{key}' was given '{value}', which is not an absolute http or https address.");
         return null;
+    }
+
+    /// <summary>
+    /// Binds an authorization trust endpoint and applies the HTTPS-unless-loopback policy before
+    /// the endpoint can be used by discovery or bearer validation.
+    /// </summary>
+    private static string? AuthorizationUriSetting(string key, string value, List<string> rejected)
+    {
+        string? address = UriSetting(key, value, rejected);
+        if (address is null)
+        {
+            return null;
+        }
+
+        Uri parsed = new(address, UriKind.Absolute);
+        if (!AuthorizationEndpointPolicy.IsAllowed(parsed))
+        {
+            rejected.Add(
+                $"'{key}' was given '{value}', which is remote plain http. Authorization trust endpoints "
+                + "must use https unless they resolve to loopback.");
+            return null;
+        }
+
+        return address;
     }
 
     private static HostTokenValidation? Validation(string key, string value, List<string> rejected)
@@ -1038,5 +1100,17 @@ public static class HostConfiguration
 
         rejected.Add($"'{key}' was given '{value}', which is not a positive whole number of seconds.");
         return HostLifecycleOptions.DefaultDrainTimeout;
+    }
+
+    private static int? NonNegativeWholeSeconds(string key, string value, List<string> rejected)
+    {
+        if (int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out int seconds)
+            && seconds >= 0)
+        {
+            return seconds;
+        }
+
+        rejected.Add($"'{key}' was given '{value}', which is not a non-negative whole number of seconds.");
+        return null;
     }
 }

@@ -493,6 +493,68 @@ public sealed class HostCommandsTests : IDisposable
         Assert.Contains("fingerprint=", outcome.Output, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Successful file serving reports the bound introspection revalidation policy before the
+    /// listener opens.
+    /// </summary>
+    [Fact]
+    public async Task Serve_file_mode_reports_the_effective_introspection_bound()
+    {
+        await using FakeAuthorizationServer issuer = await FakeAuthorizationServer.StartAsync(
+            active: true,
+            TestContext.Current.CancellationToken);
+
+        using var stop = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var progress = new StringWriter();
+
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "serve",
+                "--file-store-root", Store(),
+                "--mount", "/api=" + ScopedManifest("serve-policy"),
+                "--issuer", issuer.Address.AbsoluteUri,
+                "--token-validation", "introspection",
+                "--introspection-cache-ttl-seconds", "11",
+            ],
+            Identity,
+            stop.Token,
+            progress);
+
+        Assert.Equal(ExitCodes.Success, outcome.ExitCode);
+        Assert.Contains(
+            "introspection revalidation bound: 11 seconds",
+            progress.ToString(),
+            StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Inspection describes the serving policy but does not advertise the Engine-local cache
+    /// bound as if it were part of the inspected Manifest or Platform metadata.
+    /// </summary>
+    [Fact]
+    public async Task Inspect_does_not_report_the_engine_local_introspection_bound()
+    {
+        await using FakeAuthorizationServer issuer = await FakeAuthorizationServer.StartAsync(
+            active: true,
+            TestContext.Current.CancellationToken);
+
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "inspect",
+                "--file-store-root", Store(),
+                "--mount", "/api=" + ScopedManifest("inspect-policy"),
+                "--issuer", issuer.Address.AbsoluteUri,
+                "--token-validation", "introspection",
+                "--introspection-cache-ttl-seconds", "11",
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Success, outcome.ExitCode);
+        Assert.DoesNotContain("introspection revalidation bound", outcome.Output, StringComparison.Ordinal);
+        Assert.Contains("fingerprint=", outcome.Output, StringComparison.Ordinal);
+    }
+
     private const string OpenManifestText = """
         {
           "manifestFormatVersion": "0.3",

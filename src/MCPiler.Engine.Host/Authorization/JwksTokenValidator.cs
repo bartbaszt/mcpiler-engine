@@ -1,6 +1,8 @@
 using System.Net;
 using System.Text.Json;
 
+using MCPiler.Engine.Host.Configuration;
+
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
 
@@ -104,9 +106,17 @@ internal sealed class JwksTokenValidator : ITokenValidator
     /// </summary>
     private async Task<string?> ResolveJwksUriAsync(CancellationToken cancellationToken)
     {
-        if (_jwksUri is not null || _jwksOverride is not null)
+        if (_jwksUri is not null)
         {
-            return _jwksUri ?? _jwksOverride;
+            return _jwksUri;
+        }
+
+        if (_jwksOverride is { } overrideUri)
+        {
+            return Uri.TryCreate(overrideUri, UriKind.Absolute, out Uri? configured)
+                && AuthorizationEndpointPolicy.IsAllowed(configured)
+                ? overrideUri
+                : null;
         }
 
         JsonElement? metadata;
@@ -128,7 +138,8 @@ internal sealed class JwksTokenValidator : ITokenValidator
             || declared.ValueKind is not JsonValueKind.String
             || declared.GetString() is not { } address
             || !Uri.TryCreate(address, UriKind.Absolute, out Uri? resolved)
-            || resolved.Scheme is not ("http" or "https"))
+            || resolved.Scheme is not ("http" or "https")
+            || !AuthorizationEndpointPolicy.IsAllowed(resolved))
         {
             return null;
         }

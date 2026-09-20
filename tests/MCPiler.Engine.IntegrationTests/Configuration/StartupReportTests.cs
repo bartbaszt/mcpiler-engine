@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 
+using MCPiler.Engine.Host.Configuration;
 using MCPiler.Engine.Host.Hosting;
 using MCPiler.Engine.Runtime;
 
@@ -94,6 +95,99 @@ public sealed class StartupReportTests : IDisposable
         string report = StartupReport.Render(started);
         Assert.Contains("mounted /api", report, StringComparison.Ordinal);
         Assert.Contains("Example API", report, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(30, "introspection revalidation bound: 30 seconds")]
+    [InlineData(7, "introspection revalidation bound: 7 seconds")]
+    public void A_started_introspection_report_states_the_effective_positive_bound(
+        int ttlSeconds,
+        string expected)
+    {
+        RuntimeStartResult started = StartMinimal();
+        HostAuthorizationOptions authorization = new(
+            "https://issuer.example.test",
+            HostTokenValidation.Introspection)
+        {
+            IntrospectionCacheTtlSeconds = ttlSeconds,
+        };
+
+        string report = StartupReport.Render(started, authorization);
+
+        Assert.Contains(expected, report, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_started_introspection_report_states_when_caching_is_disabled()
+    {
+        RuntimeStartResult started = StartMinimal();
+        HostAuthorizationOptions authorization = new(
+            "https://issuer.example.test",
+            HostTokenValidation.Introspection)
+        {
+            IntrospectionCacheTtlSeconds = 0,
+        };
+
+        string report = StartupReport.Render(started, authorization);
+
+        Assert.Contains(
+            "introspection revalidation bound: caching disabled (fresh issuer validation per request)",
+            report,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_jwks_or_unconfigured_report_has_no_introspection_policy_line()
+    {
+        RuntimeStartResult started = StartMinimal();
+        HostAuthorizationOptions jwks = new(
+            "https://issuer.example.test",
+            HostTokenValidation.Jwks);
+
+        Assert.DoesNotContain(
+            "introspection revalidation bound",
+            StartupReport.Render(started, jwks),
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "introspection revalidation bound",
+            StartupReport.Render(started),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void File_and_managed_started_reports_share_the_same_authorization_policy_line()
+    {
+        RuntimeStartResult started = StartMinimal();
+        HostAuthorizationOptions authorization = new(
+            "https://issuer.example.test",
+            HostTokenValidation.Introspection)
+        {
+            IntrospectionCacheTtlSeconds = 11,
+        };
+
+        string expected = StartupReport.RenderAuthorizationPolicy(authorization);
+
+        Assert.Contains(expected, StartupReport.Render(started, authorization), StringComparison.Ordinal);
+        Assert.Contains(
+            expected,
+            StartupReport.RenderManaged("http://127.0.0.1:9000", "generation-1", false, authorization),
+            StringComparison.Ordinal);
+    }
+
+    private RuntimeStartResult StartMinimal()
+    {
+        string manifest = Path.Combine(_root, "policy-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(manifest);
+        File.WriteAllText(Path.Combine(manifest, "manifest.json"), Minimal);
+
+        string store = Path.Combine(_root, "files-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(store);
+
+        RuntimeStartResult started = EngineRuntime.Start(
+            new RuntimeOptions([new MountRequest("/api", manifest)], store));
+
+        Assert.True(started.Started, StartupReport.Render(started));
+        return started;
     }
 
     private const string Minimal = """

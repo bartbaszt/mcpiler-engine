@@ -9,10 +9,21 @@ namespace MCPiler.Engine.Host.Authorization;
 /// <param name="Active">Whether the token is valid, live, and issued by the trusted issuer.</param>
 /// <param name="Audience">The audience claim, when the token is active.</param>
 /// <param name="Scopes">The scope claim split on spaces, when the token is active.</param>
-public sealed record TokenVerification(bool Active, string? Audience, IReadOnlyList<string> Scopes)
+/// <param name="ExpiresAt">The issuer-reported expiration, when the validation mode provided one.</param>
+public sealed record TokenVerification(
+    bool Active,
+    string? Audience,
+    IReadOnlyList<string> Scopes,
+    DateTimeOffset? ExpiresAt = null)
 {
     /// <summary>The verdict for a token that failed validation for any reason.</summary>
     public static TokenVerification Inactive { get; } = new(false, null, []);
+
+    /// <summary>
+    /// Whether an inactive result came from a successfully parsed RFC 7662 <c>active:false</c>
+    /// response and may therefore be negatively cached.
+    /// </summary>
+    public bool IsAuthoritativeInactive { get; init; }
 }
 
 /// <summary>
