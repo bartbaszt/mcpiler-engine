@@ -66,6 +66,13 @@ stays in the `0.x` range and Engine states its supported range when it refuses a
 transports, health checks, file-store commands, exit codes, shutdown behavior and the container
 contract.
 
+Official stable images are published as `ghcr.io/bartbaszt/mcpiler-engine:vA.B.C` for
+`linux/amd64` and `linux/arm64`. The package is public and anonymously pullable even while the
+source repository remains private. Engine's `:latest` tag means the most recent completed stable
+Engine release; ordinary CI on unreleased `main` never advances it. See
+[`docs/hosting.md`](docs/hosting.md#official-container-images) for digest, signature, SBOM and
+provenance verification.
+
 ## File handles
 
 A binary upstream response is written to a local store and returned as a handle rather than
@@ -92,7 +99,8 @@ and signing outputs are never persisted either way.
 
 ## Status
 
-Pre-alpha. The manifest format is not stable and no compatibility is promised yet.
+The first stable Engine release line is `0.1.x`. The Manifest format remains independently
+versioned in the `0.x` range and may still make breaking minor-version changes.
 
 ## Building
 
@@ -101,6 +109,8 @@ Requires the .NET SDK pinned in `global.json`.
 ```bash
 dotnet build MCPiler.Engine.slnx -c Release
 bash eng/verify-source.sh
+bash eng/check-release-metadata.sh
+bash eng/check-licenses.sh
 ```
 
 Engine builds and tests from a standalone checkout. It must never depend on files outside

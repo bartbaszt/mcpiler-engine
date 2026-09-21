@@ -290,6 +290,39 @@ The repository Dockerfile publishes the host onto the .NET 10 Ubuntu chiseled ru
 runtime process is non-root, exposes port `8080`, declares `/data` as its file-store volume, and
 starts as `dotnet mcpiler-engine.dll serve`.
 
+### Official container images
+
+Stable Engine releases are published to `ghcr.io/bartbaszt/mcpiler-engine`. The public package can
+be pulled anonymously even while the Engine source repository remains private. The OCI
+`org.opencontainers.image.source` label intentionally names that private repository; the label is
+provenance metadata, not a promise that source browsing is currently anonymous.
+
+Use a versioned tag for deployments:
+
+```bash
+docker pull ghcr.io/bartbaszt/mcpiler-engine:v0.1.0
+```
+
+Engine `:latest` is promoted only by a completed stable Engine release and resolves to the same
+verified OCI index as that release's `vA.B.C` tag. Unreleased `main` CI never moves it. A release is
+built once under its immutable commit-SHA candidate tag and the stable/versioned aliases are
+manifest-only promotions from that candidate, so they do not rebuild application bytes.
+
+Every published stable image carries the Engine `LICENSE`, `NOTICE` and deterministic runtime
+third-party notices below `/licenses/mcpiler-engine/`. The .NET runtime's `LICENSE.txt` and
+`ThirdPartyNotices.txt` remain under `/usr/share/dotnet/`.
+
+Release verification keeps the runnable image index separate from supply-chain evidence. The raw
+index contains exactly `linux/amd64` and `linux/arm64`; BuildKit root-index attestations are
+disabled. A keyless Sigstore signature, machine-readable SBOM and SLSA provenance are attached as
+OCI referrers to the verified candidate digest. The release workflow verifies those referrers and
+then requires the candidate, `vA.B.C` and `:latest` raw indexes to be byte-identical.
+
+For repository-side verification, `eng/verify-container.sh` checks raw index shape, runtime
+identity, non-root/port/volume behavior, missing-Manifest refusal, OCI labels and redistribution
+paths. `eng/verify-supply-chain.sh` verifies the signature, SBOM and provenance referrers against
+the candidate digest.
+
 A typical container run bind-mounts Manifest directories read-only and keeps the file store on a
 writable volume:
 
@@ -336,6 +369,10 @@ Build an OCI image index for both supported Linux architectures with Buildx:
 ```bash
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
+  --provenance=false \
+  --sbom=false \
+  --build-arg ENGINE_VERSION=0.1.0 \
+  --build-arg SOURCE_REVISION=<40-character-git-sha> \
   --output type=oci,dest=mcpiler-engine.oci.tar \
   .
 ```

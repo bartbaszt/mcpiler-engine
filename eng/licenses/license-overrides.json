@@ -1,0 +1,17 @@
+[
+  {
+    "Id": "Json.More.Net",
+    "Version": "3.0.1",
+    "License": "MCPILER-APPROVED-OSMFEULA"
+  },
+  {
+    "Id": "JsonPointer.Net",
+    "Version": "7.0.2",
+    "License": "MCPILER-APPROVED-OSMFEULA"
+  },
+  {
+    "Id": "JsonSchema.Net",
+    "Version": "9.4.0",
+    "License": "MCPILER-APPROVED-OSMFEULA"
+  }
+]

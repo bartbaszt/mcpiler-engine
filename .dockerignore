@@ -6,6 +6,9 @@
 !Directory.Build.props
 !Directory.Packages.props
 !BannedSymbols.txt
+!LICENSE
+!NOTICE
+!THIRD-PARTY-NOTICES.md
 !src/
 !src/**
 

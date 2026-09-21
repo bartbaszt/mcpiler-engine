@@ -1,0 +1,379 @@
+name: Reusable stable release
+
+on:
+  workflow_call:
+    inputs:
+      bump:
+        description: Stable SemVer bump selected by the explicit entry workflow.
+        required: true
+        type: string
+
+concurrency:
+  group: engine-stable-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  source_verify:
+    name: PRECHECK / SOURCE_VERIFIED
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+      - name: Verify standalone source, metadata, licences and release helpers
+        run: |
+          set -euo pipefail
+          bash eng/verify-source.sh
+          bash eng/check-release-metadata.sh
+          bash eng/check-licenses.sh
+          bash eng/test-release-helpers.sh
+
+  prepare:
+    name: METADATA_PREPARED / RELEASE_COMMITTED
+    needs: source_verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      base_sha: ${{ steps.prepare.outputs.base_sha }}
+      release_version: ${{ steps.prepare.outputs.release_version }}
+      release_tag: ${{ steps.prepare.outputs.release_tag }}
+      release_commit: ${{ steps.prepare.outputs.release_commit }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Prepare immutable release commit
+        id: prepare
+        env:
+          BUMP: ${{ inputs.bump }}
+          MCPILER_ENGINE_RELEASE_WORKFLOW: 'true'
+        run: |
+          set -euo pipefail
+          output="$(bash eng/release.sh --prepare --bump "$BUMP")"
+          printf '%s\n' "$output"
+          printf 'base_sha=%s\n' "$(printf '%s\n' "$output" | sed -n 's/^BASE_SHA=//p')" >>"$GITHUB_OUTPUT"
+          printf 'release_version=%s\n' "$(printf '%s\n' "$output" | sed -n 's/^RELEASE_VERSION=//p')" >>"$GITHUB_OUTPUT"
+          printf 'release_tag=%s\n' "$(printf '%s\n' "$output" | sed -n 's/^RELEASE_TAG=//p')" >>"$GITHUB_OUTPUT"
+          printf 'release_commit=%s\n' "$(printf '%s\n' "$output" | sed -n 's/^RELEASE_COMMIT=//p')" >>"$GITHUB_OUTPUT"
+          git bundle create release.bundle main
+      - name: Preserve prepared commit without publishing Git refs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: engine-release-bundle
+          path: release.bundle
+          if-no-files-found: error
+          retention-days: 14
+
+  candidate_publish:
+    name: CANDIDATE_PUBLISHED
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      candidate_ref: ${{ steps.publish.outputs.candidate_ref }}
+      candidate_digest: ${{ steps.publish.outputs.candidate_digest }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: engine-release-bundle
+      - name: Restore prepared source
+        run: git clone release.bundle source
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build and push one immutable two-platform candidate
+        id: publish
+        working-directory: source
+        env:
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.release_commit }}
+          MCPILER_ENGINE_RELEASE_WORKFLOW: 'true'
+        run: |
+          set -euo pipefail
+          # Candidate build contract: linux/amd64,linux/arm64; provenance: false; sbom: false.
+          output="$(bash eng/publish-release.sh --candidate --sha "$RELEASE_COMMIT")"
+          printf '%s\n' "$output"
+          printf 'candidate_ref=%s\n' "$(printf '%s\n' "$output" | sed -n 's/^CANDIDATE_REF=//p')" >>"$GITHUB_OUTPUT"
+          printf 'candidate_digest=%s\n' "$(printf '%s\n' "$output" | sed -n 's/^CANDIDATE_DIGEST=//p')" >>"$GITHUB_OUTPUT"
+
+  smoke_amd64:
+    name: CANDIDATE_SMOKED linux/amd64
+    needs: [prepare, candidate_publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: engine-release-bundle
+      - run: git clone release.bundle source
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Native amd64 smoke
+        working-directory: source
+        run: bash eng/verify-container.sh --image '${{ needs.candidate_publish.outputs.candidate_ref }}' --version '${{ needs.prepare.outputs.release_version }}' --revision '${{ needs.prepare.outputs.release_commit }}' --runtime-only
+
+  smoke_arm64:
+    name: CANDIDATE_SMOKED linux/arm64
+    needs: [prepare, candidate_publish]
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: engine-release-bundle
+      - run: git clone release.bundle source
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Native arm64 smoke
+        working-directory: source
+        run: bash eng/verify-container.sh --image '${{ needs.candidate_publish.outputs.candidate_ref }}' --version '${{ needs.prepare.outputs.release_version }}' --revision '${{ needs.prepare.outputs.release_commit }}' --runtime-only
+
+  sbom:
+    name: Generate candidate SBOM
+    needs: [smoke_amd64, smoke_arm64, candidate_publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ghcr.io/bartbaszt/mcpiler-engine@${{ needs.candidate_publish.outputs.candidate_digest }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ github.token }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          syft-version: v1.52.0
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: engine-release-sbom
+          path: sbom.spdx.json
+          if-no-files-found: error
+          retention-days: 14
+
+  supply_chain:
+    name: SUPPLY_CHAIN_VERIFIED
+    needs: [prepare, candidate_publish, sbom]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: engine-release-bundle
+      - run: git clone release.bundle source
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: engine-release-sbom
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
+        with:
+          cosign-release: v2.6.0
+      - name: Sign and attach SBOM and SLSA provenance by digest
+        working-directory: source
+        env:
+          SUBJECT: ghcr.io/bartbaszt/mcpiler-engine@${{ needs.candidate_publish.outputs.candidate_digest }}
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.release_commit }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+          INVOCATION_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          cp ../sbom.spdx.json ./sbom.spdx.json
+          python - <<'PY'
+          import json, os
+          data = {
+              "buildDefinition": {
+                  "buildType": "https://slsa.dev/container-based-build/v1",
+                  "externalParameters": {
+                      "repository": "https://github.com/bartbaszt/mcpiler-engine",
+                      "version": os.environ["RELEASE_VERSION"],
+                  },
+                  "internalParameters": {
+                      "workflow": ".github/workflows/release.yml",
+                  },
+                  "resolvedDependencies": [{
+                      "uri": "git+https://github.com/bartbaszt/mcpiler-engine",
+                      "digest": {"gitCommit": os.environ["RELEASE_COMMIT"]},
+                  }],
+              },
+              "runDetails": {
+                  "builder": {"id": "https://github.com/bartbaszt/mcpiler-engine/.github/workflows/release.yml@refs/heads/main"},
+                  "metadata": {"invocationId": os.environ["INVOCATION_ID"]},
+              },
+          }
+          with open("provenance.json", "w", encoding="utf-8", newline="\n") as stream:
+              json.dump(data, stream, sort_keys=True, separators=(",", ":"))
+              stream.write("\n")
+          PY
+          cosign sign --yes "$SUBJECT"
+          cosign attest --yes --type spdxjson --predicate sbom.spdx.json "$SUBJECT"
+          cosign attest --yes --type slsaprovenance --predicate provenance.json "$SUBJECT"
+          bash eng/verify-supply-chain.sh --subject "$SUBJECT"
+
+  visibility:
+    name: PACKAGE_VISIBILITY_REQUIRED / anonymous candidate check
+    needs: [prepare, candidate_publish, supply_chain]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Require anonymous access before Git or stable publication
+        env:
+          CANDIDATE_REF: ${{ needs.candidate_publish.outputs.candidate_ref }}
+        run: |
+          set -euo pipefail
+          if ! docker buildx imagetools inspect "$CANDIDATE_REF" >/dev/null 2>&1; then
+            echo 'RESULT: PACKAGE_VISIBILITY_REQUIRED'
+            echo 'The fully verified candidate exists but the package is not anonymously readable yet.' >&2
+            exit 1
+          fi
+          echo 'RESULT: PUBLIC_CANDIDATE_VERIFIED'
+
+  git_publish:
+    name: GIT_PUBLISHED
+    needs: [prepare, candidate_publish, visibility]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+          path: source
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: engine-release-bundle
+          path: artifact
+      - name: Restore the exact prepared release commit into the authenticated checkout
+        working-directory: source
+        env:
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.release_commit }}
+        run: |
+          set -euo pipefail
+          git fetch ../artifact/release.bundle main
+          [[ "$(git rev-parse FETCH_HEAD)" == "$RELEASE_COMMIT" ]] || { echo 'Prepared release bundle identity mismatch.' >&2; exit 1; }
+          git reset --hard FETCH_HEAD
+      - name: Publish main and annotated stable tag atomically after fresh race check
+        working-directory: source
+        env:
+          MCPILER_ENGINE_RELEASE_WORKFLOW: 'true'
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.release_commit }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: bash eng/release.sh --publish-git --base-sha "$BASE_SHA" --release-commit "$RELEASE_COMMIT" --tag "$RELEASE_TAG"
+
+  stable_promote:
+    name: STABLE_PROMOTED
+    needs: [prepare, candidate_publish, git_publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.prepare.outputs.release_tag }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - env:
+          MCPILER_ENGINE_RELEASE_WORKFLOW: 'true'
+          SOURCE: ${{ needs.candidate_publish.outputs.candidate_ref }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: bash eng/publish-release.sh --promote-stable --source "$SOURCE" --target-tag "$RELEASE_TAG"
+
+  latest_promote:
+    name: LATEST_PROMOTED
+    needs: [prepare, candidate_publish, stable_promote]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.prepare.outputs.release_tag }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Promote stable candidate to latest without rebuild and compare raw indexes
+        env:
+          MCPILER_ENGINE_RELEASE_WORKFLOW: 'true'
+          SOURCE: ${{ needs.candidate_publish.outputs.candidate_ref }}
+          STABLE: ghcr.io/bartbaszt/mcpiler-engine:${{ needs.prepare.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          bash eng/publish-release.sh --promote-latest --source "$SOURCE"
+          bash eng/verify-container.sh --compare-index "$SOURCE" "$STABLE" ghcr.io/bartbaszt/mcpiler-engine:latest
+
+  github_release:
+    name: GITHUB_RELEASE_PUBLISHED / COMPLETE
+    needs: [prepare, latest_promote]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.prepare.outputs.release_tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Publish GitHub Release from the changelog section
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+        run: |
+          set -euo pipefail
+          source eng/release-lib.sh
+          changelog_section CHANGELOG.md "$RELEASE_VERSION" > release-body.md
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo 'RESULT: GITHUB_RELEASE_ALREADY_PUBLISHED'
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --title "MCPiler Engine $RELEASE_TAG" --notes-file release-body.md
+            echo 'RESULT: GITHUB_RELEASE_PUBLISHED'
+          fi

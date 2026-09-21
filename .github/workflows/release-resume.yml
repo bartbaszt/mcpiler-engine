@@ -1,0 +1,275 @@
+name: Resume stable release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing vA.B.C tag for a post-Git-publish resume. Leave empty for first-public visibility resume.
+        required: false
+        type: string
+      release_run_id:
+        description: Failed release workflow run ID containing engine-release-bundle for the first-public visibility checkpoint.
+        required: false
+        type: string
+
+concurrency:
+  group: engine-stable-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      release_version: ${{ steps.resolve.outputs.release_version }}
+      release_commit: ${{ steps.resolve.outputs.release_commit }}
+      base_sha: ${{ steps.resolve.outputs.base_sha }}
+      candidate_ref: ${{ steps.resolve.outputs.candidate_ref }}
+      mode: ${{ steps.resolve.outputs.mode }}
+    steps:
+      - name: Validate resume selector
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+          RELEASE_RUN_ID: ${{ inputs.release_run_id }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$RELEASE_TAG_INPUT" && -n "$RELEASE_RUN_ID" ]] || [[ -z "$RELEASE_TAG_INPUT" && -z "$RELEASE_RUN_ID" ]]; then
+            echo 'Provide exactly one of release_tag or release_run_id.' >&2
+            exit 64
+          fi
+      - name: Restore pre-Git first-public bundle
+        if: ${{ inputs.release_run_id != '' }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: engine-release-bundle
+          run-id: ${{ inputs.release_run_id }}
+          github-token: ${{ github.token }}
+      - name: Resolve first-public identity
+        id: visibility
+        if: ${{ inputs.release_run_id != '' }}
+        run: |
+          set -euo pipefail
+          git clone release.bundle source
+          release_commit="$(git -C source rev-parse HEAD)"
+          base_sha="$(git -C source rev-parse HEAD^)"
+          version="$(sed -n 's:.*<Version>\([^<]*\)</Version>.*:\1:p' source/src/MCPiler.Engine.Host/MCPiler.Engine.Host.csproj | head -n1)"
+          tag="v$version"
+          printf 'mode=visibility\nrelease_tag=%s\nrelease_version=%s\nrelease_commit=%s\nbase_sha=%s\ncandidate_ref=ghcr.io/bartbaszt/mcpiler-engine:%s\n' "$tag" "$version" "$release_commit" "$base_sha" "$release_commit" >>"$GITHUB_OUTPUT"
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        if: ${{ inputs.release_tag != '' }}
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: source
+      - name: Resolve post-Git identity
+        id: postgit
+        if: ${{ inputs.release_tag != '' }}
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG_INPUT" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 64
+          release_commit="$(git -C source rev-parse HEAD)"
+          base_sha="$(git -C source rev-parse HEAD^)"
+          version="${RELEASE_TAG_INPUT#v}"
+          printf 'mode=postgit\nrelease_tag=%s\nrelease_version=%s\nrelease_commit=%s\nbase_sha=%s\ncandidate_ref=ghcr.io/bartbaszt/mcpiler-engine:%s\n' "$RELEASE_TAG_INPUT" "$version" "$release_commit" "$base_sha" "$release_commit" >>"$GITHUB_OUTPUT"
+      - name: Publish resolved outputs
+        id: resolve
+        env:
+          VIS_MODE: ${{ steps.visibility.outputs.mode }}
+          VIS_TAG: ${{ steps.visibility.outputs.release_tag }}
+          VIS_VERSION: ${{ steps.visibility.outputs.release_version }}
+          VIS_COMMIT: ${{ steps.visibility.outputs.release_commit }}
+          VIS_BASE: ${{ steps.visibility.outputs.base_sha }}
+          VIS_CANDIDATE: ${{ steps.visibility.outputs.candidate_ref }}
+          POST_MODE: ${{ steps.postgit.outputs.mode }}
+          POST_TAG: ${{ steps.postgit.outputs.release_tag }}
+          POST_VERSION: ${{ steps.postgit.outputs.release_version }}
+          POST_COMMIT: ${{ steps.postgit.outputs.release_commit }}
+          POST_BASE: ${{ steps.postgit.outputs.base_sha }}
+          POST_CANDIDATE: ${{ steps.postgit.outputs.candidate_ref }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$VIS_MODE" ]]; then
+            printf 'mode=%s\nrelease_tag=%s\nrelease_version=%s\nrelease_commit=%s\nbase_sha=%s\ncandidate_ref=%s\n' "$VIS_MODE" "$VIS_TAG" "$VIS_VERSION" "$VIS_COMMIT" "$VIS_BASE" "$VIS_CANDIDATE" >>"$GITHUB_OUTPUT"
+          else
+            printf 'mode=%s\nrelease_tag=%s\nrelease_version=%s\nrelease_commit=%s\nbase_sha=%s\ncandidate_ref=%s\n' "$POST_MODE" "$POST_TAG" "$POST_VERSION" "$POST_COMMIT" "$POST_BASE" "$POST_CANDIDATE" >>"$GITHUB_OUTPUT"
+          fi
+
+  verify_candidate:
+    needs: resolve
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: ${{ needs.resolve.outputs.mode == 'visibility' }}
+        with:
+          name: engine-release-bundle
+          run-id: ${{ inputs.release_run_id }}
+          github-token: ${{ github.token }}
+      - name: Restore first-public release source
+        if: ${{ needs.resolve.outputs.mode == 'visibility' }}
+        run: git clone release.bundle source
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        if: ${{ needs.resolve.outputs.mode == 'postgit' }}
+        with:
+          ref: ${{ needs.resolve.outputs.release_tag }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: source
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62 # v3.10.0
+        with:
+          cosign-release: v2.6.0
+      - name: Prove candidate is anonymously readable and supply-chain complete
+        env:
+          CANDIDATE_REF: ${{ needs.resolve.outputs.candidate_ref }}
+        run: |
+          set -euo pipefail
+          raw="$(docker buildx imagetools inspect --raw "$CANDIDATE_REF")"
+          digest="$(docker buildx imagetools inspect "$CANDIDATE_REF" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          [[ -n "$raw" && "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          bash source/eng/verify-supply-chain.sh --subject "ghcr.io/bartbaszt/mcpiler-engine@$digest"
+
+  git_publish:
+    if: ${{ needs.resolve.outputs.mode == 'visibility' }}
+    needs: [resolve, verify_candidate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+          path: source
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: engine-release-bundle
+          run-id: ${{ inputs.release_run_id }}
+          github-token: ${{ github.token }}
+          path: artifact
+      - name: Restore the exact first-public release commit into the authenticated checkout
+        working-directory: source
+        env:
+          RELEASE_COMMIT: ${{ needs.resolve.outputs.release_commit }}
+        run: |
+          set -euo pipefail
+          git fetch ../artifact/release.bundle main
+          [[ "$(git rev-parse FETCH_HEAD)" == "$RELEASE_COMMIT" ]] || { echo 'Prepared release bundle identity mismatch.' >&2; exit 1; }
+          git reset --hard FETCH_HEAD
+      - name: Validate first-public resume and publish Git refs
+        working-directory: source
+        env:
+          MCPILER_ENGINE_RELEASE_WORKFLOW: 'true'
+          RELEASE_COMMIT: ${{ needs.resolve.outputs.release_commit }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+          BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          bash eng/release.sh --resume-visibility --release-commit "$RELEASE_COMMIT" --candidate-commit "$RELEASE_COMMIT" --tag "$RELEASE_TAG"
+          bash eng/release.sh --publish-git --base-sha "$BASE_SHA" --release-commit "$RELEASE_COMMIT" --tag "$RELEASE_TAG"
+
+  resume_guard:
+    if: ${{ needs.resolve.outputs.mode == 'postgit' }}
+    needs: [resolve, verify_candidate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.resolve.outputs.release_tag }}
+          fetch-depth: 0
+          persist-credentials: true
+      - env:
+          RELEASE_COMMIT: ${{ needs.resolve.outputs.release_commit }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+        run: bash eng/release.sh --resume --release-commit "$RELEASE_COMMIT" --candidate-commit "$RELEASE_COMMIT" --tag "$RELEASE_TAG"
+
+  stable_promote:
+    needs: [resolve, verify_candidate, git_publish, resume_guard]
+    if: ${{ always() && needs.verify_candidate.result == 'success' && (needs.git_publish.result == 'success' || needs.git_publish.result == 'skipped') && (needs.resume_guard.result == 'success' || needs.resume_guard.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.resolve.outputs.release_tag }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - env:
+          MCPILER_ENGINE_RELEASE_WORKFLOW: 'true'
+          SOURCE: ${{ needs.resolve.outputs.candidate_ref }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+        run: bash eng/publish-release.sh --promote-stable --source "$SOURCE" --target-tag "$RELEASE_TAG"
+
+  latest_promote:
+    needs: [resolve, stable_promote]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.resolve.outputs.release_tag }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - env:
+          MCPILER_ENGINE_RELEASE_WORKFLOW: 'true'
+          SOURCE: ${{ needs.resolve.outputs.candidate_ref }}
+          STABLE: ghcr.io/bartbaszt/mcpiler-engine:${{ needs.resolve.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          bash eng/publish-release.sh --promote-latest --source "$SOURCE"
+          bash eng/verify-container.sh --compare-index "$SOURCE" "$STABLE" ghcr.io/bartbaszt/mcpiler-engine:latest
+
+  github_release:
+    needs: [resolve, latest_promote]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.resolve.outputs.release_tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.resolve.outputs.release_version }}
+        run: |
+          set -euo pipefail
+          source eng/release-lib.sh
+          changelog_section CHANGELOG.md "$RELEASE_VERSION" > release-body.md
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo 'RESULT: GITHUB_RELEASE_ALREADY_PUBLISHED'
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --title "MCPiler Engine $RELEASE_TAG" --notes-file release-body.md
+            echo 'RESULT: GITHUB_RELEASE_PUBLISHED'
+          fi

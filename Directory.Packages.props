@@ -38,9 +38,11 @@
 
       It remains the evaluator the schema tests use, which is the point: the published
       JSON Schemas under schemas/ and the readers in Manifest/Loading are checked against
-      the same semantics the runtime applies. MIT licensed, and the same evaluator the
-      Studio uses, so the two implementations agree on JSON Schema by construction rather
-      than by comparison.
+      the same semantics the runtime applies. The official 9.4.0 binary is distributed
+      under the reviewed OSMFEULA terms recorded by Engine's exact-version release licence
+      policy; do not relabel the package binary as MIT. It is the same evaluator the Studio
+      uses, so the two implementations agree on JSON Schema by construction rather than by
+      comparison.
     -->
     <PackageVersion Include="JsonSchema.Net" Version="9.4.0" />
 

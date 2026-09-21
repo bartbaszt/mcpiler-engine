@@ -3,7 +3,6 @@
   <PropertyGroup>
     <RootNamespace>MCPiler.Engine</RootNamespace>
     <AssemblyName>MCPiler.Engine</AssemblyName>
-    <Version>0.0.1-alpha</Version>
     <IsPackable>false</IsPackable>
   </PropertyGroup>
 

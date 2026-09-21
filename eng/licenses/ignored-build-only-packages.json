@@ -1,0 +1,5 @@
+[
+  "Meziantou.Analyzer",
+  "Microsoft.CodeAnalysis.BannedApiAnalyzers",
+  "Microsoft.VisualStudio.Threading.Analyzers"
+]
