@@ -142,6 +142,19 @@ public sealed class ReleaseMetadataTests
         Assert.Contains("/usr/share/dotnet/ThirdPartyNotices.txt", dockerfile, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Container_verifier_runtime_state_check_supplies_a_valid_manifest_mount()
+    {
+        var verifier = Read("eng/verify-container.sh");
+
+        Assert.Contains("tests/fixtures/manifests/minimal", verifier, StringComparison.Ordinal);
+        Assert.Contains("--mount \"type=bind,src=$manifest_fixture,dst=/manifests/minimal,readonly\"", verifier, StringComparison.Ordinal);
+        Assert.Contains("--mount /minimal=/manifests/minimal", verifier, StringComparison.Ordinal);
+        Assert.Contains("--file-store-root /data/files", verifier, StringComparison.Ordinal);
+        Assert.Contains("--runtime-state-root /data/runtime-state", verifier, StringComparison.Ordinal);
+        Assert.Contains("runtime-state-key-file", verifier, StringComparison.Ordinal);
+    }
+
     private static string Job(string workflow, string name)
     {
         var match = Regex.Match(

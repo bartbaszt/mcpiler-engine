@@ -14,6 +14,8 @@ version=""
 revision=""
 mode="all"
 compare=()
+engine_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+manifest_fixture="$engine_root/tests/fixtures/manifests/minimal"
 
 while (($#)); do
   case "$1" in
@@ -59,7 +61,7 @@ if [[ "$mode" != "runtime" ]]; then
   tmp_index="$(mktemp)"
   trap 'rm -f "$tmp_index"' EXIT
   raw_index "$image" >"$tmp_index"
-  python - "$tmp_index" <<'PY'
+  python3 - "$tmp_index" <<'PY'
 import json
 import sys
 
@@ -80,9 +82,14 @@ fi
 if [[ "$mode" != "index" ]]; then
   docker pull "$image" >/dev/null
 
+  if [[ ! -d "$manifest_fixture" ]]; then
+    echo "FAIL: verifier Manifest fixture is missing: $manifest_fixture" >&2
+    exit 1
+  fi
+
   inspect_file="$(mktemp)"
   docker image inspect "$image" >"$inspect_file"
-  python - "$version" "$revision" "$inspect_file" <<'PY'
+  python3 - "$version" "$revision" "$inspect_file" <<'PY'
 import json
 import sys
 
@@ -130,7 +137,12 @@ PY
   }
 
   set +e
-  paired_setting_refusal="$(docker run --rm "$image" serve --runtime-state-root /data/runtime-state 2>&1)"
+  paired_setting_refusal="$(docker run --rm \
+    --mount "type=bind,src=$manifest_fixture,dst=/manifests/minimal,readonly" \
+    "$image" serve \
+    --mount /minimal=/manifests/minimal \
+    --file-store-root /data/files \
+    --runtime-state-root /data/runtime-state 2>&1)"
   paired_setting_exit=$?
   set -e
   [[ $paired_setting_exit -eq 78 && "$paired_setting_refusal" == *"runtime-state-key-file"* ]] || {

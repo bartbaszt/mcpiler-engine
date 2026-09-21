@@ -38,6 +38,12 @@ expect_eq "ENGINE_TAG=v0.1.0" "$(printf '%s\n' "$metadata_output" | grep '^ENGIN
 expect_eq "OCI_SOURCE=https://github.com/bartbaszt/mcpiler-engine" "$(printf '%s\n' "$metadata_output" | grep '^OCI_SOURCE=')" "OCI source input"
 expect_eq "OCI_LICENSES=Apache-2.0" "$(printf '%s\n' "$metadata_output" | grep '^OCI_LICENSES=')" "OCI licence input"
 
+verify_container="$ROOT/eng/verify-container.sh"
+expect_success "container verifier is executable" test -x "$verify_container"
+expect_success "container verifier has a valid Manifest fixture" grep -Fq 'tests/fixtures/manifests/minimal' "$verify_container"
+expect_success "container verifier supplies a Manifest mount" grep -Fq -- '--mount /minimal=/manifests/minimal' "$verify_container"
+expect_success "container verifier supplies a file-store root" grep -Fq -- '--file-store-root /data/files' "$verify_container"
+
 if [[ "${1:-}" == "--metadata-only" ]]; then
   if (( failures > 0 )); then
     printf 'RESULT: FAIL - %d release metadata helper test(s) failed.\n' "$failures" >&2
