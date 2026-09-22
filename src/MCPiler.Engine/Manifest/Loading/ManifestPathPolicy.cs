@@ -73,13 +73,6 @@ public static class ManifestPathPolicy
             return ManifestPathVerdict.Empty;
         }
 
-        // A scheme-qualified value is a URI, not a bundle path. Checked before the rooted
-        // test because "file:///etc/passwd" is not rooted on every platform.
-        if (Uri.TryCreate(declaredPath, UriKind.Absolute, out _))
-        {
-            return ManifestPathVerdict.Uri;
-        }
-
         if (declaredPath.Contains('\\', StringComparison.Ordinal))
         {
             return ManifestPathVerdict.BackslashSeparator;
@@ -88,6 +81,13 @@ public static class ManifestPathPolicy
         if (Path.IsPathRooted(declaredPath) || declaredPath.StartsWith(Separator))
         {
             return ManifestPathVerdict.Absolute;
+        }
+
+        // A scheme-qualified value is a URI, not a bundle path. This check follows the rooted
+        // test so a filesystem path such as "/etc/passwd" cannot be reinterpreted as a URI.
+        if (Uri.TryCreate(declaredPath, UriKind.Absolute, out _))
+        {
+            return ManifestPathVerdict.Uri;
         }
 
         var segments = declaredPath.Split(Separator);
