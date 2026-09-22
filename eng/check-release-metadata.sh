@@ -22,7 +22,13 @@ version="$(sed -n 's:.*<Version>\([^<]*\)</Version>.*:\1:p' "$HOST" | head -n 1)
   exit 1
 }
 
-first_header="$(grep -m1 -E '^## v[0-9]+\.[0-9]+\.[0-9]+$' "$CHANGELOG" || true)"
+# A `core.autocrlf=true` checkout can materialize CHANGELOG.md as CRLF. Anchored and whole-line
+# matching treats the CR as data, so normalize the line endings before reading release markers;
+# .gitattributes pins the file to LF for new checkouts, and this keeps an already-materialized
+# checkout correct.
+changelog_normalized="$(tr -d '\r' <"$CHANGELOG")"
+
+first_header="$(printf '%s\n' "$changelog_normalized" | grep -m1 -E '^## v[0-9]+\.[0-9]+\.[0-9]+$' || true)"
 [[ "$first_header" == "## v$version" ]] || {
   echo "FAIL: first changelog release header '$first_header' does not match v$version." >&2
   exit 1
@@ -33,15 +39,15 @@ maximum="$(sed -n 's/.*Maximum.*new(\([0-9][0-9]*\), \([0-9][0-9]*\)).*/\1.\2/p'
 [[ -n "$minimum" && -n "$maximum" ]] || { echo "FAIL: could not read supported Manifest range." >&2; exit 1; }
 supported="$minimum"
 [[ "$minimum" == "$maximum" ]] || supported="$minimum to $maximum"
-grep -Fqx -- "- Manifest format: $supported" "$CHANGELOG" || {
+printf '%s\n' "$changelog_normalized" | grep -Fqx -- "- Manifest format: $supported" || {
   echo "FAIL: v$version changelog must state '- Manifest format: $supported'." >&2
   exit 1
 }
-grep -Fq -- "- Diagnostic codes:" "$CHANGELOG" || {
+printf '%s\n' "$changelog_normalized" | grep -Fq -- "- Diagnostic codes:" || {
   echo "FAIL: v$version changelog must describe diagnostic-code additions." >&2
   exit 1
 }
-grep -Fq -- "- Git range:" "$CHANGELOG" || {
+printf '%s\n' "$changelog_normalized" | grep -Fq -- "- Git range:" || {
   echo "FAIL: v$version changelog must identify its Git range." >&2
   exit 1
 }

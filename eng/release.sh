@@ -95,7 +95,8 @@ manifest_range() {
 
 prepare_changelog() {
   local version="$1" previous_tag="$2" base="$3" changelog="$ROOT/CHANGELOG.md" section range diagnostics tmp
-  if grep -Fqx "## v$version" "$changelog"; then
+  # The idempotence check must not depend on the checkout host's line endings; see changelog_lines.
+  if changelog_lines "$changelog" | grep -Fqx "## v$version"; then
     return 0
   fi
   range="${previous_tag:-repository start}..$base"

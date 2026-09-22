@@ -1,6 +1,12 @@
 *.sh text eol=lf
 THIRD-PARTY-NOTICES.md text eol=lf
 
+# Release evidence read by LF-sensitive gates. Engine's changelog readers normalize line endings
+# explicitly, and this keeps a fresh checkout from materializing the file as CRLF in the first
+# place. The release header, Manifest-format and diagnostic-code markers are compared whole-line,
+# so a materialized CR would otherwise hide them.
+CHANGELOG.md text eol=lf
+
 # This managed-generation corpus is duplicated byte for byte into the MCPiler Platform tree.
 # Preserve the committed bytes on checkout so cross-repository byte-identity checks are stable
 # when core.autocrlf is enabled on Windows.

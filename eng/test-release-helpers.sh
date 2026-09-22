@@ -73,13 +73,14 @@ Old release.
 EOF
 expect_eq $'## v0.2.0\nNew release.' "$(changelog_section "$tmp/CHANGELOG.md" 0.2.0)" "changelog extraction"
 
-# Line-ending materialization: a `core.autocrlf=true` host can materialize an Engine checkout as
-# CRLF. The changelog readers that own `CHANGELOG.md` are GNU grep/awk, which strip a trailing CR,
-# so the supported behavior is proven rather than assumed: the same document materialized with CRLF
-# must yield exactly the same release body as its LF form, and every release marker must still be
-# found. `engine/.gitattributes` pins `*.sh` and `THIRD-PARTY-NOTICES.md` to LF but deliberately
-# does not normalize `CHANGELOG.md`, so this tolerance is the contract. Identical output also keeps
-# the generated GitHub Release body stable across hosts.
+# Line-ending materialization: a `core.autocrlf=true` checkout can materialize `CHANGELOG.md` as
+# CRLF. Anchored and whole-line matching treats the CR as data - grep's `$` anchor, `grep -x`, and
+# awk's `$0 == header` compare all fail - so the READERS normalize line endings explicitly and this
+# asserts that contract: the same document materialized with CRLF must yield exactly the same
+# release body as its LF form, and every release marker must still be found. A Windows/MSYS2 probe
+# reported these as passing before the readers normalized, because MSYS2 opens text files in text
+# mode; the release platform is Linux, so this assertion is meaningful only there.
+expect_eq "$(changelog_section "$tmp/CHANGELOG.md" 0.2.0)" "$(changelog_section "$tmp/CHANGELOG.md" 0.2.0)" "LF changelog extraction is stable"
 lf_doc=$'## v0.1.0\n\n- Manifest format: 0.3\n- Diagnostic codes: none\n- Git range: start..v0.1.0\n'
 crlf_doc=$'## v0.1.0\r\n\r\n- Manifest format: 0.3\r\n- Diagnostic codes: none\r\n- Git range: start..v0.1.0\r\n'
 printf '%s' "$lf_doc" >"$tmp/lf-changelog.md"
@@ -88,11 +89,32 @@ lf_body="$(changelog_section "$tmp/lf-changelog.md" 0.1.0)"
 crlf_body="$(changelog_section "$tmp/crlf-changelog.md" 0.1.0)"
 expect_eq "$lf_body" "$crlf_body" "CRLF changelog extracts the same release body as LF"
 expect_eq $'## v0.1.0\n\n- Manifest format: 0.3\n- Diagnostic codes: none\n- Git range: start..v0.1.0' "$crlf_body" "CRLF changelog body is normalized to LF"
-crlf_header="$(grep -m1 -E '^## v[0-9]+\.[0-9]+\.[0-9]+$' "$tmp/crlf-changelog.md" || true)"
-expect_eq "## v0.1.0" "$(printf '%s' "$crlf_header" | tr -d '\r')" "CRLF changelog yields a clean release header"
-expect_success "CRLF changelog keeps the Manifest format line" grep -Fqx -- "- Manifest format: 0.3" "$tmp/crlf-changelog.md"
-expect_success "CRLF changelog keeps the diagnostic-code marker" grep -Fq -- "- Diagnostic codes:" "$tmp/crlf-changelog.md"
-expect_success "CRLF changelog keeps the Git-range marker" grep -Fq -- "- Git range:" "$tmp/crlf-changelog.md"
+crlf_header="$(changelog_lines "$tmp/crlf-changelog.md" | grep -m1 -E '^## v[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+expect_eq "## v0.1.0" "$crlf_header" "CRLF changelog yields a clean release header"
+changelog_line_present() { # file marker
+  changelog_lines "$1" | grep -Fqx -- "$2"
+}
+changelog_marker_present() { # file marker
+  changelog_lines "$1" | grep -Fq -- "$2"
+}
+expect_success "CRLF changelog keeps the Manifest format line" changelog_line_present "$tmp/crlf-changelog.md" '- Manifest format: 0.3'
+expect_success "CRLF changelog keeps the diagnostic-code marker" changelog_marker_present "$tmp/crlf-changelog.md" '- Diagnostic codes:'
+expect_success "CRLF changelog keeps the Git-range marker" changelog_marker_present "$tmp/crlf-changelog.md" '- Git range:'
+
+# The same readers own the metadata gate; prove it against a CRLF-materialized changelog by
+# pointing the gate at a copy so the repository file is not touched.
+crlf_root="$tmp/crlf-root"
+mkdir -p "$crlf_root/eng" "$crlf_root/src/MCPiler.Engine.Host" "$crlf_root/src/MCPiler.Engine/Manifest"
+cp "$ROOT/eng/check-release-metadata.sh" "$crlf_root/eng/"
+cp "$ROOT/src/MCPiler.Engine.Host/MCPiler.Engine.Host.csproj" "$crlf_root/src/MCPiler.Engine.Host/"
+cp "$ROOT/src/MCPiler.Engine/Manifest/ManifestFormatSupport.cs" "$crlf_root/src/MCPiler.Engine/Manifest/"
+printf '## v0.1.0\r\n\r\n- Manifest format: 0.3\r\n- Diagnostic codes: none\r\n- Git range: start..v0.1.0\r\n' >"$crlf_root/CHANGELOG.md"
+expect_success "metadata gate reads a CRLF-materialized changelog" bash "$crlf_root/eng/check-release-metadata.sh"
+printf '## v0.1.0\n\n- Manifest format: 0.3\n- Diagnostic codes: none\n- Git range: start..v0.1.0\n' >"$crlf_root/CHANGELOG.md"
+expect_success "metadata gate reads an LF changelog (control)" bash "$crlf_root/eng/check-release-metadata.sh"
+
+# The attribute is the durable half, so a fresh checkout does not materialize CRLF at all.
+expect_success "Git attributes force LF for the changelog" grep -Fq 'CHANGELOG.md text eol=lf' "$ROOT/.gitattributes"
 
 expect_success "new immutable tag" assert_release_tag_absent ""
 expect_failure "existing immutable tag" assert_release_tag_absent "0123456789abcdef"

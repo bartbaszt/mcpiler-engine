@@ -7,6 +7,17 @@ stable_version() {
   [[ "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
+# Changelog readers must be independent of the checkout host's line endings. A
+# `core.autocrlf=true` checkout materializes `CHANGELOG.md` as CRLF, and anchored/whole-line
+# matching treats that CR as data: grep's `$` anchor and `-x` compare, and awk's `$0 == header`
+# compare all fail, which yields an empty release body and a missed release header. Normalize the
+# line endings explicitly instead of depending on a particular tool's CR behavior.
+changelog_lines() { # changelog-file -> stdout with LF line endings
+  local changelog="${1:-}"
+  [[ -f "$changelog" ]] || return 1
+  tr -d '\r' <"$changelog"
+}
+
 next_version() {
   local current="${1:-}" bump="${2:-}" major minor patch
   stable_version "$current" || return 1
@@ -23,13 +34,13 @@ changelog_section() {
   local changelog="${1:-}" version="${2:-}"
   [[ -f "$changelog" ]] || return 1
   stable_version "$version" || return 1
-  awk -v header="## v$version" '
+  changelog_lines "$changelog" | awk -v header="## v$version" '
     /^## v[0-9]+\.[0-9]+\.[0-9]+/ {
       if (found) exit
       if ($0 == header) found=1
     }
     found { print }
-  ' "$changelog"
+  '
 }
 
 assert_release_tag_absent() {
