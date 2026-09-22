@@ -3,12 +3,12 @@ using System.Runtime.CompilerServices;
 namespace MCPiler.Engine.UnitTests;
 
 /// <summary>
-/// Locates repository-relative test assets without depending on the build output layout.
+/// Locates repository-relative test assets without depending on the test host's working directory.
 /// </summary>
 /// <remarks>
-/// The path is derived from the compiler-provided path of this source file rather than from
-/// <c>AppContext.BaseDirectory</c>, so it stays correct regardless of target framework
-/// folder, configuration folder, or a test host that changes the working directory.
+/// The path is normally derived from the compiler-provided path of this source file. Deterministic
+/// CI builds can map that path to the virtual <c>/_/</c> root, so the executable output directory
+/// is the fallback when the mapped source path is not an accessible checkout.
 /// </remarks>
 internal static class TestRepository
 {
@@ -26,9 +26,26 @@ internal static class TestRepository
     private static string ResolveRoot()
     {
         // <root>/tests/MCPiler.Engine.UnitTests/TestRepository.cs
-        var directory = Path.GetDirectoryName(SourceFile())
-            ?? throw new InvalidOperationException("Could not determine the test source directory.");
+        var sourceDirectory = Path.GetDirectoryName(SourceFile());
+        var sourceRoot = sourceDirectory is null ? null : FindRoot(sourceDirectory);
+        if (sourceRoot is not null)
+        {
+            return sourceRoot;
+        }
 
+        var runtimeRoot = FindRoot(AppContext.BaseDirectory);
+        if (runtimeRoot is not null)
+        {
+            return runtimeRoot;
+        }
+
+        var sourceDescription = sourceDirectory ?? "the compiler-provided source path";
+        throw new InvalidOperationException(
+            $"Could not locate MCPiler.Engine.slnx above '{sourceDescription}' or the test output directory '{AppContext.BaseDirectory}'.");
+    }
+
+    private static string? FindRoot(string directory)
+    {
         var current = new DirectoryInfo(directory);
 
         while (current is not null)
@@ -41,8 +58,7 @@ internal static class TestRepository
             current = current.Parent;
         }
 
-        throw new InvalidOperationException(
-            $"Could not locate MCPiler.Engine.slnx above '{directory}'.");
+        return null;
     }
 
     private static string SourceFile([CallerFilePath] string path = "") => path;
