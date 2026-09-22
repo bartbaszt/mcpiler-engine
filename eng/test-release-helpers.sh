@@ -73,6 +73,27 @@ Old release.
 EOF
 expect_eq $'## v0.2.0\nNew release.' "$(changelog_section "$tmp/CHANGELOG.md" 0.2.0)" "changelog extraction"
 
+# Line-ending materialization: a `core.autocrlf=true` host can materialize an Engine checkout as
+# CRLF. The changelog readers that own `CHANGELOG.md` are GNU grep/awk, which strip a trailing CR,
+# so the supported behavior is proven rather than assumed: the same document materialized with CRLF
+# must yield exactly the same release body as its LF form, and every release marker must still be
+# found. `engine/.gitattributes` pins `*.sh` and `THIRD-PARTY-NOTICES.md` to LF but deliberately
+# does not normalize `CHANGELOG.md`, so this tolerance is the contract. Identical output also keeps
+# the generated GitHub Release body stable across hosts.
+lf_doc=$'## v0.1.0\n\n- Manifest format: 0.3\n- Diagnostic codes: none\n- Git range: start..v0.1.0\n'
+crlf_doc=$'## v0.1.0\r\n\r\n- Manifest format: 0.3\r\n- Diagnostic codes: none\r\n- Git range: start..v0.1.0\r\n'
+printf '%s' "$lf_doc" >"$tmp/lf-changelog.md"
+printf '%s' "$crlf_doc" >"$tmp/crlf-changelog.md"
+lf_body="$(changelog_section "$tmp/lf-changelog.md" 0.1.0)"
+crlf_body="$(changelog_section "$tmp/crlf-changelog.md" 0.1.0)"
+expect_eq "$lf_body" "$crlf_body" "CRLF changelog extracts the same release body as LF"
+expect_eq $'## v0.1.0\n\n- Manifest format: 0.3\n- Diagnostic codes: none\n- Git range: start..v0.1.0' "$crlf_body" "CRLF changelog body is normalized to LF"
+crlf_header="$(grep -m1 -E '^## v[0-9]+\.[0-9]+\.[0-9]+$' "$tmp/crlf-changelog.md" || true)"
+expect_eq "## v0.1.0" "$(printf '%s' "$crlf_header" | tr -d '\r')" "CRLF changelog yields a clean release header"
+expect_success "CRLF changelog keeps the Manifest format line" grep -Fqx -- "- Manifest format: 0.3" "$tmp/crlf-changelog.md"
+expect_success "CRLF changelog keeps the diagnostic-code marker" grep -Fq -- "- Diagnostic codes:" "$tmp/crlf-changelog.md"
+expect_success "CRLF changelog keeps the Git-range marker" grep -Fq -- "- Git range:" "$tmp/crlf-changelog.md"
+
 expect_success "new immutable tag" assert_release_tag_absent ""
 expect_failure "existing immutable tag" assert_release_tag_absent "0123456789abcdef"
 expect_success "origin race unchanged" assert_origin_unchanged "abc" "abc"
