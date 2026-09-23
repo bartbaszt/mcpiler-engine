@@ -94,6 +94,26 @@ public sealed class ReleaseMetadataTests
     }
 
     [Fact]
+    public void Prepare_job_can_read_the_private_remote_without_gaining_repository_write()
+    {
+        var workflow = Read(".github/workflows/release.yml");
+        var prepareJob = Job(workflow, "prepare");
+        var release = Read("eng/release.sh");
+
+        // eng/release.sh --prepare checks the live remote: the origin-race guard fetches main and the
+        // immutable-tag guard lists remote tags. The Engine repository is private, so the job must
+        // retain read credentials or those checks fail with exit 128 before any metadata is prepared.
+        Assert.Contains("persist-credentials: true", prepareJob, StringComparison.Ordinal);
+        Assert.Contains("git -C \"$ROOT\" fetch origin main --tags", release, StringComparison.Ordinal);
+        Assert.Contains("ls-remote --tags origin", release, StringComparison.Ordinal);
+
+        // Retaining read credentials must not widen the job's repository permission.
+        Assert.Contains("contents: read", prepareJob, StringComparison.Ordinal);
+        Assert.DoesNotContain("contents: write", prepareJob, StringComparison.Ordinal);
+        Assert.DoesNotContain("packages: write", prepareJob, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Latest_is_owned_only_by_the_stable_release_path()
     {
         var ci = Read(".github/workflows/ci.yml");

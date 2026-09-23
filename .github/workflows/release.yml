@@ -52,7 +52,10 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
-          persist-credentials: false
+          # The prepared metadata must be checked against the live remote: eng/release.sh --prepare
+          # runs the origin-race check and the immutable-tag check, and this repository is private.
+          # Credentials are retained for read only - the job holds contents: read and never pushes.
+          persist-credentials: true
       - name: Prepare immutable release commit
         id: prepare
         env:
