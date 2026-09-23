@@ -218,6 +218,39 @@ public sealed class ReleaseMetadataTests
         Assert.Contains("Signed-off-by", release, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// An annotated tag records a tagger identity, and <c>--publish-git</c> runs in its own job on a
+    /// fresh runner where the prepare job's checkout-local identity does not exist. A bare
+    /// <c>git tag -a</c> therefore fails with <c>fatal: empty ident name ... not allowed</c> after the
+    /// candidate has already been built, published and smoked — observed on the first release run that
+    /// passed the visibility gate. The tag command must carry the documented bot identity explicitly.
+    /// </summary>
+    [Fact]
+    public void Annotated_release_tag_carries_the_bot_identity_explicitly()
+    {
+        var release = Read("eng/release.sh").Replace("\r\n", "\n");
+
+        // Join backslash continuations first so a multi-line invocation is one logical command;
+        // otherwise the identity on the first physical line would be invisible to a check that
+        // starts at the line containing `tag -a`.
+        var joined = release.Replace("\\\n", " ");
+        var tagCommands = joined
+            .Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.Contains("tag -a", StringComparison.Ordinal))
+            .ToArray();
+
+        Assert.NotEmpty(tagCommands);
+
+        // Every annotated tag invocation must set both identity values in the same command, because
+        // the job has no configured identity and `-c` is scoped to that one invocation.
+        foreach (var command in tagCommands)
+        {
+            Assert.Contains("user.name=", command, StringComparison.Ordinal);
+            Assert.Contains("user.email=", command, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void Dockerfile_carries_public_release_metadata_and_redistribution_material()
     {
