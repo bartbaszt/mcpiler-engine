@@ -69,7 +69,10 @@ jobs:
           printf 'release_version=%s\n' "$(printf '%s\n' "$output" | sed -n 's/^RELEASE_VERSION=//p')" >>"$GITHUB_OUTPUT"
           printf 'release_tag=%s\n' "$(printf '%s\n' "$output" | sed -n 's/^RELEASE_TAG=//p')" >>"$GITHUB_OUTPUT"
           printf 'release_commit=%s\n' "$(printf '%s\n' "$output" | sed -n 's/^RELEASE_COMMIT=//p')" >>"$GITHUB_OUTPUT"
-          git bundle create release.bundle main
+          # Bundle the branch AND HEAD: a bundle carrying only `main` leaves a plain clone with
+          # "remote HEAD refers to nonexistent ref, unable to checkout", so every consumer job gets
+          # an empty working tree and nothing to run.
+          git bundle create release.bundle main HEAD
       - name: Preserve prepared commit without publishing Git refs
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

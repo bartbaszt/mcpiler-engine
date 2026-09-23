@@ -94,6 +94,29 @@ public sealed class ReleaseMetadataTests
     }
 
     [Fact]
+    public void Release_bundle_carries_head_so_consumer_jobs_get_a_working_tree()
+    {
+        // Normalize line endings: this file is read on Windows and in Linux CI alike, and the
+        // assertions below are about the Git command, not about the checkout's line endings.
+        var workflow = Read(".github/workflows/release.yml").Replace("\r\n", "\n");
+
+        // A bundle created with only the branch ref leaves a plain `git clone` with
+        // "remote HEAD refers to nonexistent ref, unable to checkout": the clone succeeds, the
+        // working tree is empty, and every consumer job then fails with a missing-script error.
+        var bundleCommands = workflow
+            .Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.StartsWith("git bundle create", StringComparison.Ordinal))
+            .ToArray();
+        Assert.NotEmpty(bundleCommands);
+        Assert.All(bundleCommands, command =>
+            Assert.EndsWith("main HEAD", command, StringComparison.Ordinal));
+
+        // Every consumer must actually clone the bundle; if that changes, the bundle contract changes too.
+        Assert.Contains("git clone release.bundle source", workflow, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Prepare_job_can_read_the_private_remote_without_gaining_repository_write()
     {
         var workflow = Read(".github/workflows/release.yml");
