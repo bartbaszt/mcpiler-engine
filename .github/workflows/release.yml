@@ -246,7 +246,10 @@ jobs:
           PY
           cosign sign --yes "$SUBJECT"
           cosign attest --yes --type spdxjson --predicate sbom.spdx.json "$SUBJECT"
-          cosign attest --yes --type slsaprovenance --predicate provenance.json "$SUBJECT"
+          # The generated predicate is SLSA v1 (`buildDefinition`/`runDetails`). cosign's plain
+          # `slsaprovenance` type means v0.2 and rejects that shape with "required field builder
+          # missing"; `slsaprovenance1` selects the v1 statement type.
+          cosign attest --yes --type slsaprovenance1 --predicate provenance.json "$SUBJECT"
           bash eng/verify-supply-chain.sh --subject "$SUBJECT"
 
   visibility:

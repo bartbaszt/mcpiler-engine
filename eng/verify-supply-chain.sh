@@ -29,6 +29,7 @@ common=(
 
 cosign verify "${common[@]}" "$subject" >/dev/null
 cosign verify-attestation "${common[@]}" --type spdxjson "$subject" >/dev/null
-cosign verify-attestation "${common[@]}" --type slsaprovenance "$subject" >/dev/null
+# The released provenance predicate is SLSA v1; cosign's plain `slsaprovenance` type means v0.2.
+cosign verify-attestation "${common[@]}" --type slsaprovenance1 "$subject" >/dev/null
 
 echo "RESULT: PASS - keyless signature, SPDX SBOM and SLSA provenance verify for $subject."

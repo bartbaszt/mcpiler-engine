@@ -94,6 +94,28 @@ public sealed class ReleaseMetadataTests
     }
 
     [Fact]
+    public void Supply_chain_attestation_types_match_the_predicate_shapes()
+    {
+        var workflow = Read(".github/workflows/release.yml");
+        var verifier = Read("eng/verify-supply-chain.sh");
+
+        // The workflow writes an in-toto SLSA v1 predicate ({ buildDefinition, runDetails }).
+        // cosign's plain `slsaprovenance` type validates the v0.2 shape and rejects v1 with
+        // "required field builder missing", so signing and verification must both select the v1
+        // type. A mismatch here fails only at release time, after the candidate was already built.
+        Assert.Contains("slsaprovenance1", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("--type slsaprovenance ", workflow, StringComparison.Ordinal);
+        Assert.Contains("slsaprovenance1", verifier, StringComparison.Ordinal);
+        Assert.DoesNotContain("--type slsaprovenance ", verifier, StringComparison.Ordinal);
+
+        // The predicate really is the v1 shape, and the SPDX SBOM uses the json flavour.
+        Assert.Contains("buildDefinition", workflow, StringComparison.Ordinal);
+        Assert.Contains("runDetails", workflow, StringComparison.Ordinal);
+        Assert.Contains("spdxjson", workflow, StringComparison.Ordinal);
+        Assert.Contains("spdxjson", verifier, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Release_bundle_carries_head_so_consumer_jobs_get_a_working_tree()
     {
         // Normalize line endings: this file is read on Windows and in Linux CI alike, and the
