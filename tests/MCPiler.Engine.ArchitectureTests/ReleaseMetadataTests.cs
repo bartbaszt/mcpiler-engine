@@ -291,6 +291,160 @@ public sealed class ReleaseMetadataTests
         Assert.Contains("runtime-state-key-file", verifier, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The resume workflow branches into two mutually exclusive modes, so exactly one branch job is
+    /// always skipped, and GitHub Actions propagates a skip to every later job in the dependency chain.
+    /// Only <c>stable_promote</c> used to declare the accepting <c>always()</c> form, so
+    /// <c>latest_promote</c> and <c>github_release</c> were skipped with zero steps while the run still
+    /// reported success (hosted run 35845059978) - a resume could not repair the very artifacts it
+    /// exists to repair. Every job reachable after a conditional job must therefore declare its own
+    /// accepting <c>if:</c>.
+    /// </summary>
+    [Fact]
+    public void Every_resume_job_after_a_conditional_job_declares_an_accepting_if()
+    {
+        const string Workflow = ".github/workflows/release-resume.yml";
+        var text = Read(Workflow);
+
+        var jobs = ParseJobs(text);
+        Assert.True(jobs.Count >= 6, $"Expected the resume job graph, parsed only {jobs.Count} jobs.");
+
+        // The conditional jobs that always exist in exactly one mode: their sibling is always skipped.
+        Assert.Contains("git_publish", jobs.Keys);
+        Assert.Contains("resume_guard", jobs.Keys);
+
+        var stranded = new List<string>();
+        foreach (var (name, job) in jobs)
+        {
+            // A job is at risk when any transitive dependency declares an `if:` and this job does not.
+            var risky = TransitiveNeeds(jobs, name)
+                .Any(dep => jobs[dep].Condition is not null);
+            if (risky && job.Condition is null)
+            {
+                stranded.Add(name);
+            }
+        }
+
+        Assert.True(
+            stranded.Count == 0,
+            $"These resume jobs can be skipped by an ancestor's skip while the run reports success: {string.Join(", ", stranded)}.");
+
+        // The accepting form must actually neutralise a skip, not merely exist.
+        foreach (var tail in new[] { "stable_promote", "latest_promote", "github_release" })
+        {
+            var condition = jobs[tail].Condition;
+            Assert.NotNull(condition);
+            Assert.Contains("always()", condition, StringComparison.Ordinal);
+            Assert.Contains("success", condition, StringComparison.Ordinal);
+        }
+    }
+
+    private sealed record WorkflowJob(string Name, IReadOnlyList<string> Needs, string? Condition);
+
+    private static Dictionary<string, WorkflowJob> ParseJobs(string workflow)
+    {
+        var jobs = new Dictionary<string, WorkflowJob>(StringComparer.Ordinal);
+        // Job headers are two-space indented keys under the top-level `jobs:` block; the body runs to
+        // the next job header or the end of the file.
+        var headers = Regex.Matches(
+            workflow,
+            @"(?m)^  (?<name>[a-zA-Z0-9_-]+):\s*$",
+            RegexOptions.CultureInvariant,
+            TimeSpan.FromSeconds(5));
+
+        for (var i = 0; i < headers.Count; i++)
+        {
+            var name = headers[i].Groups["name"].Value;
+            if (name is "on" or "permissions" or "concurrency" or "env" or "jobs")
+            {
+                continue;
+            }
+
+            var start = headers[i].Index + headers[i].Length;
+            var end = i + 1 < headers.Count ? headers[i + 1].Index : workflow.Length;
+            var body = workflow[start..end];
+
+            // `on:`/`workflow_dispatch:`/`inputs:` live above the jobs block; skip non-job sections by
+            // requiring the body to declare a runner or a need.
+            if (!body.Contains("runs-on:", StringComparison.Ordinal)
+                && !body.Contains("needs:", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var needs = new List<string>();
+            var needsMatch = Regex.Match(
+                body,
+                @"(?m)^    needs:\s*(?<inline>\[[^\]]*\])\s*$",
+                RegexOptions.CultureInvariant,
+                TimeSpan.FromSeconds(5));
+            if (needsMatch.Success)
+            {
+                needs.AddRange(
+                    needsMatch.Groups["inline"].Value
+                        .Trim('[', ']')
+                        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+            }
+            var needsListMatch = Regex.Match(
+                body,
+                @"(?m)^    needs:\s*$",
+                RegexOptions.CultureInvariant,
+                TimeSpan.FromSeconds(5));
+            if (needsListMatch.Success)
+            {
+                // Parse the YAML sequence without a nested-quantifier regex: each dependency is a
+                // six-space indented list item immediately following the `needs:` key.
+                foreach (var line in body[needsListMatch.Index..].Split('\n').Skip(1))
+                {
+                    var item = line.TrimEnd('\r');
+                    if (!item.StartsWith("      - ", StringComparison.Ordinal))
+                    {
+                        break;
+                    }
+
+                    needs.Add(item[8..].Trim());
+                }
+            }
+
+            var conditionMatch = Regex.Match(
+                body,
+                @"(?m)^    if:\s*(?<condition>.+)$",
+                RegexOptions.CultureInvariant,
+                TimeSpan.FromSeconds(5));
+            var condition = conditionMatch.Success ? conditionMatch.Groups["condition"].Value.Trim() : null;
+
+            jobs[name] = new WorkflowJob(name, needs, condition);
+        }
+
+        return jobs;
+    }
+
+    private static IEnumerable<string> TransitiveNeeds(Dictionary<string, WorkflowJob> jobs, string name)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var queue = new Queue<string>(jobs[name].Needs);
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            if (!seen.Add(current))
+            {
+                continue;
+            }
+
+            if (!jobs.TryGetValue(current, out var job))
+            {
+                continue;
+            }
+
+            foreach (var next in job.Needs)
+            {
+                queue.Enqueue(next);
+            }
+        }
+
+        return seen;
+    }
+
     private static string Job(string workflow, string name)
     {
         var match = Regex.Match(
