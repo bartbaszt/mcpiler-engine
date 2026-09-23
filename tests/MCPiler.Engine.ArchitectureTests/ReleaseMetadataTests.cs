@@ -170,6 +170,44 @@ public sealed class ReleaseMetadataTests
         Assert.Contains(":latest", release, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The deterministic metadata, licence and release-helper gates must run in ordinary CI, not
+    /// only in the release workflow. When they ran only at release time, a guard that cannot pass
+    /// where it actually executes (the executable-bit check on Linux) stayed latent until the first
+    /// stable release.
+    /// </summary>
+    [Fact]
+    public void Ordinary_ci_runs_the_deterministic_release_gates()
+    {
+        var ci = Read(".github/workflows/ci.yml");
+        foreach (var gate in new[]
+                 {
+                     "bash eng/check-release-metadata.sh",
+                     "bash eng/check-licenses.sh",
+                     "bash eng/test-release-helpers.sh"
+                 })
+        {
+            Assert.Contains(gate, ci, StringComparison.Ordinal);
+        }
+
+        // Ordinary CI must stay read-only; running the gates is verification, not mutation.
+        Assert.Contains("contents: read", ci, StringComparison.Ordinal);
+        Assert.DoesNotContain("contents: write", ci, StringComparison.Ordinal);
+        Assert.DoesNotContain("packages: write", ci, StringComparison.Ordinal);
+
+        // The release workflow keeps its own copy so a release never depends on ordinary CI having run.
+        var release = Read(".github/workflows/release.yml");
+        foreach (var gate in new[]
+                 {
+                     "bash eng/check-release-metadata.sh",
+                     "bash eng/check-licenses.sh",
+                     "bash eng/test-release-helpers.sh"
+                 })
+        {
+            Assert.Contains(gate, release, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void Release_identity_is_the_documented_dco_bot_identity()
     {
