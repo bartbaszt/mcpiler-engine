@@ -5,6 +5,7 @@ using MCPiler.Engine.Host.Authorization;
 using MCPiler.Engine.Host.Configuration;
 using MCPiler.Engine.Host.Hosting;
 using MCPiler.Engine.Host.Managed;
+using MCPiler.Engine.Host.ProjectionWorker;
 using MCPiler.Engine.Runtime;
 using MCPiler.Engine.Runtime.Managed;
 
@@ -116,7 +117,14 @@ public static class HostCommands
             return await ServeManagedAsync(binding, identity, progress, cancellationToken).ConfigureAwait(false);
         }
 
-        RuntimeStartResult result = EngineRuntime.Start(binding.Runtime);
+        // A manifest carrying a JMESPath projection can only be validated by compiling the
+        // expression in a confined worker, so the serving path supplies the one host that can.
+        // The validator allocates nothing until an expression actually needs classifying, so a
+        // deployment that serves no projection pays nothing for this.
+        using WorkerExpressionValidator expressions = new();
+
+        RuntimeStartResult result = EngineRuntime.Start(
+            binding.Runtime with { ExpressionValidator = expressions, ProjectionWorker = expressions });
         string report = identity + Environment.NewLine + StartupReport.Render(result, binding.Authorization, binding.ResponseCacheOperatorSecret is not null);
 
         if (!result.Started)
@@ -230,8 +238,12 @@ public static class HostCommands
                 "A managed binding without synchronization settings cannot serve. The configuration "
                 + "layer refuses this shape, so reaching here means a caller built a binding by hand.");
 
+        // Every generation this process activates is validated the same way a local mount is:
+        // a JMESPath expression is compiled in a confined worker, or the generation is refused.
+        using WorkerExpressionValidator expressions = new();
+
         if (!ManagedGenerationLoader.TryOpen(
-                binding.Runtime,
+                binding.Runtime with { ExpressionValidator = expressions, ProjectionWorker = expressions },
                 out ManagedGenerationLoader? loader,
                 out IReadOnlyList<StartupRefusal> loadRefusals))
         {
@@ -378,7 +390,12 @@ public static class HostCommands
             return refused;
         }
 
-        RuntimeStartResult result = EngineRuntime.Start(binding.Runtime);
+        // Inspection must answer the question serving would: it stands up the same worker
+        // validator, because a manifest refused at serve time must not inspect cleanly.
+        using WorkerExpressionValidator expressions = new();
+
+        RuntimeStartResult result = EngineRuntime.Start(
+            binding.Runtime with { ExpressionValidator = expressions, ProjectionWorker = expressions });
 
         if (!result.Started)
         {

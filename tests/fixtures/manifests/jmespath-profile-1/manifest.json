@@ -1,0 +1,209 @@
+{
+  "manifestFormatVersion": "0.3",
+  "sections": {
+    "server": {
+      "inline": {
+        "formatVersion": 2,
+        "name": "Styles",
+        "authenticationRequired": true,
+        "surfaces": [
+          {
+            "slug": "default",
+            "isDefault": true,
+            "operations": [
+              {
+                "operation": "search"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "policy": {
+      "inline": {
+        "formatVersion": 2,
+        "baseUrl": "https://styles.example.test/",
+        "allowedOrigins": [
+          "https://styles.example.test"
+        ],
+        "jmesPathCeiling": {
+          "maxExpressionBytes": 16384,
+          "maxInputNodes": 1000000,
+          "maxInputDepth": 64,
+          "maxResultNodes": 65536,
+          "maxResultDepth": 64,
+          "maxOutputBytes": 1048576,
+          "maxEvaluationMilliseconds": 60000
+        }
+      }
+    },
+    "credentials": {
+      "inline": {
+        "formatVersion": 3,
+        "credentials": [
+          {
+            "id": "x-api-key",
+            "scheme": "apiKey",
+            "slot": "X-Api-Key",
+            "location": "header",
+            "value": {
+              "fromEnv": "MCPILER_X_API_KEY"
+            }
+          },
+          {
+            "id": "authorization",
+            "scheme": "bearer",
+            "slot": "Authorization",
+            "value": {
+              "fromEnv": "MCPILER_AUTHORIZATION"
+            }
+          }
+        ]
+      }
+    },
+    "operations": {
+      "inline": {
+        "formatVersion": 1,
+        "operations": [
+          {
+            "key": "GET /search",
+            "method": "GET",
+            "path": "/search",
+            "parameters": [
+              {
+                "name": "region",
+                "in": "query",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              {
+                "name": "trace",
+                "in": "header",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              {
+                "name": "session",
+                "in": "cookie",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              {
+                "name": "filter",
+                "in": "query",
+                "style": "deepObject",
+                "explode": true,
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "colour": {
+                      "type": "string"
+                    },
+                    "size": {
+                      "type": "string",
+                      "maxLength": 4
+                    }
+                  }
+                }
+              },
+              {
+                "name": "tags",
+                "in": "query",
+                "style": "pipeDelimited",
+                "allowReserved": true,
+                "schema": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              }
+            ],
+            "responses": {
+              "200": {
+                "content": {
+                  "application/json": {
+                    "schema": {
+                      "type": "object"
+                    }
+                  }
+                },
+                "description": "Results"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "formatVersion": 4,
+        "operations": [
+          {
+            "slug": "search",
+            "name": "search",
+            "inputSchema": {
+              "type": "object"
+            },
+            "annotations": {
+              "readOnly": true,
+              "destructive": false,
+              "idempotent": false,
+              "openWorld": true
+            },
+            "binding": {
+              "type": "transformedHttp",
+              "base": {
+                "operation": "GET /search",
+                "credentialRef": [
+                  "x-api-key",
+                  "authorization"
+                ]
+              },
+              "outputProjection": {
+                "kind": "jmespath",
+                "languageVersion": 1,
+                "expression": "results[*].{id: id, name: name}",
+                "limits": {
+                  "maxExpressionBytes": 4096,
+                  "maxInputNodes": 100000,
+                  "maxInputDepth": 64,
+                  "maxResultNodes": 8192,
+                  "maxResultDepth": 32,
+                  "maxOutputBytes": 262144,
+                  "maxEvaluationMilliseconds": 10000
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "completeness": {
+    "algorithm": "sha256",
+    "value": "d87922ab4328a5aba22052f949654e5da92a402c06f19cc02314c35023489870"
+  },
+  "provenance": {
+    "connectorId": "7a1c0000000040008000000000000001",
+    "connectorRevisionId": "7a1c0000000040008000000000000002",
+    "sourceSpecRevisionId": "7a1c0000000040008000000000000003",
+    "effectiveDocumentHash": "0123456789abcdef",
+    "surfaces": {
+      "default": {
+        "publishedSurfaceId": "7a1c0000000040008000000000000004"
+      }
+    },
+    "operations": {
+      "search": {
+        "agentOperationId": "72616573686300000000000000000000",
+        "bindingId": "search"
+      }
+    }
+  }
+}

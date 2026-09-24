@@ -558,6 +558,7 @@ public sealed class PublishedSchemaTests
         new("PolicySectionReader.SectionMembers", "policy.schema.json", ["#"], PolicySectionReader.SectionMembers),
         new("PolicySectionReader.LimitMembers", "policy.schema.json", ["#/properties/limits"], PolicySectionReader.LimitMembers),
         new("PolicySectionReader.CeilingMembers", "policy.schema.json", ["#/properties/transformCeiling"], PolicySectionReader.CeilingMembers),
+        new("PolicySectionReader.JmesPathCeilingMembers", "policy.schema.json", ["#/properties/jmesPathCeiling"], PolicySectionReader.JmesPathCeilingMembers),
         new("PolicySectionReader.CompoundMembers", "policy.schema.json", ["#/properties/compound"], PolicySectionReader.CompoundMembers),
         new("PolicySectionReader.SchemaBoundMembers", "policy.schema.json", ["#/properties/schemaBounds"], PolicySectionReader.SchemaBoundMembers),
         new("PolicySectionReader.FileMembers", "policy.schema.json", ["#/properties/files"], PolicySectionReader.FileMembers),
@@ -597,6 +598,9 @@ public sealed class PublishedSchemaTests
         new("AgentSurfaceSectionReader.HttpBindingMembers", "agent-surface.schema.json", ["#/$defs/httpBinding"], AgentSurfaceSectionReader.HttpBindingMembers),
         new("AgentSurfaceSectionReader.HttpBaseMembers", "agent-surface.schema.json", ["#/$defs/transformedBinding/properties/base"], AgentSurfaceSectionReader.HttpBaseMembers),
         new("AgentSurfaceSectionReader.TransformedBindingMembers", "agent-surface.schema.json", ["#/$defs/transformedBinding"], AgentSurfaceSectionReader.TransformedBindingMembers),
+        new("AgentSurfaceSectionReader.ProjectionMembers", "agent-surface.schema.json", ["#/$defs/jmesPathProjection"], AgentSurfaceSectionReader.ProjectionMembers),
+        new("AgentSurfaceSectionReader.TransformProgramProjectionMembers", "agent-surface.schema.json", ["#/$defs/transformProgramProjection"], AgentSurfaceSectionReader.TransformProgramProjectionMembers),
+        new("AgentSurfaceSectionReader.JmesPathLimitMembers", "agent-surface.schema.json", ["#/$defs/jmesPathLimits"], AgentSurfaceSectionReader.JmesPathLimitMembers),
         new("AgentSurfaceSectionReader.CompoundBindingMembers", "agent-surface.schema.json", ["#/$defs/compoundBinding"], AgentSurfaceSectionReader.CompoundBindingMembers),
         new("AgentSurfaceSectionReader.StepMembers", "agent-surface.schema.json", ["#/$defs/step"], AgentSurfaceSectionReader.StepMembers),
         new(

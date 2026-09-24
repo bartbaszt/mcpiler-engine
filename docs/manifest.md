@@ -232,6 +232,7 @@ Everything else has a documented default and may be omitted:
 |---|---|
 | `limits` | `upstreamConnectTimeoutSeconds` 10, `upstreamRequestTimeoutSeconds` 100, `upstreamResponseSizeLimitBytes` 52428800, `redirectHopLimit` 5, `concurrency` 8, `mcpRequestSizeLimitBytes` 1048576 |
 | `transformCeiling` | `maxSteps` 64, `maxDepth` 32, `maxNodes` 8192, `maxOutputBytes` 262144, `maxArrayFanout` 1024 |
+| `jmesPathCeiling` | `maxExpressionBytes` 16384, `maxInputNodes` 1000000, `maxInputDepth` 64, `maxResultNodes` 65536, `maxResultDepth` 64, `maxOutputBytes` 1048576, `maxEvaluationMilliseconds` 60000 |
 | `compound` | `maxTotalResponseBytes` 104857600, `workflowTimeoutSeconds` 120 |
 | `schemaBounds` | `maxDepth` 32, `maxNodes` 2048, `maxPropertiesPerLevel` 256 |
 | `files` | `handleLifetimeSeconds` 86400, `uploadSizeLimitBytes` 104857600, `rejectMagicMismatch` true |
@@ -451,10 +452,18 @@ Bindings:
   The two are alternatives: a profiled execution states the profile and not a
   direct scope.
 - `{"type": "transformedHttp", "base": {...}, "inputProgram": {...},
-  "outputProgram": {...}}` — a call with a bounded argument or response
-  transformation. Input pointers address `/path`, `/query`, `/headers`,
+  "outputProjection": {"kind": "transformProgram", "program": {...}}}` - a call
+  with a bounded argument transformation and one optional output projection.
+  Input pointers address `/path`, `/query`, `/headers`,
   `/cookies`, `/body`, `/parts`; output pointers read `/status`, `/headers`,
   `/body`.
+- `{"type": "transformedHttp", "base": {...},
+  "outputProjection": {"kind": "jmespath", "languageVersion": 1,
+  "expression": "...", "limits": {...}}}` - a call whose output is a JMESPath
+  projection. The expression is compiled inside the same confined worker every
+  evaluation uses, so a manifest that carries one is readable only by an Engine
+  that can confine an evaluation. All seven limits are required and positive;
+  a limit above the compiled `policy.jmesPathCeiling` refuses the manifest.
 - `{"type": "compound", "steps": [...], "outputSelection": {...}}` — a workflow
   over other operations in this manifest. A step names another operation's slug.
   Nesting is refused. A step may read a previous step's response, never its own.
@@ -718,9 +727,10 @@ described.
 
 **Engine declares an explicit supported range.** This Engine supports manifest
 format `0.3`. Section versions are not uniform, because they move
-independently: `credentials` is at `3`, `agentSurface` is at `4`, `authentication`
-is at `1`, while `server`, `policy`, `operations`, `tools` and `search` are still
-at `1`. A section that omits `formatVersion` is accepted at whatever version this
+independently: `credentials` is at `4`, `agentSurface` is at `4`,
+`authentication` is at `2`, `server` and `policy` are at `2`, while `operations`,
+`tools` and `search` are still at `1`. A section that omits `formatVersion` is
+accepted at whatever version this
 Engine supports for it. A refusal always names the version observed and the range
 supported. Hostile input echoed for context is truncated.
 
@@ -833,6 +843,9 @@ The following codes are always warnings; every other code is an error:
 | `binding/compound-binding-version-unsupported` | An unsupported `bindingVersion`. |
 | `binding/type-unknown` | A binding type outside the vocabulary. |
 | `binding/transform-invalid` | A transformation program is not a valid program. |
+| `binding/projection-invalid` | A JMESPath projection is invalid, or could not be checked in confined isolation. |
+| `binding/projection-limit-out-of-range` | A projection limit is missing, non-positive, or above the compiled ceiling. |
+| `binding/projection-version-unsupported` | A projection declares a language version this Engine does not implement. |
 | `binding/pointer-root-not-allowed` | A pointer addresses a root not allowed in that position. |
 | `binding/credential-ref-unknown` | A `credentialRef` names a credential `credentials` does not declare. |
 | `binding/credential-basic-incomplete` | A binding references one half of a `basic` pair. |

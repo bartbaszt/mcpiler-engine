@@ -77,11 +77,20 @@ public sealed class HostBoundaryTests
     /// Capabilities Engine does not need, forbidden in the deployable as well as the library.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The deployable's exemption is from the rule about <em>where</em> host access may
     /// happen, not a grant of every host API. Engine starts no process and inspects no
     /// volume, and a second HTTP stack would be a second set of policy defaults - a connect
     /// callback and a redirect rule configured in one place and silently absent in the
     /// other.
+    /// </para>
+    /// <para>
+    /// The projection worker is the one recorded exception. An untrusted JMESPath evaluation
+    /// must happen in a separate, OS-confined, killable process, and a process is something
+    /// only the deployable can start. The exception is a directory rather than a file, and
+    /// the assertions below keep it from becoming a general grant: the directory must exist,
+    /// must contain the capability, and the rest of the deployable must still refuse it.
+    /// </para>
     /// </remarks>
     private static readonly string[] AlwaysForbiddenTokens =
     [
@@ -89,6 +98,12 @@ public sealed class HostBoundaryTests
         "Process.",
         "DriveInfo",
     ];
+
+    /// <summary>
+    /// The one directory permitted to start a process, by exact path.
+    /// </summary>
+    private const string WorkerAdapter = HostSourceRoot + "/ProjectionWorker/";
+
 
     [Fact]
     public void The_deployable_contains_no_product_decision()
@@ -128,8 +143,15 @@ public sealed class HostBoundaryTests
             var relative = EngineRepository.Relative(file);
             var text = File.ReadAllText(file);
 
+            // The projection worker adapter is the one place a process may be started, because
+            // untrusted evaluation happens in a separate OS-confined child. Every other
+            // always-forbidden token and every other file keeps the original rule.
+            string[] forbidden = IsWorkerAdapter(relative)
+                ? ["WebRequest", "DriveInfo"]
+                : AlwaysForbiddenTokens;
+
             offenders.AddRange(
-                AlwaysForbiddenTokens
+                forbidden
                     .Where(token => text.Contains(token, StringComparison.Ordinal))
                     .Select(token => $"{relative} -> {token}"));
         }
@@ -137,8 +159,46 @@ public sealed class HostBoundaryTests
         Assert.True(
             offenders.Count == 0,
             "Being the deployable is permission to open a socket and read a file, not permission to "
-                + "start a process, inspect a volume, or stand up a second HTTP stack. "
+                + "start a process, inspect a volume, or stand up a second HTTP stack. The projection "
+                + "worker adapter is the single recorded exception to the process rule. "
                 + $"Offending references: {string.Join("; ", offenders)}");
+    }
+
+    /// <summary>
+    /// The one process-starting exception names a directory that exists, contains the
+    /// capability, and does not spread to a sibling whose name merely starts the same way.
+    /// </summary>
+    /// <remarks>
+    /// A capability exception is only safe while it is checkable: a directory that quietly
+    /// emptied would leave the exemption granting nothing and hiding nothing, and a prefix that
+    /// matched a sibling would grant it to a component nobody decided about.
+    /// </remarks>
+    [Fact]
+    public void The_process_starting_exception_is_a_named_directory_that_still_contains_it()
+    {
+        Assert.True(
+            EngineRepository.Exists(WorkerAdapter + "ProjectionWorkerHost.cs"),
+            $"The projection worker adapter is missing from {WorkerAdapter}, so the process exception "
+                + "is either stale or granting nothing.");
+
+        Assert.False(
+            IsWorkerAdapter(HostSourceRoot + "/ProjectionWorkerExtra.cs"),
+            "The worker exemption covers a sibling file whose name merely starts the same way.");
+
+        Assert.False(
+            IsWorkerAdapter(HostSourceRoot + "/Cli/CommandLine.cs"),
+            "The worker exemption covers a file outside the named directory.");
+
+        var starting = HostSources()
+            .Select(EngineRepository.Relative)
+            .Where(IsWorkerAdapter)
+            .Where(path => File.ReadAllText(EngineRepository.Absolute(path)).Contains("Process.Start", StringComparison.Ordinal))
+            .ToList();
+
+        Assert.True(
+            starting.Count > 0,
+            "The exempted directory starts no process, so the rule it breaks is not the rule the "
+                + "exception exists for.");
     }
 
     /// <summary>
@@ -337,4 +397,8 @@ public sealed class HostBoundaryTests
             .Where(path => EngineRepository
                 .Relative(path)
                 .StartsWith(HostSourceRoot + "/", StringComparison.Ordinal));
+
+    /// <summary>Whether a host-relative path is inside the one process-starting adapter.</summary>
+    private static bool IsWorkerAdapter(string relative)
+        => relative.StartsWith(WorkerAdapter, StringComparison.Ordinal);
 }

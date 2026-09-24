@@ -297,7 +297,10 @@ public sealed class TransformExecutionTests : IDisposable
             baseUrl,
             limits,
             operation: operation,
-            binding: new TransformedHttpBinding(new HttpBinding(operation.Key), input, output));
+            binding: new TransformedHttpBinding(
+                new HttpBinding(operation.Key),
+                input,
+                output is null ? null : new ManifestOutputProjection.TransformProgramVariant(output)));
     }
 
     private static JsonObject Program(string direction, params JsonObject[] steps)

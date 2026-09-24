@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json.Nodes;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Manifest.Validation;
+using MCPiler.Engine.Runtime.Projection;
 
 namespace MCPiler.Engine.Manifest.Loading;
 
@@ -54,8 +55,29 @@ internal static class AgentSurfaceSectionReader
     // is omitted for exactly the same reason: it names the profile that governs the base's
     // credential, so a wrapper that declared a second one would be stating a choice nothing
     // reads.
+    //
+    // 'outputProgram' is likewise absent, and that one is a format change rather than a
+    // stylistic exclusion. Format 4 replaced it with the closed 'outputProjection' union, so a
+    // v4 document that still spells the old member is refused instead of being read as a
+    // synonym: two spellings for one meaning is how a producer and a consumer stop agreeing
+    // about which of them is authoritative.
     internal static readonly string[] TransformedBindingMembers =
-        ["type", "bindingId", "base", "inputProgram", "outputProgram"];
+        ["type", "bindingId", "base", "inputProgram", "outputProjection"];
+
+    internal static readonly string[] TransformProgramProjectionMembers = ["kind", "program"];
+
+    internal static readonly string[] ProjectionMembers = ["kind", "languageVersion", "expression", "limits"];
+
+    internal static readonly string[] JmesPathLimitMembers =
+    [
+        "maxExpressionBytes",
+        "maxInputNodes",
+        "maxInputDepth",
+        "maxResultNodes",
+        "maxResultDepth",
+        "maxOutputBytes",
+        "maxEvaluationMilliseconds",
+    ];
 
     internal static readonly string[] CompoundBindingMembers =
     [
@@ -502,10 +524,220 @@ internal static class AgentSurfaceSectionReader
             // The program grammar is a separate versioned contract with its own validator and
             // its own diagnostic codes, so it is carried verbatim and validated separately.
             context.Object(binding, "inputProgram", pointer),
-            context.Object(binding, "outputProgram", pointer))
+            ReadOutputProjection(binding, pointer, context))
         {
             BindingId = context.Text(binding, "bindingId", pointer) ?? slug,
         };
+    }
+
+    /// <summary>
+    /// Reads the closed output-projection union.
+    /// </summary>
+    /// <remarks>
+    /// The kind decides which members are permitted, so an object that carries both a program
+    /// and an expression is refused by the unknown-member rule rather than by a special case
+    /// here: the union has one shape per kind, and a document that mixes them is not one of
+    /// them. The declared limits stay verbatim; mapping them into the typed limits and checking
+    /// them against the policy ceiling belongs to the validator, which can report every
+    /// exceeding dimension at once.
+    /// </remarks>
+    private static ManifestOutputProjection? ReadOutputProjection(
+        JsonObject binding,
+        string pointer,
+        SectionReadContext context)
+    {
+        var projection = context.Object(binding, "outputProjection", pointer);
+
+        if (projection is null)
+        {
+            return null;
+        }
+
+        var projectionPointer = SectionReadContext.Child(pointer, "outputProjection");
+        var kind = context.RequiredText(projection, "kind", projectionPointer);
+
+        switch (kind)
+        {
+            case ManifestOutputProjection.TransformProgramVariant.KindName:
+            {
+                context.RejectUnknownMembers(
+                    projection,
+                    TransformProgramProjectionMembers,
+                    projectionPointer);
+
+                var program = context.Object(projection, "program", projectionPointer);
+
+                if (program is null)
+                {
+                    if (projection["program"] is null)
+                    {
+                        context.Error(
+                            ManifestDiagnosticCodes.MemberRequired,
+                            "A transformProgram projection requires a 'program'.",
+                            SectionReadContext.Child(projectionPointer, "program"));
+                    }
+
+                    return null;
+                }
+
+                return new ManifestOutputProjection.TransformProgramVariant(program);
+            }
+
+            case ManifestOutputProjection.JmesPathVariant.KindName:
+            {
+                context.RejectUnknownMembers(projection, ProjectionMembers, projectionPointer);
+
+                var languageVersion = context.Integer(projection, "languageVersion", projectionPointer);
+                var expression = context.Text(projection, "expression", projectionPointer);
+                var limits = context.Object(projection, "limits", projectionPointer);
+
+                if (languageVersion is null)
+                {
+                    if (projection["languageVersion"] is null)
+                    {
+                        context.Error(
+                            ManifestDiagnosticCodes.MemberRequired,
+                            "A jmespath projection requires a 'languageVersion'.",
+                            SectionReadContext.Child(projectionPointer, "languageVersion"));
+                    }
+
+                    return null;
+                }
+
+                if (expression is null || limits is null)
+                {
+                    if (projection["expression"] is null)
+                    {
+                        context.Error(
+                            ManifestDiagnosticCodes.MemberRequired,
+                            "A jmespath projection requires an 'expression'.",
+                            SectionReadContext.Child(projectionPointer, "expression"));
+                    }
+
+                    if (projection["limits"] is null)
+                    {
+                        context.Error(
+                            ManifestDiagnosticCodes.MemberRequired,
+                            "A jmespath projection requires explicit 'limits'.",
+                            SectionReadContext.Child(projectionPointer, "limits"));
+                    }
+
+                    return null;
+                }
+
+                context.RejectUnknownMembers(
+                    limits,
+                    JmesPathLimitMembers,
+                    SectionReadContext.Child(projectionPointer, "limits"));
+
+                if (ReadJmesPathLimits(limits, projectionPointer, context) is not { } effective)
+                {
+                    return null;
+                }
+
+                return new ManifestOutputProjection.JmesPathVariant(languageVersion.Value, expression, effective);
+            }
+
+            default:
+                context.Error(
+                    ManifestDiagnosticCodes.BindingTypeUnknown,
+                    $"'{DiagnosticText.Echo(kind)}' is not an output projection kind. Expected one of: {DiagnosticText.List(ManifestOutputProjection.KindNames)}.",
+                    SectionReadContext.Child(projectionPointer, "kind"));
+
+                return null;
+        }
+    }
+
+    /// <summary>
+    /// Reads the seven explicit limits, refusing absence, non-integers and non-positive values.
+    /// </summary>
+    /// <remarks>
+    /// Every dimension must be stated. An omitted dimension would have to fall back to a
+    /// default at load, and a projection whose effective limit depends on which Engine build
+    /// read it is not a projection with explicit limits — which is the only kind this format
+    /// declares. Whether the declared numbers fit the policy ceiling is checked separately.
+    /// </remarks>
+    private static JmesPathLimits? ReadJmesPathLimits(
+        JsonObject limits,
+        string projectionPointer,
+        SectionReadContext context)
+    {
+        var pointer = SectionReadContext.Child(projectionPointer, "limits");
+        var complete = true;
+
+        int expressionBytes = ReadPositiveCount("maxExpressionBytes");
+        long inputNodes = ReadPositiveBytes("maxInputNodes");
+        int inputDepth = ReadPositiveCount("maxInputDepth");
+        long resultNodes = ReadPositiveBytes("maxResultNodes");
+        int resultDepth = ReadPositiveCount("maxResultDepth");
+        long outputBytes = ReadPositiveBytes("maxOutputBytes");
+        int evaluationMilliseconds = ReadPositiveCount("maxEvaluationMilliseconds");
+
+        if (!complete)
+        {
+            return null;
+        }
+
+        return new JmesPathLimits(
+            expressionBytes,
+            inputNodes,
+            inputDepth,
+            resultNodes,
+            resultDepth,
+            outputBytes,
+            evaluationMilliseconds);
+
+        int ReadPositiveCount(string member)
+        {
+            var declared = context.Integer(limits, member, pointer);
+
+            if (declared is null)
+            {
+                if (limits[member] is null)
+                {
+                    context.Error(
+                        ManifestDiagnosticCodes.MemberRequired,
+                        $"A jmespath projection requires '{member}'.",
+                        SectionReadContext.Child(pointer, member));
+                }
+
+                complete = false;
+                return 0;
+            }
+
+            if (!context.RequireAtLeast(declared.Value, 1, member, pointer))
+            {
+                complete = false;
+            }
+
+            return declared.Value;
+        }
+
+        long ReadPositiveBytes(string member)
+        {
+            var declared = context.Integer64(limits, member, pointer);
+
+            if (declared is null)
+            {
+                if (limits[member] is null)
+                {
+                    context.Error(
+                        ManifestDiagnosticCodes.MemberRequired,
+                        $"A jmespath projection requires '{member}'.",
+                        SectionReadContext.Child(pointer, member));
+                }
+
+                complete = false;
+                return 0;
+            }
+
+            if (!context.RequireAtLeast(declared.Value, 1, member, pointer))
+            {
+                complete = false;
+            }
+
+            return declared.Value;
+        }
     }
 
     private static ManifestBinding? ReadCompoundBinding(

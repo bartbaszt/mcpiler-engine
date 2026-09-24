@@ -17,9 +17,10 @@ public sealed record AgentSurfaceSection(
     /// <summary>The section format version this model represents.</summary>
     /// <remarks>
     /// Version 2 added the credential scope an <c>http</c> binding authorizes. Version 3 adds
-    /// the authentication profile reference an <c>http</c> binding names. The section version
-    /// moved rather than only the root version because each change is confined to this
-    /// section's payload.
+    /// the authentication profile reference an <c>http</c> binding names. Version 4 replaces
+    /// the <c>outputProgram</c> member with the closed <c>outputProjection</c> union. The
+    /// section version moved rather than only the root version because each change is confined
+    /// to this section's payload.
     /// </remarks>
     public const int FormatVersion = 4;
 

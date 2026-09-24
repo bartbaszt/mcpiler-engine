@@ -22,6 +22,7 @@ internal static class PolicySectionReader
         "allowedOrigins",
         "limits",
         "transformCeiling",
+        "jmesPathCeiling",
         "compound",
         "schemaBounds",
         "files",
@@ -39,6 +40,17 @@ internal static class PolicySectionReader
 
     internal static readonly string[] CeilingMembers =
         ["maxSteps", "maxDepth", "maxNodes", "maxOutputBytes", "maxArrayFanout"];
+
+    internal static readonly string[] JmesPathCeilingMembers =
+    [
+        "maxExpressionBytes",
+        "maxInputNodes",
+        "maxInputDepth",
+        "maxResultNodes",
+        "maxResultDepth",
+        "maxOutputBytes",
+        "maxEvaluationMilliseconds",
+    ];
 
     internal static readonly string[] CompoundMembers =
         ["maxTotalResponseBytes", "workflowTimeoutSeconds"];
@@ -63,6 +75,7 @@ internal static class PolicySectionReader
         var origins = ReadAllowedOrigins(root, context);
         var limits = ReadLimits(root, context);
         var ceiling = ReadCeiling(root, context);
+        var jmesPathCeiling = ReadJmesPathCeiling(root, context);
         var compound = ReadCompound(root, context);
         var schemaBounds = ReadSchemaBounds(root, context);
         var files = ReadFiles(root, context);
@@ -77,6 +90,7 @@ internal static class PolicySectionReader
             origins,
             limits,
             ceiling,
+            jmesPathCeiling,
             compound,
             schemaBounds,
             files);
@@ -214,6 +228,30 @@ internal static class PolicySectionReader
             PositiveCount(ceiling, "maxNodes", pointer, defaults.MaxNodes, context),
             PositiveBytes(ceiling, "maxOutputBytes", pointer, defaults.MaxOutputBytes, context),
             PositiveCount(ceiling, "maxArrayFanout", pointer, defaults.MaxArrayFanout, context));
+    }
+
+    private static JmesPathCeiling? ReadJmesPathCeiling(JsonObject root, SectionReadContext context)
+    {
+        var ceiling = context.Object(root, "jmesPathCeiling", string.Empty);
+
+        if (ceiling is null)
+        {
+            return null;
+        }
+
+        const string pointer = "/jmesPathCeiling";
+        var defaults = JmesPathCeiling.Default;
+
+        context.RejectUnknownMembers(ceiling, JmesPathCeilingMembers, pointer);
+
+        return new JmesPathCeiling(
+            PositiveCount(ceiling, "maxExpressionBytes", pointer, defaults.MaxExpressionBytes, context),
+            PositiveBytes(ceiling, "maxInputNodes", pointer, defaults.MaxInputNodes, context),
+            PositiveCount(ceiling, "maxInputDepth", pointer, defaults.MaxInputDepth, context),
+            PositiveBytes(ceiling, "maxResultNodes", pointer, defaults.MaxResultNodes, context),
+            PositiveCount(ceiling, "maxResultDepth", pointer, defaults.MaxResultDepth, context),
+            PositiveBytes(ceiling, "maxOutputBytes", pointer, defaults.MaxOutputBytes, context),
+            PositiveCount(ceiling, "maxEvaluationMilliseconds", pointer, defaults.MaxEvaluationMilliseconds, context));
     }
 
     private static CompoundBounds? ReadCompound(JsonObject root, SectionReadContext context)

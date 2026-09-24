@@ -161,6 +161,17 @@ public sealed class SharedDefaultsTests
             Number("policy.schemaBounds.maxPropertiesPerLevel"),
             bounds.MaxPropertiesPerLevel);
 
+        var jmesPath = policy.EffectiveJmesPathCeiling;
+        Assert.Equal(Number("policy.jmesPathCeiling.maxExpressionBytes"), jmesPath.MaxExpressionBytes);
+        Assert.Equal(Number64("policy.jmesPathCeiling.maxInputNodes"), jmesPath.MaxInputNodes);
+        Assert.Equal(Number("policy.jmesPathCeiling.maxInputDepth"), jmesPath.MaxInputDepth);
+        Assert.Equal(Number64("policy.jmesPathCeiling.maxResultNodes"), jmesPath.MaxResultNodes);
+        Assert.Equal(Number("policy.jmesPathCeiling.maxResultDepth"), jmesPath.MaxResultDepth);
+        Assert.Equal(Number64("policy.jmesPathCeiling.maxOutputBytes"), jmesPath.MaxOutputBytes);
+        Assert.Equal(
+            Number("policy.jmesPathCeiling.maxEvaluationMilliseconds"),
+            jmesPath.MaxEvaluationMilliseconds);
+
         var files = policy.EffectiveFiles;
         Assert.Equal(
             Number("policy.files.handleLifetimeSeconds"),
@@ -363,6 +374,13 @@ public sealed class SharedDefaultsTests
         "policy.transformCeiling.maxNodes",
         "policy.transformCeiling.maxOutputBytes",
         "policy.transformCeiling.maxArrayFanout",
+        "policy.jmesPathCeiling.maxExpressionBytes",
+        "policy.jmesPathCeiling.maxInputNodes",
+        "policy.jmesPathCeiling.maxInputDepth",
+        "policy.jmesPathCeiling.maxResultNodes",
+        "policy.jmesPathCeiling.maxResultDepth",
+        "policy.jmesPathCeiling.maxOutputBytes",
+        "policy.jmesPathCeiling.maxEvaluationMilliseconds",
         "policy.compound.maxTotalResponseBytes",
         "policy.compound.workflowTimeoutSeconds",
         "policy.schemaBounds.maxDepth",

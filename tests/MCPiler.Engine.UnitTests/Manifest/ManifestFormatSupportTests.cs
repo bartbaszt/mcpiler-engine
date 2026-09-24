@@ -218,7 +218,7 @@ public sealed class SectionFormatVersionMatrixTests
     public void The_declared_section_versions_are_the_expected_ones()
     {
         Assert.Equal(2, ServerSection.FormatVersion);
-        Assert.Equal(1, PolicySection.FormatVersion);
+        Assert.Equal(2, PolicySection.FormatVersion);
         Assert.Equal(1, OperationsSection.FormatVersion);
         Assert.Equal(4, AgentSurfaceSection.FormatVersion);
         Assert.Equal(4, CredentialsSection.FormatVersion);
@@ -231,8 +231,8 @@ public sealed class SectionFormatVersionMatrixTests
     [InlineData("server", 2, true)]
     [InlineData("server", 1, false)]
     [InlineData("server", 3, false)]
-    [InlineData("policy", 1, true)]
-    [InlineData("policy", 2, false)]
+    [InlineData("policy", 2, true)]
+    [InlineData("policy", 1, false)]
     [InlineData("operations", 1, true)]
     [InlineData("operations", 2, false)]
     [InlineData("agentSurface", 4, true)]

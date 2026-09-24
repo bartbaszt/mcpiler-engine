@@ -139,6 +139,65 @@ public static class PolicyNarrowing
                 TransformCeiling = policy.EffectiveTransformCeiling with { MaxArrayFanout = (int)value },
             }),
         new(
+            new("JmesPathMaxExpressionBytes", typeof(JmesPathCeiling), nameof(JmesPathCeiling.MaxExpressionBytes), LimitUnit.Count),
+            static policy => policy.EffectiveJmesPathCeiling.MaxExpressionBytes,
+            static overrides => overrides.JmesPathMaxExpressionBytes,
+            static (policy, value) => policy with
+            {
+                JmesPathCeiling = policy.EffectiveJmesPathCeiling with { MaxExpressionBytes = (int)value },
+            }),
+        new(
+            new("JmesPathMaxInputNodes", typeof(JmesPathCeiling), nameof(JmesPathCeiling.MaxInputNodes), LimitUnit.Count),
+            static policy => policy.EffectiveJmesPathCeiling.MaxInputNodes,
+            static overrides => overrides.JmesPathMaxInputNodes,
+            static (policy, value) => policy with
+            {
+                JmesPathCeiling = policy.EffectiveJmesPathCeiling with { MaxInputNodes = value },
+            }),
+        new(
+            new("JmesPathMaxInputDepth", typeof(JmesPathCeiling), nameof(JmesPathCeiling.MaxInputDepth), LimitUnit.Count),
+            static policy => policy.EffectiveJmesPathCeiling.MaxInputDepth,
+            static overrides => overrides.JmesPathMaxInputDepth,
+            static (policy, value) => policy with
+            {
+                JmesPathCeiling = policy.EffectiveJmesPathCeiling with { MaxInputDepth = (int)value },
+            }),
+        new(
+            new("JmesPathMaxResultNodes", typeof(JmesPathCeiling), nameof(JmesPathCeiling.MaxResultNodes), LimitUnit.Count),
+            static policy => policy.EffectiveJmesPathCeiling.MaxResultNodes,
+            static overrides => overrides.JmesPathMaxResultNodes,
+            static (policy, value) => policy with
+            {
+                JmesPathCeiling = policy.EffectiveJmesPathCeiling with { MaxResultNodes = value },
+            }),
+        new(
+            new("JmesPathMaxResultDepth", typeof(JmesPathCeiling), nameof(JmesPathCeiling.MaxResultDepth), LimitUnit.Count),
+            static policy => policy.EffectiveJmesPathCeiling.MaxResultDepth,
+            static overrides => overrides.JmesPathMaxResultDepth,
+            static (policy, value) => policy with
+            {
+                JmesPathCeiling = policy.EffectiveJmesPathCeiling with { MaxResultDepth = (int)value },
+            }),
+        new(
+            new("JmesPathMaxOutputBytes", typeof(JmesPathCeiling), nameof(JmesPathCeiling.MaxOutputBytes), LimitUnit.Bytes),
+            static policy => policy.EffectiveJmesPathCeiling.MaxOutputBytes,
+            static overrides => overrides.JmesPathMaxOutputBytes,
+            static (policy, value) => policy with
+            {
+                JmesPathCeiling = policy.EffectiveJmesPathCeiling with { MaxOutputBytes = value },
+            }),
+        new(
+            new("JmesPathMaxEvaluationMilliseconds", typeof(JmesPathCeiling), nameof(JmesPathCeiling.MaxEvaluationMilliseconds), LimitUnit.Duration),
+            static policy => TimeSpan.FromMilliseconds(policy.EffectiveJmesPathCeiling.MaxEvaluationMilliseconds).Ticks,
+            static overrides => overrides.JmesPathMaxEvaluationMilliseconds?.Ticks,
+            static (policy, value) => policy with
+            {
+                JmesPathCeiling = policy.EffectiveJmesPathCeiling with
+                {
+                    MaxEvaluationMilliseconds = (int)TimeSpan.FromTicks(value).TotalMilliseconds,
+                },
+            }),
+        new(
             new("CompoundMaxTotalResponseBytes", typeof(CompoundBounds), nameof(CompoundBounds.MaxTotalResponseBytes), LimitUnit.Bytes),
             static policy => policy.EffectiveCompound.MaxTotalResponseBytes,
             static overrides => overrides.CompoundMaxTotalResponseBytes,

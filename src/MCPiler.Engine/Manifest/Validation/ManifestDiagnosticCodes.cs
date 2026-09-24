@@ -204,6 +204,33 @@ public static class ManifestDiagnosticCodes
     /// <summary>A transformation program is invalid. Carries the underlying transform code.</summary>
     public const string TransformInvalid = "binding/transform-invalid";
 
+    /// <summary>
+    /// A JMESPath projection is invalid or cannot be checked in confined isolation.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// One code covers every way a projection can be wrong, for the same reason the transform
+    /// code does: the profile's own reason travels beside it in <c>ProgramCode</c>, and an
+    /// operator is told "this projection is refused, and here is the profile reason" rather
+    /// than a different manifest code per family.
+    /// </para>
+    /// <para>
+    /// It also covers an unavailable check. A host that cannot confine an evaluation reports
+    /// that here and the manifest is refused, because validating an expression by interpreting
+    /// it in the serving process is exactly what the profile forbids — an unvalidated manifest
+    /// is a worse outcome than a refused one.
+    /// </para>
+    /// </remarks>
+    public const string ProjectionInvalid = "binding/projection-invalid";
+
+    /// <summary>
+    /// A projection's declared limits are missing, non-positive, or above the policy ceiling.
+    /// </summary>
+    public const string ProjectionLimitOutOfRange = "binding/projection-limit-out-of-range";
+
+    /// <summary>A projection declares a language version this Engine does not implement.</summary>
+    public const string ProjectionVersionUnsupported = "binding/projection-version-unsupported";
+
     /// <summary>A mapping pointer does not start at a permitted scope root.</summary>
     public const string PointerRootNotAllowed = "binding/pointer-root-not-allowed";
 
@@ -556,6 +583,9 @@ public static class ManifestDiagnosticCodes
         CompoundBindingVersionUnsupported,
         BindingTypeUnknown,
         TransformInvalid,
+        ProjectionInvalid,
+        ProjectionLimitOutOfRange,
+        ProjectionVersionUnsupported,
         PointerRootNotAllowed,
         BindingCredentialRefUnknown,
         BindingCredentialBasicIncomplete,

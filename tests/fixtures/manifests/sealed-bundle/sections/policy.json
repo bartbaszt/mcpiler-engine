@@ -1,5 +1,5 @@
 {
-  "formatVersion": 1,
+  "formatVersion": 2,
   "baseUrl": "https://widgets.example.com/api",
   "allowedOrigins": ["https://widgets.example.com"],
   "limits": {
@@ -32,3 +32,4 @@
     "rejectMagicMismatch": true
   }
 }
+

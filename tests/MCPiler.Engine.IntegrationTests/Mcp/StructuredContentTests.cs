@@ -12,6 +12,8 @@ using System.Threading.Tasks;
 
 using MCPiler.Engine.Mcp;
 using MCPiler.Engine.Runtime;
+using MCPiler.Engine.Host.ProjectionWorker;
+using MCPiler.Engine.Runtime.Projection;
 
 using Microsoft.AspNetCore.Http;
 
@@ -319,6 +321,103 @@ public sealed class StructuredContentTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task A_projected_value_is_the_value_output_schema_validation_receives()
+    {
+        List<RuntimeDiagnostic> diagnostics = [];
+        await using LoopbackHost upstream = await Respond("""{"data":{"value":42},"noise":1}""");
+        using WorkerExpressionValidator worker = ProjectionWorker();
+        (ServedEngine engine, _) = await ServeWithJmesPathManifestAsync(
+            upstream.Address,
+            expression: "data",
+            outputSchema: ObjectSchema,
+            worker,
+            diagnostics.Add);
+        await using (engine)
+        {
+            using McpHttpSession session = await McpHttpSession.OpenAsync(
+                engine.At("/api/full"),
+                Token,
+                "2026-07-28");
+
+            _ = await session.RequestAsync("tools/list", 2, Token);
+            McpExchange called = await session.CallAsync("read-value", "{}", 3, Token);
+            JsonElement result = Result(called);
+
+            Assert.False(result.TryGetProperty("isError", out _));
+            Assert.Equal("""{"value":42}""", Text(called));
+            Assert.Equal("""{"value":42}""", result.GetProperty("structuredContent").GetRawText());
+            Assert.Empty(diagnostics);
+        }
+    }
+
+    [Fact]
+    public async Task A_projected_schema_mismatch_keeps_existing_text_and_diagnostic_behavior()
+    {
+        List<RuntimeDiagnostic> diagnostics = [];
+        await using LoopbackHost upstream = await Respond("""{"data":{"value":"wrong"}}""");
+        using WorkerExpressionValidator worker = ProjectionWorker();
+        (ServedEngine engine, string manifest) = await ServeWithJmesPathManifestAsync(
+            upstream.Address,
+            expression: "data",
+            outputSchema: ObjectSchema,
+            worker,
+            diagnostics.Add);
+        await using (engine)
+        {
+            using McpHttpSession session = await McpHttpSession.OpenAsync(
+                engine.At("/api/full"),
+                Token,
+                "2026-07-28");
+
+            _ = await session.RequestAsync("tools/list", 2, Token);
+            McpExchange called = await session.CallAsync("read-value", "{}", 3, Token);
+            JsonElement result = Result(called);
+
+            Assert.False(result.TryGetProperty("isError", out _));
+            Assert.False(result.TryGetProperty("structuredContent", out _));
+            Assert.Equal("""{"value":"wrong"}""", Text(called));
+
+            RuntimeDiagnostic diagnostic = Assert.Single(diagnostics);
+            Assert.Equal("mcp/structured-content-invalid", diagnostic.Code);
+            Assert.Equal(manifest, diagnostic.Manifest);
+            Assert.Equal("full", diagnostic.Surface);
+            Assert.Equal("read-value", diagnostic.Operation);
+            Assert.Contains("properties/value", diagnostic.SchemaLocation, StringComparison.Ordinal);
+            Assert.DoesNotContain("wrong", diagnostic.ToString(), StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public async Task A_projection_failure_is_not_relabelled_as_output_schema_mismatch()
+    {
+        List<RuntimeDiagnostic> diagnostics = [];
+        await using LoopbackHost upstream = await Respond("""{"data":{"value":42}}""");
+        using WorkerExpressionValidator worker = ProjectionWorker();
+        (ServedEngine engine, _) = await ServeWithJmesPathManifestAsync(
+            upstream.Address,
+            expression: "sort(@)",
+            outputSchema: ObjectSchema,
+            worker,
+            diagnostics.Add);
+        await using (engine)
+        {
+            using McpHttpSession session = await McpHttpSession.OpenAsync(
+                engine.At("/api/full"),
+                Token,
+                "2026-07-28");
+
+            _ = await session.RequestAsync("tools/list", 2, Token);
+            McpExchange called = await session.CallAsync("read-value", "{}", 3, Token);
+            JsonElement result = Result(called);
+
+            Assert.True(result.GetProperty("isError").GetBoolean());
+            Assert.False(result.TryGetProperty("structuredContent", out _));
+            Assert.Contains("jmespath-runtime-invalid-type", Text(called), StringComparison.Ordinal);
+            Assert.Empty(diagnostics);
+        }
+    }
+
     private async Task<ServedEngine> ServeAsync(
         Uri upstream,
         string advertise,
@@ -352,6 +451,140 @@ public sealed class StructuredContentTests : IDisposable
 
         return (engine, manifest);
     }
+
+    private async Task<(ServedEngine Engine, string Manifest)> ServeWithJmesPathManifestAsync(
+        Uri upstream,
+        string expression,
+        string outputSchema,
+        WorkerExpressionValidator worker,
+        Action<RuntimeDiagnostic>? diagnostics)
+    {
+        string name = "jmespath-manifest-" + Guid.NewGuid().ToString("N");
+        string manifest = ServedManifests.Write(
+            _root,
+            name,
+            JmesPathManifest(upstream, expression, outputSchema));
+        string store = Directory.CreateDirectory(Path.Combine(_root, "files-" + name)).FullName;
+        var options = new RuntimeOptions([new MountRequest("/api", manifest)], store)
+        {
+            ExpressionValidator = worker,
+            ProjectionWorker = worker,
+        };
+
+        ServedEngine engine = await ServedEngine.StartAsync(
+            options,
+            Token,
+            diagnostics: diagnostics);
+
+        return (engine, manifest);
+    }
+
+    private static WorkerExpressionValidator ProjectionWorker()
+    {
+        string directory = AppContext.BaseDirectory;
+        string apphost = Path.Combine(directory, OperatingSystem.IsWindows() ? "mcpiler-engine.exe" : "mcpiler-engine");
+
+        Assert.True(File.Exists(apphost), $"The Engine apphost is missing from {directory}.");
+
+        return new WorkerExpressionValidator(
+            WorkerPoolOptions.Default with { Launch = new WorkerLaunch(apphost, null) });
+    }
+
+    private static string JmesPathManifest(Uri upstream, string expression, string outputSchema)
+        => $$"""
+        {
+          "manifestFormatVersion": "0.3",
+          "sections": {
+            "server": {
+              "inline": {
+                "formatVersion": 2,
+                "name": "Structured JMESPath API",
+                "authenticationRequired": false,
+                "surfaces": [
+                  {
+                    "slug": "full",
+                    "isDefault": true,
+                    "outputSchemas": true,
+                    "operations": [ { "operation": "read-value" } ]
+                  }
+                ]
+              }
+            },
+            "policy": {
+              "inline": {
+                "formatVersion": 2,
+                "baseUrl": "{{upstream.AbsoluteUri}}",
+                "jmesPathCeiling": {
+                  "maxExpressionBytes": 16384,
+                  "maxInputNodes": 1000000,
+                  "maxInputDepth": 64,
+                  "maxResultNodes": 65536,
+                  "maxResultDepth": 64,
+                  "maxOutputBytes": 1048576,
+                  "maxEvaluationMilliseconds": 60000
+                }
+              }
+            },
+            "operations": {
+              "inline": {
+                "formatVersion": 1,
+                "operations": [
+                  {
+                    "key": "GET /value",
+                    "method": "GET",
+                    "path": "/value",
+                    "responses": {
+                      "200": {
+                        "content": {
+                          "application/json": {
+                            "schema": { "type": "object" }
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            },
+            "agentSurface": {
+              "inline": {
+                "formatVersion": 4,
+                "operations": [
+                  {
+                    "slug": "read-value",
+                    "name": "Read value",
+                    "inputSchema": { "type": "object" },
+                    "outputSchema": {{outputSchema}},
+                    "outputSchemaPolicy": {
+                      "generate": true,
+                      "advertise": "auto",
+                      "useInternally": false
+                    },
+                    "binding": {
+                      "type": "transformedHttp",
+                      "base": { "operation": "GET /value" },
+                      "outputProjection": {
+                        "kind": "jmespath",
+                        "languageVersion": 1,
+                        "expression": {{JsonSerializer.Serialize(expression)}},
+                        "limits": {
+                          "maxExpressionBytes": 4096,
+                          "maxInputNodes": 100000,
+                          "maxInputDepth": 64,
+                          "maxResultNodes": 8192,
+                          "maxResultDepth": 32,
+                          "maxOutputBytes": 262144,
+                          "maxEvaluationMilliseconds": 10000
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+        """;
 
     private static string Manifest(
         Uri upstream,

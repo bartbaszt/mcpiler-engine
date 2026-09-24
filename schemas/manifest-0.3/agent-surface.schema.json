@@ -155,7 +155,59 @@
           }
         },
         "inputProgram": { "type": ["object", "null"] },
-        "outputProgram": { "type": ["object", "null"] }
+        "outputProjection": { "$ref": "#/$defs/outputProjection" }
+      }
+    },
+    "outputProjection": {
+      "$comment": "Closed union. Absence is passthrough and is the only way to say it; there is no 'none' kind, and no kind contains another.",
+      "type": "object",
+      "required": ["kind"],
+      "oneOf": [
+        { "$ref": "#/$defs/transformProgramProjection" },
+        { "$ref": "#/$defs/jmesPathProjection" }
+      ]
+    },
+    "transformProgramProjection": {
+      "type": "object",
+      "required": ["kind", "program"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "transformProgram" },
+        "program": { "type": "object" }
+      }
+    },
+    "jmesPathProjection": {
+      "type": "object",
+      "required": ["kind", "languageVersion", "expression", "limits"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "jmespath" },
+        "languageVersion": { "const": 1 },
+        "expression": { "type": "string", "minLength": 1 },
+        "limits": { "$ref": "#/$defs/jmesPathLimits" }
+      }
+    },
+    "jmesPathLimits": {
+      "$comment": "All seven dimensions are required and positive. An omitted dimension would fall back to a build-dependent default, which is not an explicit limit.",
+      "type": "object",
+      "required": [
+        "maxExpressionBytes",
+        "maxInputNodes",
+        "maxInputDepth",
+        "maxResultNodes",
+        "maxResultDepth",
+        "maxOutputBytes",
+        "maxEvaluationMilliseconds"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "maxExpressionBytes": { "type": "integer", "minimum": 1 },
+        "maxInputNodes": { "type": "integer", "minimum": 1 },
+        "maxInputDepth": { "type": "integer", "minimum": 1 },
+        "maxResultNodes": { "type": "integer", "minimum": 1 },
+        "maxResultDepth": { "type": "integer", "minimum": 1 },
+        "maxOutputBytes": { "type": "integer", "minimum": 1 },
+        "maxEvaluationMilliseconds": { "type": "integer", "minimum": 1 }
       }
     },
     "compoundBinding": {

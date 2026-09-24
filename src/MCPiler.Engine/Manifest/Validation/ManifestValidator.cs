@@ -2,8 +2,10 @@ using System.Globalization;
 using System.Text.Json.Nodes;
 
 using MCPiler.Engine.Authentication.OAuth1;
+using MCPiler.Engine.JmesPath;
 using MCPiler.Engine.Manifest.Loading;
 using MCPiler.Engine.Manifest.Model;
+using MCPiler.Engine.Runtime.Projection;
 using MCPiler.Engine.Transform;
 
 namespace MCPiler.Engine.Manifest.Validation;
@@ -29,7 +31,15 @@ public static class ManifestValidator
     /// <summary>
     /// Returns every cross-section problem in <paramref name="manifest"/>.
     /// </summary>
-    public static IReadOnlyList<ManifestDiagnostic> Validate(ManifestDocument manifest)
+    /// <param name="manifest">The document to validate.</param>
+    /// <param name="expressionValidator">
+    /// How to classify a JMESPath expression without interpreting it here. A host that can
+    /// confine an evaluation supplies one; when it is absent, a manifest carrying a JMESPath
+    /// projection is refused rather than checked in process.
+    /// </param>
+    public static IReadOnlyList<ManifestDiagnostic> Validate(
+        ManifestDocument manifest,
+        IProjectionExpressionValidator? expressionValidator = null)
     {
         ArgumentNullException.ThrowIfNull(manifest);
 
@@ -49,9 +59,132 @@ public static class ManifestValidator
         ValidateSchemaReferences(manifest, diagnostics);
         ValidateDeclaredTools(manifest, diagnostics);
         ValidateTransformPrograms(manifest, diagnostics);
+        ValidateJmesPathProjections(manifest, expressionValidator, diagnostics);
 
         return diagnostics;
     }
+
+    /// <summary>
+    /// Validates every JMESPath projection against the policy ceiling and the profile.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Every projection is judged against <em>two</em> ceilings and the smaller wins: the
+    /// compiled <c>jmesPathCeiling</c> and, for the deadline, nothing else — the declared
+    /// limits are the projection's own statement and must fit inside what the deployment
+    /// permits. Widening is a refusal rather than a clamp because a clamp would leave an author
+    /// believing a large limit is in force where a smaller one is.
+    /// </para>
+    /// <para>
+    /// Validity goes through <see cref="IProjectionExpressionValidator"/>, which runs the
+    /// expression inside the same confined worker every evaluation uses. When no validator is
+    /// supplied — a caller assembling a manifest in memory, or a host that cannot confine — the
+    /// projection is refused rather than interpreted here: a manifest admitted because nobody
+    /// checked it is the one failure mode this rule exists to prevent. A validator that reports
+    /// <see cref="ProjectionExpressionValidityStatus.Unavailable"/> is refused for the same
+    /// reason.
+    /// </para>
+    /// <para>
+    /// Only compile families are treated as invalid. A <c>runtime/invalid-type</c> failure
+    /// against the placeholder says nothing about the expression's validity — <c>keys(@)</c>
+    /// fails that way against a non-object placeholder and is a perfectly good projection — so
+    /// the validator's own classification is what decides, and the runtime families arrive here
+    /// already collapsed into <c>Valid</c>.
+    /// </para>
+    /// </remarks>
+    private static void ValidateJmesPathProjections(
+        ManifestDocument manifest,
+        IProjectionExpressionValidator? validator,
+        List<ManifestDiagnostic> diagnostics)
+    {
+        JmesPathCeiling ceiling = manifest.Policy.EffectiveJmesPathCeiling;
+
+        for (int index = 0; index < manifest.AgentSurface.Operations.Count; index++)
+        {
+            AgentOperationEntry operation = manifest.AgentSurface.Operations[index];
+
+            if (operation.Binding is not TransformedHttpBinding
+                {
+                    Output: ManifestOutputProjection.JmesPathVariant projection,
+                })
+            {
+                continue;
+            }
+
+            string binding = JsonPointer.Build("operations", Segment(index), "binding");
+            string projectionPointer = binding + JsonPointer.Build("outputProjection");
+
+            if (projection.LanguageVersion != JmesPathProfile.SupportedLanguageVersion)
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.ProjectionVersionUnsupported,
+                    string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"JMESPath language version {projection.LanguageVersion} is not supported. This Engine implements version {JmesPathProfile.SupportedLanguageVersion}."),
+                    section: ManifestSectionName.AgentSurface,
+                    pointer: projectionPointer + JsonPointer.Build("languageVersion")));
+
+                continue;
+            }
+
+            var exceeds = projection.Limits.ExceedingDimensions(ToLimits(ceiling));
+
+            foreach (string dimension in exceeds)
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.ProjectionLimitOutOfRange,
+                    $"The projection's '{dimension}' exceeds the compiled ceiling for it.",
+                    section: ManifestSectionName.AgentSurface,
+                    pointer: projectionPointer + JsonPointer.Build("limits", dimension)));
+            }
+
+            if (exceeds.Count > 0)
+            {
+                continue;
+            }
+
+            if (validator is null)
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.ProjectionInvalid,
+                    "The JMESPath expression was not validated: this host can only classify a "
+                    + "projection inside a confined worker, and none is available. Refusing the "
+                    + "manifest rather than interpreting the expression in the serving process.",
+                    section: ManifestSectionName.AgentSurface,
+                    pointer: projectionPointer + JsonPointer.Build("expression")));
+
+                continue;
+            }
+
+            ProjectionExpressionValidity validity = validator.Validate(projection.Expression, projection.Limits);
+
+            if (validity.Status == ProjectionExpressionValidityStatus.Valid)
+            {
+                continue;
+            }
+
+            diagnostics.Add(new ManifestDiagnostic(
+                ManifestDiagnosticCodes.ProjectionInvalid,
+                DiagnosticSeverity.Error,
+                validity.Failure?.Message ?? "The JMESPath expression is not valid.",
+                ManifestSectionName.AgentSurface,
+                projectionPointer + JsonPointer.Build("expression"))
+            {
+                ProgramCode = validity.Failure?.Code,
+            });
+        }
+    }
+
+    /// <summary>The policy ceiling as the typed limits a projection declares.</summary>
+    private static JmesPathLimits ToLimits(JmesPathCeiling ceiling)
+        => new(
+            ceiling.MaxExpressionBytes,
+            ceiling.MaxInputNodes,
+            ceiling.MaxInputDepth,
+            ceiling.MaxResultNodes,
+            ceiling.MaxResultDepth,
+            ceiling.MaxOutputBytes,
+            ceiling.MaxEvaluationMilliseconds);
 
     /// <summary>
     /// Authentication profile identity, credential references, and kind compatibility.
@@ -387,9 +520,9 @@ public static class ManifestValidator
                     yield return (JsonPointer.Build("inputProgram"), input, TransformDirection.Input);
                 }
 
-                if (transformed.OutputProgram is { } output)
+                if (transformed.Output is ManifestOutputProjection.TransformProgramVariant output)
                 {
-                    yield return (JsonPointer.Build("outputProgram"), output, TransformDirection.Output);
+                    yield return (JsonPointer.Build("outputProjection", "program"), output.Program, TransformDirection.Output);
                 }
 
                 break;

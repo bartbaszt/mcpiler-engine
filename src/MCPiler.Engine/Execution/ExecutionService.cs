@@ -14,6 +14,7 @@ using MCPiler.Engine.Execution.Files;
 using MCPiler.Engine.Files;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Runtime;
+using MCPiler.Engine.Runtime.Projection;
 using MCPiler.Engine.Transform;
 
 namespace MCPiler.Engine.Execution;
@@ -120,6 +121,8 @@ public sealed class ExecutionService
     /// </remarks>
     private readonly byte[] _identityKey;
 
+    private readonly IProjectionWorker? _projections;
+
     /// <summary>Creates a service over the supplied ports.</summary>
     /// <param name="transport">How an exchange reaches an upstream.</param>
     /// <param name="secrets">How credential references become values.</param>
@@ -131,12 +134,18 @@ public sealed class ExecutionService
     /// The dynamic-auth runtime. With none configured, a manifest whose bindings reference an
     /// authentication profile is refused rather than executed unauthenticated.
     /// </param>
+    /// <param name="projections">
+    /// The confined evaluator a JMESPath output projection runs in. With none configured, an
+    /// operation declaring JMESPath is refused at invocation: the evaluator is never called in
+    /// this process, so a missing worker is a refusal rather than a degraded evaluation.
+    /// </param>
     public ExecutionService(
         IUpstreamTransport transport,
         IManifestSecretResolver secrets,
         FileHandleStore? files = null,
-        AuthenticationRuntime? authentication = null)
-        : this(transport, secrets, files, authentication, responseCache: null, identityKey: null)
+        AuthenticationRuntime? authentication = null,
+        IProjectionWorker? projections = null)
+        : this(transport, secrets, files, authentication, responseCache: null, identityKey: null, projections)
     {
     }
 
@@ -147,7 +156,8 @@ public sealed class ExecutionService
         FileHandleStore? files,
         AuthenticationRuntime? authentication,
         ResponseCache? responseCache,
-        byte[]? identityKey)
+        byte[]? identityKey,
+        IProjectionWorker? projections = null)
     {
         ArgumentNullException.ThrowIfNull(transport);
         ArgumentNullException.ThrowIfNull(secrets);
@@ -158,6 +168,7 @@ public sealed class ExecutionService
         _authentication = authentication;
         _responseCache = responseCache;
         _identityKey = identityKey ?? CacheIdentity.NewKey();
+        _projections = projections;
     }
 
     /// <summary>The optional mount cache; null means this library execution is uncached.</summary>
@@ -730,19 +741,36 @@ public sealed class ExecutionService
                 return outcome;
             }
 
-            if (!TransformStage.TryOutput(manifest, entry, outcome, out byte[]? body, out transformFailure))
+            // Where TransformStage.TryOutput used to run. The stage covers both projection kinds:
+            // an absent projection, a TransformProgram, or a confined JMESPath evaluation.
+            OutputProjectionResult projection = await OutputProjectionStage
+                .ApplyAsync(
+                    manifest,
+                    entry,
+                    operation,
+                    outcome,
+                    _projections,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            if (!projection.Succeeded)
             {
                 observation.Reason = ResponseCacheDecisionReason.Failed;
                 return outcome with
                 {
-                    Failure = ExecutionFailureKind.Transformation,
-                    FailureReason = transformFailure,
+                    Failure = projection.FailureKind,
+                    FailureReason = projection.FailureReason,
+
+                    // A structured description where the projection produced one, so a caller can
+                    // read the stable class — and whether it is a machine-dependent operational
+                    // outcome — instead of parsing a sentence.
+                    FailureDetail = projection.FailureDetail,
                 };
             }
 
-            EngineExecutionResult transformed = ReferenceEquals(body, outcome.ResponseBody)
+            EngineExecutionResult transformed = ReferenceEquals(projection.Body, outcome.ResponseBody)
                 ? outcome
-                : outcome with { ResponseBody = body };
+                : outcome with { ResponseBody = projection.Body };
 
             ResponseCacheEnvelope? admitted = null;
             if (cachedEnvelope is null
