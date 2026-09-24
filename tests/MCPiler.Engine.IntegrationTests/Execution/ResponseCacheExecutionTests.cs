@@ -47,7 +47,7 @@ public sealed class ResponseCacheExecutionTests
             operation: operation,
             binding: new TransformedHttpBinding(
                 new HttpBinding(operation.Key),
-                OutputProgram: OutputProjection()),
+                Output: new ManifestOutputProjection.TransformProgramVariant(OutputProjection())),
             responseCache: new ResponseCachePolicySettings(300));
 
         using CachedHarness harness = new();

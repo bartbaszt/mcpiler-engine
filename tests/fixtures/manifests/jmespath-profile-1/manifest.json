@@ -39,7 +39,7 @@
     },
     "credentials": {
       "inline": {
-        "formatVersion": 3,
+        "formatVersion": 4,
         "credentials": [
           {
             "id": "x-api-key",
@@ -187,7 +187,7 @@
   },
   "completeness": {
     "algorithm": "sha256",
-    "value": "d87922ab4328a5aba22052f949654e5da92a402c06f19cc02314c35023489870"
+    "value": "8dffb2bc97e2251d623dad1a34fbff06d2daf104d1d7f581c59c4dc99f6a250f"
   },
   "provenance": {
     "connectorId": "7a1c0000000040008000000000000001",

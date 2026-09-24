@@ -21,11 +21,20 @@
     },
     "policy": {
       "inline": {
-        "formatVersion": 1,
+        "formatVersion": 2,
         "baseUrl": "https://styles.example.test/",
         "allowedOrigins": [
           "https://styles.example.test"
-        ]
+        ],
+        "jmesPathCeiling": {
+          "maxExpressionBytes": 16384,
+          "maxInputNodes": 1000000,
+          "maxInputDepth": 64,
+          "maxResultNodes": 65536,
+          "maxResultDepth": 64,
+          "maxOutputBytes": 1048576,
+          "maxEvaluationMilliseconds": 60000
+        }
       }
     },
     "credentials": {
@@ -162,7 +171,7 @@
   },
   "completeness": {
     "algorithm": "sha256",
-    "value": "edbc7f6b1a6b13b77b14fe55d159cd03d458246acc82781178760b96f14d7f04"
+    "value": "76238427fe23db03a60216adb92710a063193770f485d1e2243622f86bec5524"
   },
   "provenance": {
     "connectorId": "7a1c0000000040008000000000000001",

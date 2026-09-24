@@ -752,6 +752,10 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
             await content.PrefixWritten.WaitAsync(Token);
 
             EngineGeneration superseded = listener.Manager.Current!;
+            // The client-side write completing does not prove the server has admitted this HTTP
+            // request yet. Wait for the generation's actual lease so activation cannot race ahead
+            // of request admission on slower or differently scheduled hosts.
+            await WaitForGenerationLeaseAsync(superseded);
             EngineGeneration candidate = listener.NewGeneration(
                 Load(
                     "/api",
@@ -1258,6 +1262,16 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
     private static bool ContainsBytes(string root, byte[] expected)
         => Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
             .Any(path => File.ReadAllBytes(path).SequenceEqual(expected));
+
+    private static async Task WaitForGenerationLeaseAsync(EngineGeneration generation)
+    {
+        for (var attempt = 0; attempt < 5_000 && generation.LeaseCount == 0; attempt++)
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(1), Token);
+        }
+
+        Assert.True(generation.LeaseCount > 0, "The streamed HTTP request never acquired its generation lease.");
+    }
 
     private sealed class StreamingRequestContent : HttpContent
     {
