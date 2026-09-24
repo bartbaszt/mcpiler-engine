@@ -184,6 +184,13 @@ public sealed record ChallengeSessionEntry(
     string Value,
     DateTimeOffset ExpiresAtUtc);
 
+/// <summary>The session credential to apply now, with the expiry of the capture behind it.</summary>
+/// <param name="Credential">The credential to apply to the outgoing request.</param>
+/// <param name="ExpiresAtUtc">When the captured session stops being usable.</param>
+public sealed record ChallengeSessionCredential(
+    ResolvedCredential Credential,
+    DateTimeOffset ExpiresAtUtc);
+
 /// <summary>
 /// A bounded in-memory store for captured challenge sessions, keyed on the exact profile
 /// authority state. A new epoch or revision therefore never observes a session captured under a
@@ -305,7 +312,12 @@ public sealed class ChallengeSessionService
     /// The session credential to apply now, or null when no unexpired capture exists. A caller
     /// sends the operation unauthenticated and learns from the response whether a challenge is due.
     /// </summary>
-    public ResolvedCredential? ResolveCredential(
+    /// <remarks>
+    /// The expiry travels with the credential because a response obtained under a captured session
+    /// must not outlive it: the session is the authority the upstream granted, and a cache entry
+    /// that survived it would serve an answer under a credential the upstream has already retired.
+    /// </remarks>
+    public ChallengeSessionCredential? ResolveCredential(
         AuthenticationProfile profile,
         long runtimeRevision,
         long authorityEpoch)
@@ -325,7 +337,9 @@ public sealed class ChallengeSessionService
 
         var definition = ChallengeSessionDefinition.FromConfiguration(profile.Configuration);
 
-        return definition.Injection.CreateCredential(entry.Value);
+        return new ChallengeSessionCredential(
+            definition.Injection.CreateCredential(entry.Value),
+            entry.ExpiresAtUtc);
     }
 
     /// <summary>Decides what a just-received response means for the profile.</summary>

@@ -1,4 +1,5 @@
 using MCPiler.Engine.Host.Mcp;
+using MCPiler.Engine.Runtime;
 
 using Microsoft.AspNetCore.Http;
 
@@ -43,6 +44,24 @@ internal sealed class EngineRequestGenerationAdmission
 
     /// <summary>The address resolution performed against <see cref="Generation"/>.</summary>
     internal SurfaceResolution Resolution { get; }
+
+    /// <summary>
+    /// The caller partition this request was authorized as.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Settled by the mount authorization middleware, which is the only component that has seen
+    /// the presented token, the resource it was admitted for and the scopes it carried. Absent
+    /// means no component proved who the caller is, and a response-cache decision must then bypass
+    /// rather than choose a partition: any partition chosen would conflate callers the runtime
+    /// cannot tell apart.
+    /// </para>
+    /// <para>
+    /// Starts as <see cref="CallerPartition.Public"/> so a mount that requires no authorization
+    /// states its identity explicitly rather than leaving it to be inferred from an absence.
+    /// </para>
+    /// </remarks>
+    internal CallerPartition? CallerPartition { get; set; } = MCPiler.Engine.Runtime.CallerPartition.Public;
 
     /// <summary>
     /// Whether a stateful session configured for one HTTP resource still belongs to this request.

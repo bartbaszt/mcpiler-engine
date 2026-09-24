@@ -35,12 +35,17 @@ namespace MCPiler.Engine.Authentication;
 /// The per-hop OAuth 1.0a signing closure state. Present exactly when <see cref="OAuth1"/>
 /// is present; the execution layer signs each hop through it with fresh hop values.
 /// </param>
+/// <param name="ExpiresAtUtc">
+/// The earliest known expiry of the resolved material, when the strategy knows one. A cache entry
+/// derived from this authority must not outlive it.
+/// </param>
 public sealed record ResolvedAuthentication(
     IReadOnlyList<ResolvedCredential> Credentials,
     Uri? DestinationAuthority = null,
     ResolvedRequestSigning? Signing = null,
     OAuth1.OAuth1SigningMaterial? OAuth1 = null,
-    OAuth1.ResolvedOAuth1Signing? OAuth1Signing = null);
+    OAuth1.ResolvedOAuth1Signing? OAuth1Signing = null,
+    DateTimeOffset? ExpiresAtUtc = null);
 
 /// <summary>
 /// Per-kind acquisition over the ported authentication services.
@@ -149,14 +154,19 @@ public sealed class AuthenticationRuntime : IDisposable
                     .AcquireAsync(profile, declared, cancellationToken)
                     .ConfigureAwait(false);
 
-                return new ResolvedAuthentication(acquisition.Credentials);
+                return new ResolvedAuthentication(
+                    acquisition.Credentials,
+                    ExpiresAtUtc: acquisition.ExpiresAtUtc);
 
             case AuthenticationKind.TokenSessionExchange:
                 var exchange = await Exchange
                     .AcquireAsync(profile, declared, cancellationToken)
                     .ConfigureAwait(false);
 
-                return new ResolvedAuthentication([exchange.Credential], exchange.DestinationAuthority);
+                return new ResolvedAuthentication(
+                    [exchange.Credential],
+                    exchange.DestinationAuthority,
+                    ExpiresAtUtc: exchange.ExpiresAtUtc);
 
             case AuthenticationKind.ChallengeSession:
                 var session = Challenge.ResolveCredential(
@@ -164,7 +174,9 @@ public sealed class AuthenticationRuntime : IDisposable
                     RuntimeRevision(profile),
                     AuthorityEpoch(profile));
 
-                return new ResolvedAuthentication(session is null ? [] : [session]);
+                return new ResolvedAuthentication(
+                    session is null ? [] : [session.Credential],
+                    ExpiresAtUtc: session?.ExpiresAtUtc);
 
             case AuthenticationKind.RequestSigning:
                 return new ResolvedAuthentication([], Signing: ResolveSigner(profile, declared));

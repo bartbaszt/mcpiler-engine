@@ -5,6 +5,7 @@ using MCPiler.Engine.Authentication.OAuth;
 using MCPiler.Engine.Execution;
 using MCPiler.Engine.Execution.Files;
 using MCPiler.Engine.Execution.Outbound;
+using MCPiler.Engine.Execution.ResponseCaching;
 using MCPiler.Engine.Execution.Secrets;
 using MCPiler.Engine.Files;
 using MCPiler.Engine.Mcp;
@@ -82,8 +83,17 @@ public sealed class EngineExecution : IDisposable
     public static EngineExecution Create(
         RuntimeStartResult started,
         OutboundConnectionPolicy connections,
-        Action<RuntimeDiagnostic>? diagnostics = null)
-        => Create(started, providers: null, connections, diagnostics);
+        Action<RuntimeDiagnostic>? diagnostics = null,
+        string? generationLabel = null,
+        TimeProvider? timeProvider = null)
+        => Create(
+            started,
+            providers: null,
+            connections: connections,
+            diagnostics: diagnostics,
+            rotations: null,
+            generationLabel: generationLabel,
+            timeProvider: timeProvider);
 
     /// <summary>
     /// Assembles the execution machinery for a managed runtime that delivered provider values.
@@ -124,7 +134,9 @@ public sealed class EngineExecution : IDisposable
         IReadOnlyDictionary<string, GenerationSecretSource>? providers,
         OutboundConnectionPolicy connections,
         Action<RuntimeDiagnostic>? diagnostics = null,
-        RotationNotification? rotations = null)
+        RotationNotification? rotations = null,
+        string? generationLabel = null,
+        TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(started);
         ArgumentNullException.ThrowIfNull(connections);
@@ -163,6 +175,16 @@ public sealed class EngineExecution : IDisposable
                 GenerationSecretSource? generation = null;
                 providers?.TryGetValue(mount.Prefix, out generation);
 
+                byte[] identityKey = CacheIdentity.NewKey();
+                ResponseCache? responseCache = started.ResponseCache.Enabled
+                    ? new ResponseCache(
+                        mount.Prefix,
+                        generationLabel,
+                        started.ResponseCache,
+                        identityKey,
+                        timeProvider)
+                    : null;
+
                 ExecutionService executions = new(
                     sender,
                     new ManifestSecretResolver(
@@ -170,9 +192,19 @@ public sealed class EngineExecution : IDisposable
                         new HostSecretSource(),
                         generation),
                     started.Files,
-                    authentication);
+                    authentication,
+                    responseCache,
+                    identityKey);
 
-                mounts.Add(mount, new MountExecution(clients, executions, authentication, generation));
+                try
+                {
+                    mounts.Add(mount, new MountExecution(clients, executions, authentication, generation, responseCache));
+                }
+                catch
+                {
+                    responseCache?.Dispose();
+                    throw;
+                }
             }
 
             return new EngineExecution(mounts, started.Files, diagnostics);
@@ -307,6 +339,11 @@ public sealed class EngineExecution : IDisposable
     /// <param name="surface">The surface the request addressed.</param>
     /// <param name="tool">The tool name the caller sent, exactly as sent.</param>
     /// <param name="arguments">The arguments the caller sent.</param>
+    /// <param name="callerPartition">
+    /// The authorization scope the host admitted this caller under, when it proved one. Absent
+    /// means no component established who the caller is, which a cache decision must treat as a
+    /// bypass rather than as a shared identity.
+    /// </param>
     /// <param name="cancellationToken">The caller's deadline.</param>
     public async Task<ToolOutcome> InvokeAsync(
         MountedManifest mount,
@@ -315,7 +352,8 @@ public sealed class EngineExecution : IDisposable
         string tool,
         JsonObject arguments,
         string? negotiatedProtocolRevision,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        CallerPartition? callerPartition = null)
     {
         ArgumentNullException.ThrowIfNull(mount);
         ArgumentNullException.ThrowIfNull(surface);
@@ -338,7 +376,8 @@ public sealed class EngineExecution : IDisposable
                 tool,
                 arguments,
                 negotiatedProtocolRevision,
-                cancellationToken)
+                cancellationToken,
+                callerPartition)
             .ConfigureAwait(false);
 
         if (outcome.Diagnostic is { } diagnostic)
@@ -358,6 +397,75 @@ public sealed class EngineExecution : IDisposable
         return outcome;
     }
 
+    /// <summary>Returns the cache owned by a mounted execution, for Engine operator wiring.</summary>
+    internal ResponseCache? ResponseCacheFor(MountedManifest mount)
+        => _mounts.TryGetValue(mount, out MountExecution? execution) ? execution.Cache : null;
+
+    /// <summary>
+    /// Reads the bounded, sanitized recent cache decisions for one mounted prefix.
+    /// </summary>
+    /// <remarks>
+    /// The prefix is supplied rather than a mount object because the operator reaches Engine by
+    /// the address it configured, not by the object graph. A prefix that names no mount, or a
+    /// mount whose caching is disabled, has nothing to observe and returns null; the caller
+    /// distinguishes the two by the refusal it already produced for an unknown prefix.
+    /// </remarks>
+    /// <param name="mountPrefix">The mounted Manifest prefix to inspect.</param>
+    public ResponseCacheObservation? ObserveResponseCache(string mountPrefix)
+    {
+        if (string.IsNullOrEmpty(mountPrefix))
+        {
+            return null;
+        }
+
+        return CacheForPrefix(mountPrefix)?.Observe();
+    }
+
+    /// <summary>
+    /// Clears one mounted prefix's completed cache entries, optionally for one operation.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Only Engine runtime cache state changes. Nothing here republishes a Manifest, touches
+    /// managed desired state, rotates a credential or cancels an in-flight producer; a producer
+    /// that began before the clear can only admit if the clear epoch it derived its key under is
+    /// still current, which the cache itself enforces.
+    /// </para>
+    /// <para>
+    /// A prefix that names no mount, or a mount whose caching is disabled, returns null and
+    /// changes nothing.
+    /// </para>
+    /// </remarks>
+    /// <param name="mountPrefix">The mounted Manifest prefix to clear.</param>
+    /// <param name="operationSlug">An optional AgentOperation slug to narrow the clear.</param>
+    public ResponseCacheClearOutcome? ClearResponseCache(string mountPrefix, string? operationSlug = null)
+    {
+        if (string.IsNullOrEmpty(mountPrefix))
+        {
+            return null;
+        }
+
+        return CacheForPrefix(mountPrefix)?.ClearScope(operationSlug);
+    }
+
+    /// <summary>The mounted prefixes this execution owns, in mount order.</summary>
+    public IReadOnlyList<string> MountPrefixes
+        => [.. _mounts.Keys.Select(static mount => mount.Prefix)];
+
+    private ResponseCache? CacheForPrefix(string mountPrefix)
+    {
+        foreach ((MountedManifest mount, MountExecution execution) in _mounts)
+        {
+            if (string.Equals(mount.Prefix, mountPrefix, StringComparison.Ordinal))
+            {
+                return execution.Cache;
+            }
+        }
+
+        return null;
+    }
+
+
     /// <inheritdoc />
     public void Dispose()
     {
@@ -372,9 +480,12 @@ public sealed class EngineExecution : IDisposable
         UpstreamClientFactory clients,
         ExecutionService executions,
         AuthenticationRuntime authentication,
-        GenerationSecretSource? providers) : IDisposable
+        GenerationSecretSource? providers,
+        ResponseCache? cache) : IDisposable
     {
         public ExecutionService Executions { get; } = executions;
+
+        public ResponseCache? Cache { get; } = cache;
 
         public void Dispose()
         {
@@ -383,6 +494,7 @@ public sealed class EngineExecution : IDisposable
             providers?.Dispose();
             authentication.Dispose();
             clients.Dispose();
+            Cache?.Dispose();
         }
     }
 }

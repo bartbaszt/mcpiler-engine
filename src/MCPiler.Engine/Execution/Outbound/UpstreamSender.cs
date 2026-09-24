@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Net;
 
 using MCPiler.Engine.Execution;
+using MCPiler.Engine.Execution.ResponseCaching;
 
 namespace MCPiler.Engine.Execution.Outbound;
 
@@ -25,9 +26,10 @@ namespace MCPiler.Engine.Execution.Outbound;
 /// exactly one classification.
 /// </para>
 /// </remarks>
-public sealed class UpstreamSender : IUpstreamTransport
+public sealed class UpstreamSender : IUpstreamTransport, IResponseCacheTransportState
 {
     private readonly UpstreamClientFactory _clients;
+    private int _hasObservedSetCookie;
 
     /// <summary>Creates a sender over <paramref name="clients"/>.</summary>
     public UpstreamSender(UpstreamClientFactory clients)
@@ -35,6 +37,9 @@ public sealed class UpstreamSender : IUpstreamTransport
         ArgumentNullException.ThrowIfNull(clients);
         _clients = clients;
     }
+
+    bool IResponseCacheTransportState.HasUnrepresentedRequestState
+        => !_clients.CookieStateObservable || Volatile.Read(ref _hasObservedSetCookie) != 0;
 
     /// <inheritdoc />
     public async Task<UpstreamResponse> SendAsync(
@@ -59,6 +64,7 @@ public sealed class UpstreamSender : IUpstreamTransport
         var headers = request.Headers;
         var sensitiveQueryParameters = request.SensitiveQueryParameters;
         var preserveBody = true;
+        bool followedRedirect = false;
 
         for (var hop = 0; ; hop++)
         {
@@ -118,9 +124,18 @@ public sealed class UpstreamSender : IUpstreamTransport
                 throw Translate(ex, uri, hopRequest.SensitiveQueryParameters);
             }
 
+            // SocketsHttpHandler's default CookieContainer is mutable state that does not appear
+            // on UpstreamRequest. Once a response has supplied cookies, cache identity can no
+            // longer be proven from the request model alone, so the service bypasses this
+            // transport's cache path rather than merging callers under an incomplete key.
+            if (response.Headers.Contains("Set-Cookie"))
+            {
+                Interlocked.Exchange(ref _hasObservedSetCookie, 1);
+            }
+
             if (!RedirectRules.IsRedirect((int)response.StatusCode))
             {
-                return await CaptureAsync(response, cancellationToken).ConfigureAwait(false);
+                return await CaptureAsync(response, followedRedirect, cancellationToken).ConfigureAwait(false);
             }
 
             var location = response.Headers.Location;
@@ -141,6 +156,7 @@ public sealed class UpstreamSender : IUpstreamTransport
             method = nextMethod;
             preserveBody = preserveBody && nextPreservesBody;
             uri = next;
+            followedRedirect = true;
         }
     }
 
@@ -162,6 +178,14 @@ public sealed class UpstreamSender : IUpstreamTransport
             // Adding without validation keeps a compiled header byte-identical rather than
             // letting the framework reformat it.
             message.Headers.TryAddWithoutValidation(name, values);
+        }
+
+        if (!headers.Keys.Any(static name => string.Equals(name, "Accept-Encoding", StringComparison.OrdinalIgnoreCase)))
+        {
+            // Keep automatic decompression's implicit request dimension visible to cache-key
+            // construction. SocketsHttpHandler does not add a second default when this header is
+            // already present.
+            message.Headers.TryAddWithoutValidation("Accept-Encoding", UpstreamRequestDefaults.AcceptEncoding);
         }
 
         if (body?.BodySource is { } source)
@@ -221,6 +245,7 @@ public sealed class UpstreamSender : IUpstreamTransport
     /// </remarks>
     private static async Task<UpstreamResponse> CaptureAsync(
         HttpResponseMessage response,
+        bool wasRedirected,
         CancellationToken cancellationToken)
     {
         try
@@ -248,7 +273,8 @@ public sealed class UpstreamSender : IUpstreamTransport
                 headers,
                 mediaType,
                 body,
-                new ResponseOwner(response));
+                new ResponseOwner(response),
+                wasRedirected);
         }
         catch
         {

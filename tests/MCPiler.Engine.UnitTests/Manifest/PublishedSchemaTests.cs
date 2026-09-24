@@ -586,6 +586,11 @@ public sealed class PublishedSchemaTests
         new("AgentSurfaceSectionReader.SectionMembers", "agent-surface.schema.json", ["#"], AgentSurfaceSectionReader.SectionMembers),
         new("AgentSurfaceSectionReader.GroupMembers", "agent-surface.schema.json", ["#/$defs/group"], AgentSurfaceSectionReader.GroupMembers),
         new("AgentSurfaceSectionReader.OperationMembers", "agent-surface.schema.json", ["#/$defs/operation"], AgentSurfaceSectionReader.OperationMembers),
+        new(
+            "AgentSurfaceSectionReader.ResponseCacheMembers",
+            "agent-surface.schema.json",
+            ["#/$defs/operation/properties/responseCache"],
+            AgentSurfaceSectionReader.ResponseCacheMembers),
         new("AgentSurfaceSectionReader.PolicyMembers", "agent-surface.schema.json", ["#/$defs/operation/properties/outputSchemaPolicy"], AgentSurfaceSectionReader.PolicyMembers),
         new("AgentSurfaceSectionReader.AnnotationMembers", "agent-surface.schema.json", ["#/$defs/annotations"], AgentSurfaceSectionReader.AnnotationMembers),
         new("AgentSurfaceSectionReader.SearchMembers", "agent-surface.schema.json", ["#/$defs/operation/properties/search"], AgentSurfaceSectionReader.SearchMembers),

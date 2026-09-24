@@ -64,6 +64,39 @@ public sealed record EngineExecutionResult
     /// <summary>What kind of failure occurred, or <see cref="ExecutionFailureKind.None"/>.</summary>
     public ExecutionFailureKind Failure { get; init; } = ExecutionFailureKind.None;
 
+    /// <summary>
+    /// A short fingerprint of the caller partition this execution ran under, for diagnostics.
+    /// </summary>
+    /// <remarks>
+    /// Never the partition value itself: the fingerprint is a display aid for comparing two
+    /// decisions, and anything longer would be material an operator surface has no use for.
+    /// Absent when no partition was established, which is also when caching bypasses.
+    /// </remarks>
+    public string? CallerPartitionFingerprint { get; init; }
+
+    /// <summary>
+    /// A short fingerprint of the upstream authority this execution ran under, for diagnostics.
+    /// </summary>
+    /// <remarks>
+    /// Absent when the authority could not be proven — a signing strategy, an unusable
+    /// credential, or a failure that happened before credentials resolved. Absent is the signal
+    /// that a cache would have bypassed, so it must never be replaced with a placeholder value.
+    /// </remarks>
+    public string? AuthorityFingerprint { get; init; }
+
+    /// <summary>
+    /// The earliest known expiry of the credential material this execution presented, when known.
+    /// </summary>
+    /// <remarks>
+    /// A cached response must not outlive the authority that obtained it. The value is the
+    /// ceiling a cache applies to its own policy TTL, so a response obtained with a token that
+    /// expires in two minutes is not served for the authored hour.
+    /// </remarks>
+    public DateTimeOffset? AuthorityExpiresAtUtc { get; init; }
+
+    /// <summary>Transport-internal fact used to exclude redirect-chain results from cache admission.</summary>
+    internal bool ResponseWasRedirected { get; init; }
+
     /// <summary>True when nothing failed.</summary>
     public bool Succeeded => Failure == ExecutionFailureKind.None;
 }

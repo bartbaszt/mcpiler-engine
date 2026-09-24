@@ -38,6 +38,7 @@ public static class ManifestValidator
         ValidateSurfaceOperations(manifest, diagnostics);
         ValidateCompoundExposure(manifest, diagnostics);
         ValidateBindingOperationKeys(manifest, diagnostics);
+        ValidateResponseCachePolicies(manifest, diagnostics);
         ValidateDestinations(manifest, diagnostics);
         ValidateCredentialIdentity(manifest, diagnostics);
         ValidateBindingCredentialScope(manifest, diagnostics);
@@ -618,6 +619,74 @@ public static class ManifestValidator
                 "section does not declare.",
                 section: ManifestSectionName.AgentSurface,
                 pointer: pointer));
+        }
+    }
+
+    /// <summary>
+    /// Every declared response-cache policy must resolve to one supported HTTP GET/HEAD binding.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The binding is resolved through the same dispatcher every other inspection and the
+    /// runtime use, and the method comes from the operations section entry that binding names,
+    /// never from a re-derived key or a declared label. A policy whose operation cannot be
+    /// executed as a cacheable read is refused here rather than silently ignored at runtime,
+    /// because a manifest that advertises a cache that can never be used is a wrong
+    /// description of the deployment.
+    /// </para>
+    /// <para>
+    /// The TTL range is enforced by the section reader, which knows the exact member pointer.
+    /// What is left here is the cross-section half: whether the binding shape and the effective
+    /// method can carry a cache at all.
+    /// </para>
+    /// </remarks>
+    private static void ValidateResponseCachePolicies(
+        ManifestDocument manifest,
+        List<ManifestDiagnostic> diagnostics)
+    {
+        for (int index = 0; index < manifest.AgentSurface.Operations.Count; index++)
+        {
+            AgentOperationEntry operation = manifest.AgentSurface.Operations[index];
+
+            if (operation.ResponseCache is null)
+            {
+                continue;
+            }
+
+            string pointer = JsonPointer.Build("operations", Segment(index), "responseCache");
+
+            // A compound binding resolves to no single HTTP shape: it runs several operations,
+            // some of which may be writes, and there is no one response whose cache identity
+            // this policy could name.
+            if (ManifestBindingDispatcher.TryResolveHttp(operation.Binding) is not { } http)
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.ResponseCachePolicyInvalid,
+                    $"Operation '{DiagnosticText.Echo(operation.Slug)}' declares a response cache, " +
+                    "but its binding executes a workflow rather than one HTTP operation. Only a " +
+                    "single HTTP GET/HEAD operation can be cached.",
+                    section: ManifestSectionName.AgentSurface,
+                    pointer: pointer));
+                continue;
+            }
+
+            // An unresolvable key is reported by the binding validation above; reporting the
+            // same missing operation twice would bury the actionable diagnostic.
+            if (manifest.Operations.Operation(http.Operation) is not { } bound)
+            {
+                continue;
+            }
+
+            if (bound.Method is not ("GET" or "HEAD"))
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.ResponseCachePolicyInvalid,
+                    $"Operation '{DiagnosticText.Echo(operation.Slug)}' declares a response cache, " +
+                    $"but the operation it executes is '{DiagnosticText.Echo(bound.Method)}'. Only " +
+                    "GET and HEAD responses are cacheable.",
+                    section: ManifestSectionName.AgentSurface,
+                    pointer: pointer));
+            }
         }
     }
 

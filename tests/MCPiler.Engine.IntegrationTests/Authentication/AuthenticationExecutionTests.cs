@@ -16,9 +16,11 @@ using MCPiler.Engine.Authentication.OAuth1;
 using MCPiler.Engine.Execution.RuntimeState;
 using MCPiler.Engine.Execution;
 using MCPiler.Engine.Execution.Outbound;
+using MCPiler.Engine.Execution.ResponseCaching;
 using MCPiler.Engine.Manifest;
 using MCPiler.Engine.Manifest.Canonical;
 using MCPiler.Engine.Manifest.Model;
+using MCPiler.Engine.Runtime;
 
 using Xunit;
 
@@ -1238,7 +1240,8 @@ public sealed class AuthenticationExecutionTests : IDisposable
         ManifestDocument manifest,
         AuthenticationRuntime runtime,
         JsonObject? arguments = null,
-        IManifestSecretResolver? secrets = null)
+        IManifestSecretResolver? secrets = null,
+        CallerPartition? callerPartition = null)
     {
         using var clients = PermissiveClients();
         using var owned = runtime;
@@ -1249,8 +1252,707 @@ public sealed class AuthenticationExecutionTests : IDisposable
             runtime);
 
         return await service.ExecuteAsync(
-            new ExecutionRequest(manifest, "get-thing", arguments ?? []),
+            new ExecutionRequest(manifest, "get-thing", arguments ?? []) { CallerPartition = callerPartition },
             TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>Runs one operation with no authentication runtime, for the static-credential cases.</summary>
+    private static async Task<EngineExecutionResult> RunStaticAsync(
+        ManifestDocument manifest,
+        CallerPartition? callerPartition = null)
+    {
+        using var clients = PermissiveClients();
+        var service = new ExecutionService(
+            new UpstreamSender(clients),
+            new ManifestSecretResolver());
+
+        return await service.ExecuteAsync(
+            new ExecutionRequest(manifest, "get-thing", []) { CallerPartition = callerPartition },
+            TestContext.Current.CancellationToken);
+    }
+
+    /// <summary>
+    /// Runs three manifests in order over one execution graph, which is how a serving mount uses it.
+    /// </summary>
+    /// <remarks>
+    /// The identity key belongs to one execution graph rather than the process, so every
+    /// comparison that isolates an authority fact has to happen inside one graph. Comparing two
+    /// graphs would prove only that their keys differ, which is the design rather than the
+    /// behavior under test.
+    /// </remarks>
+    private static async Task<EngineExecutionResult[]> RunInOrderStaticAsync(params ManifestDocument[] manifests)
+    {
+        using var clients = PermissiveClients();
+        var service = new ExecutionService(
+            new UpstreamSender(clients),
+            new ManifestSecretResolver());
+
+        var results = new EngineExecutionResult[manifests.Length];
+
+        for (int index = 0; index < manifests.Length; index++)
+        {
+            results[index] = await service.ExecuteAsync(
+                new ExecutionRequest(manifests[index], "get-thing", []),
+                TestContext.Current.CancellationToken);
+        }
+
+        return results;
+    }
+
+    /// <summary>
+    /// Runs several manifests in order over one execution graph and one authentication runtime.
+    /// </summary>
+    /// <remarks>
+    /// Dynamic strategies need the runtime, and the identity key belongs to the execution graph,
+    /// so both have to be shared for an authority comparison to isolate what the test changed.
+    /// </remarks>
+    private static async Task<EngineExecutionResult[]> RunInOrderAsync(params ManifestDocument[] manifests)
+    {
+        using var clients = PermissiveClients();
+        using var runtime = new AuthenticationRuntime(new UpstreamSender(clients));
+        var service = new ExecutionService(
+            new UpstreamSender(clients),
+            new ManifestSecretResolver(),
+            files: null,
+            runtime);
+
+        var results = new EngineExecutionResult[manifests.Length];
+
+        for (int index = 0; index < manifests.Length; index++)
+        {
+            results[index] = await service.ExecuteAsync(
+                new ExecutionRequest(manifests[index], "get-thing", []),
+                TestContext.Current.CancellationToken);
+        }
+
+        return results;
+    }
+
+    // ---- upstream authority identity ------------------------------------------------------
+
+    /// <summary>
+    /// A rotated stored credential is a new authority, and no Manifest member changed.
+    /// </summary>
+    /// <remarks>
+    /// The value lives outside the document, so a fingerprint that read only the Manifest would
+    /// consider the two runs one authority and serve the first caller's response to the second.
+    /// The canary is also asserted absent from the fingerprint, because a digest that leaked its
+    /// input would put the secret into every cache key and every diagnostic.
+    /// </remarks>
+    [Fact]
+    public async Task Rotating_a_static_credential_changes_the_authority_identity()
+    {
+        await using var host = await LoopbackHost.StartAsync(
+            context => PlainHandlerAsync(context, []),
+            TestContext.Current.CancellationToken);
+
+        var firstVariable = SetVariable("first-static-value");
+        var secondVariable = SetVariable("second-static-value");
+
+        ManifestDocument first = StaticManifest(
+            host,
+            new ManifestCredential("api-key", CredentialScheme.ApiKey, "X-Api-Key", CredentialReference.Env(firstVariable)));
+        ManifestDocument second = StaticManifest(
+            host,
+            new ManifestCredential("api-key", CredentialScheme.ApiKey, "X-Api-Key", CredentialReference.Env(secondVariable)));
+
+        EngineExecutionResult[] results = await RunInOrderStaticAsync(first, second, first);
+
+        EngineExecutionResult rotated = results[0];
+        EngineExecutionResult replaced = results[1];
+        EngineExecutionResult again = results[2];
+
+        Assert.Equal(ExecutionFailureKind.None, rotated.Failure);
+
+        // Same declared value and same graph, so the identity is stable across calls.
+        Assert.Equal(rotated.AuthorityFingerprint, again.AuthorityFingerprint);
+
+        // The value changed with no Manifest change at all, and the identity moved with it.
+        Assert.NotNull(rotated.AuthorityFingerprint);
+        Assert.NotEqual(rotated.AuthorityFingerprint, replaced.AuthorityFingerprint);
+    }
+
+    /// <summary>
+    /// Scheme, placement and destination are authority facts even when the value is unchanged.
+    /// </summary>
+    /// <remarks>
+    /// Moving one secret from a header to a query parameter, or from one destination to another,
+    /// changes who the request will be authorized as. A fingerprint keyed on the value alone
+    /// would call those the same authority.
+    /// </remarks>
+    [Fact]
+    public async Task Changing_scheme_placement_or_destination_changes_the_authority_identity()
+    {
+        await using var host = await LoopbackHost.StartAsync(
+            context => PlainHandlerAsync(context, []),
+            TestContext.Current.CancellationToken);
+
+        var variable = SetVariable("one-static-value");
+
+        ManifestDocument headerPlacement = StaticManifest(
+            host,
+            new ManifestCredential("api-key", CredentialScheme.ApiKey, "X-Api-Key", CredentialReference.Env(variable)));
+
+        // Same id, same slot, same value; the placement moved to the query string.
+        ManifestDocument queryPlacement = StaticManifest(
+            host,
+            new ManifestCredential(
+                "api-key",
+                CredentialScheme.ApiKey,
+                "api_key",
+                CredentialReference.Env(variable),
+                CredentialLocation.Query));
+
+        // Same declaration, but the executed destination authority differs.
+        await using var other = await LoopbackHost.StartAsync(
+            context => PlainHandlerAsync(context, []),
+            TestContext.Current.CancellationToken);
+
+        ManifestDocument otherDestination = StaticManifest(
+            other,
+            new ManifestCredential("api-key", CredentialScheme.ApiKey, "X-Api-Key", CredentialReference.Env(variable)));
+
+        EngineExecutionResult[] results = await RunInOrderStaticAsync(headerPlacement, queryPlacement, otherDestination);
+
+        EngineExecutionResult header = results[0];
+        EngineExecutionResult query = results[1];
+        EngineExecutionResult moved = results[2];
+
+        Assert.Equal(ExecutionFailureKind.None, header.Failure);
+        Assert.NotEqual(header.AuthorityFingerprint, query.AuthorityFingerprint);
+        Assert.NotEqual(header.AuthorityFingerprint, moved.AuthorityFingerprint);
+    }
+
+    /// <summary>An operation with no credential at all is still a distinct, provable authority.</summary>
+    [Fact]
+    public async Task An_unauthenticated_operation_has_an_authority_of_its_own()
+    {
+        await using var host = await LoopbackHost.StartAsync(
+            context => PlainHandlerAsync(context, []),
+            TestContext.Current.CancellationToken);
+
+        var result = await RunStaticAsync(StaticManifest(host));
+
+        Assert.Equal(ExecutionFailureKind.None, result.Failure);
+        Assert.NotNull(result.AuthorityFingerprint);
+    }
+
+    /// <summary>
+    /// A signing profile reports no authority, which is what makes caching bypass.
+    /// </summary>
+    /// <remarks>
+    /// The signature covers a fresh nonce and timestamp per attempt, so any identity derived
+    /// before the send would not describe the request actually made. Absence is the honest
+    /// answer, and a caller that treated absence as "unknown but shared" would serve a signed
+    /// response under an authority it never proved.
+    /// </remarks>
+    [Fact]
+    public async Task A_signing_profile_reports_no_authority_identity()
+    {
+        var requests = new List<Recorded>();
+        await using var host = await LoopbackHost.StartAsync(
+            context => PlainHandlerAsync(context, requests),
+            TestContext.Current.CancellationToken);
+
+        var secret = SetVariable(SigningSecretCanary);
+
+        var manifest = Manifest(
+            host,
+            Credentials(
+                new ManifestCredential(
+                    "signing-secret",
+                    CredentialScheme.RequestSigning,
+                    "signingSecret",
+                    CredentialReference.Env(secret))),
+            Profile(
+                host,
+                SigningProfileId,
+                AuthenticationKind.RequestSigning,
+                """
+                {
+                  "strategyId": "request-signing-jwt-hmac",
+                  "inputs": { "accessKeyId": "0123456789abcdef01234567" }
+                }
+                """,
+                credentialRef: ["signing-secret"]),
+            SigningProfileId);
+
+        var result = await RunAsync(manifest, new AuthenticationRuntime(new UpstreamSender(PermissiveClients())));
+
+        Assert.Equal(ExecutionFailureKind.None, result.Failure);
+        Assert.Null(result.AuthorityFingerprint);
+    }
+
+    /// <summary>
+    /// An OAuth acquisition surfaces its known expiry so a cache entry cannot outlive the token.
+    /// </summary>
+    /// <remarks>
+    /// The response was produced under an access token that will stop being accepted. Serving a
+    /// cached copy past that point would hand a caller a result it is no longer authorized to
+    /// receive, so the ceiling travels with the identity.
+    /// </remarks>
+    [Fact]
+    public async Task An_oauth_acquisition_surfaces_the_token_expiry_as_the_authority_ceiling()
+    {
+        var requests = new List<Recorded>();
+        await using var host = await LoopbackHost.StartAsync(
+            context => TokenHandlerAsync(context, requests),
+            TestContext.Current.CancellationToken);
+
+        var secret = SetVariable(ClientSecretCanary);
+
+        var manifest = Manifest(
+            host,
+            Credentials(
+                new ManifestCredential(
+                    "oauth2-client-secret",
+                    CredentialScheme.OAuth2ClientCredentials,
+                    "clientSecret",
+                    CredentialReference.Env(secret))),
+            Profile(
+                host,
+                OAuthProfileId,
+                AuthenticationKind.OAuth2ClientCredentials,
+                $$"""
+                {
+                  "strategyId": "oauth2-client-credentials",
+                  "tokenEndpoint": "{{host.Address}}token",
+                  "clientId": "example-client",
+                  "tokenAuthMethod": "client_secret_post",
+                  "scopes": ["read"]
+                }
+                """,
+                credentialRef: ["oauth2-client-secret"]),
+            OAuthProfileId);
+
+        DateTimeOffset before = DateTimeOffset.UtcNow;
+        var result = await RunAsync(manifest, new AuthenticationRuntime(new UpstreamSender(PermissiveClients())));
+
+        Assert.Equal(ExecutionFailureKind.None, result.Failure);
+        Assert.NotNull(result.AuthorityExpiresAtUtc);
+
+        // The handler answers expires_in: 3600, so the ceiling must be the token's own lifetime
+        // rather than anything the policy declared.
+        Assert.True(
+            result.AuthorityExpiresAtUtc > before.AddMinutes(55),
+            $"The authority ceiling {result.AuthorityExpiresAtUtc:O} is not the acquired token's expiry.");
+        Assert.True(result.AuthorityExpiresAtUtc < before.AddMinutes(65));
+    }
+
+    /// <summary>
+    /// Two authorization-code users are two authorities even under one profile and one client.
+    /// </summary>
+    /// <remarks>
+    /// The profile and client id are identical, so only the declared refresh token separates the
+    /// two callers. A fingerprint that stopped at the profile would serve one user's response to
+    /// the other, which is the isolation a multi-user mount exists to provide.
+    /// </remarks>
+    [Fact]
+    public async Task Two_authorization_code_users_get_two_authority_identities()
+    {
+        var requests = new List<Recorded>();
+        await using var host = await LoopbackHost.StartAsync(
+            context => TokenHandlerAsync(context, requests),
+            TestContext.Current.CancellationToken);
+
+        var clientSecret = SetVariable(ClientSecretCanary);
+
+        ManifestDocument For(string refreshVariable)
+            => Manifest(
+                host,
+                Credentials(
+                    new ManifestCredential(
+                        "oauth2-authorization-client",
+                        CredentialScheme.OAuth2AuthorizationCode,
+                        "clientSecret",
+                        CredentialReference.Env(clientSecret)),
+                    new ManifestCredential(
+                        "oauth2-authorization-refresh",
+                        CredentialScheme.OAuth2AuthorizationCode,
+                        "refreshToken",
+                        CredentialReference.Env(refreshVariable))),
+                Profile(
+                    host,
+                    AuthorizationCodeProfileId,
+                    AuthenticationKind.OAuth2AuthorizationCodePkceRefresh,
+                    $$"""
+                    {
+                      "strategyId": "oauth2-authorization-code-pkce-refresh",
+                      "tokenEndpoint": "{{host.Address}}token",
+                      "authorizationEndpoint": "{{host.Address}}authorize",
+                      "clientId": "example-client",
+                      "tokenAuthMethod": "client_secret_post"
+                    }
+                    """,
+                    credentialRef: ["oauth2-authorization-client", "oauth2-authorization-refresh"]),
+                AuthorizationCodeProfileId);
+
+        EngineExecutionResult[] results = await RunInOrderAsync(
+            For(SetVariable("refresh-token-user-one")),
+            For(SetVariable("refresh-token-user-two")));
+
+        EngineExecutionResult firstUser = results[0];
+        EngineExecutionResult secondUser = results[1];
+
+        Assert.Equal(ExecutionFailureKind.None, firstUser.Failure);
+        Assert.Equal(ExecutionFailureKind.None, secondUser.Failure);
+        Assert.NotNull(firstUser.AuthorityFingerprint);
+        Assert.NotEqual(firstUser.AuthorityFingerprint, secondUser.AuthorityFingerprint);
+    }
+
+    /// <summary>
+    /// A challenge replay attributes the response to the session that produced it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The upstream challenges every unauthenticated attempt and accepts every replayed one, so
+    /// each invocation completes a negotiation inside one exchange. Each challenge issues a
+    /// different session value, which is what makes the assertion meaningful: the two responses
+    /// came from two sessions, and the identity that names them must differ. An implementation
+    /// that derived the identity before the send would report the pre-challenge request for both
+    /// and name one authority for two different session authorities.
+    /// </para>
+    /// <para>
+    /// The session lifetime is known, so the ceiling travels with the identity and a cache entry
+    /// cannot outlive the negotiation it was produced under.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task A_challenge_replay_reports_the_session_authority()
+    {
+        var requests = new List<Recorded>();
+        int challenge = 0;
+
+        await using var host = await LoopbackHost.StartAsync(
+            async context =>
+            {
+                string path = context.Request.Path.Value ?? "/";
+                string form = await ReadBodyAsync(context);
+
+                lock (requests)
+                {
+                    requests.Add(new Recorded(path, context.Request.Headers.Authorization, form, context.Request.QueryString.Value ?? string.Empty));
+                }
+
+                if (context.Request.Headers.Authorization.Count == 0)
+                {
+                    string session = SessionCanary + "-" + Interlocked.Increment(ref challenge).ToString(CultureInfo.InvariantCulture);
+
+                    context.Response.Headers["X-Challenge"] = session;
+                    await WriteAsync(context, 409, "text/plain", "challenge");
+                    return;
+                }
+
+                await WriteAsync(context, 200, "text/plain", "ok");
+            },
+            TestContext.Current.CancellationToken);
+
+        var manifest = Manifest(
+            host,
+            CredentialsSection.Empty,
+            Profile(
+                host,
+                ChallengeProfileId,
+                AuthenticationKind.ChallengeSession,
+                """
+                {
+                  "strategyId": "bounded-challenge-session",
+                  "challenge": {
+                    "statusCodes": [409],
+                    "source": "header",
+                    "selector": "X-Challenge"
+                  },
+                  "injection": { "location": "header", "name": "Authorization", "prefix": "Bearer " },
+                  "replaySafeOperationKeys": ["GET /thing"],
+                  "sessionLifetimeSeconds": 3600
+                }
+                """,
+                credentialRef: []),
+            ChallengeProfileId);
+
+        using var clients = PermissiveClients();
+        using var runtime = new AuthenticationRuntime(new UpstreamSender(clients));
+        var service = new ExecutionService(
+            new UpstreamSender(clients),
+            new ManifestSecretResolver(),
+            files: null,
+            runtime);
+
+        var first = await service.ExecuteAsync(
+            new ExecutionRequest(manifest, "get-thing", []),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionFailureKind.None, first.Failure);
+        Assert.NotNull(first.AuthorityFingerprint);
+        Assert.NotNull(first.AuthorityExpiresAtUtc);
+
+        // A second invocation would reuse the same session, so it must report the same authority
+        // rather than a new one per call.
+        var reused = await service.ExecuteAsync(
+            new ExecutionRequest(manifest, "get-thing", []),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(first.AuthorityFingerprint, reused.AuthorityFingerprint);
+
+        // Dropping the session forces a fresh negotiation, which issues a different session
+        // value. The identity must follow the session, because the response is only as
+        // authorized as the session it arrived under.
+        runtime.InvalidateProfile(ChallengeProfileId);
+
+        var renegotiated = await service.ExecuteAsync(
+            new ExecutionRequest(manifest, "get-thing", []),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionFailureKind.None, renegotiated.Failure);
+        Assert.NotEqual(first.AuthorityFingerprint, renegotiated.AuthorityFingerprint);
+    }
+
+    [Fact]
+    public async Task A_challenge_replay_is_not_admitted_under_pre_challenge_authority()
+    {
+        var requests = new List<Recorded>();
+        int challenge = 0;
+
+        await using var host = await LoopbackHost.StartAsync(
+            async context =>
+            {
+                string path = context.Request.Path.Value ?? "/";
+                string form = await ReadBodyAsync(context);
+
+                lock (requests)
+                {
+                    requests.Add(new Recorded(path, context.Request.Headers.Authorization, form, context.Request.QueryString.Value ?? string.Empty));
+                }
+
+                if (context.Request.Headers.Authorization.Count == 0)
+                {
+                    string session = SessionCanary + "-" + Interlocked.Increment(ref challenge).ToString(CultureInfo.InvariantCulture);
+                    context.Response.Headers["X-Challenge"] = session;
+                    await WriteAsync(context, 409, "text/plain", "challenge");
+                    return;
+                }
+
+                await WriteAsync(context, 200, "text/plain", "session-response");
+            },
+            TestContext.Current.CancellationToken);
+
+        ManifestDocument manifest = Manifest(
+            host,
+            CredentialsSection.Empty,
+            Profile(
+                host,
+                ChallengeProfileId,
+                AuthenticationKind.ChallengeSession,
+                """
+                {
+                  "strategyId": "bounded-challenge-session",
+                  "challenge": { "statusCodes": [409], "source": "header", "selector": "X-Challenge" },
+                  "injection": { "location": "header", "name": "Authorization", "prefix": "Bearer " },
+                  "replaySafeOperationKeys": ["GET /thing"],
+                  "sessionLifetimeSeconds": 3600
+                }
+                """,
+                credentialRef: []),
+            ChallengeProfileId,
+            responseCache: new ResponseCachePolicySettings(300));
+
+        using UpstreamClientFactory clients = PermissiveClients();
+        using AuthenticationRuntime runtime = new(new UpstreamSender(clients));
+        byte[] identityKey = RandomNumberGenerator.GetBytes(32);
+        using ResponseCache cache = new("/api", "generation", ResponseCacheOptions.Default, identityKey);
+        ExecutionService service = new(
+            new UpstreamSender(clients),
+            new ManifestSecretResolver(),
+            files: null,
+            runtime,
+            cache,
+            identityKey);
+
+        Task<EngineExecutionResult> Invoke() => service.ExecuteAsync(
+            new ExecutionRequest(manifest, "get-thing", []) { CallerPartition = CallerPartition.Public },
+            TestContext.Current.CancellationToken);
+
+        EngineExecutionResult negotiated = await Invoke();
+        Assert.True(negotiated.Succeeded, negotiated.FailureReason);
+        Assert.Equal(0, cache.EntryCount);
+        Assert.Equal(2, requests.Count);
+
+        EngineExecutionResult sessionRequest = await Invoke();
+        Assert.True(sessionRequest.Succeeded, sessionRequest.FailureReason);
+        Assert.Equal(1, cache.EntryCount);
+        Assert.Equal(3, requests.Count);
+
+        EngineExecutionResult hit = await Invoke();
+        Assert.True(hit.Succeeded, hit.FailureReason);
+        Assert.Equal("session-response", Encoding.UTF8.GetString(hit.ResponseBody!));
+        Assert.Equal(3, requests.Count);
+    }
+
+    /// <summary>
+    /// A token/session exchange reports the exchanged authority, including its known ceiling.
+    /// </summary>
+    [Fact]
+    public async Task An_exchange_reports_its_session_authority_and_expiry()
+    {
+        var requests = new List<Recorded>();
+        await using var host = await LoopbackHost.StartAsync(
+            context => ExchangeHandlerAsync(context, requests),
+            TestContext.Current.CancellationToken);
+
+        var first = SetVariable(ExchangeSecretCanary);
+        var second = SetVariable(ExchangeSecretCanary + "-rotated");
+
+        ManifestDocument For(string variable)
+            => Manifest(
+                host,
+                Credentials(
+                    new ManifestCredential(
+                        "exchange-api-key",
+                        CredentialScheme.TokenSessionExchange,
+                        "apiKey",
+                        CredentialReference.Env(variable))),
+                Profile(
+                    host,
+                    ExchangeProfileId,
+                    AuthenticationKind.TokenSessionExchange,
+                    $$"""
+                    {
+                      "strategyId": "bounded-token-session-exchange",
+                      "inputs": { "username": "example-user" },
+                      "endpoint": "{{host.Address}}session",
+                      "method": "POST",
+                      "request": {
+                        "mediaType": "application/x-www-form-urlencoded",
+                        "fields": {
+                          "username": { "source": "input", "slot": "username" },
+                          "apikey": { "source": "secret", "slot": "apiKey" }
+                        }
+                      },
+                      "response": { "token": { "source": "jsonPointer", "selector": "/token" } },
+                      "injection": { "location": "header", "name": "Authorization", "prefix": "Bearer " },
+                      "defaultLifetimeSeconds": 300,
+                      "safetySkewSeconds": 15,
+                      "authFailureStatusCodes": [401]
+                    }
+                    """,
+                    credentialRef: ["exchange-api-key"]),
+                ExchangeProfileId);
+
+        EngineExecutionResult[] results = await RunInOrderAsync(For(first), For(second));
+
+        Assert.Equal(ExecutionFailureKind.None, results[0].Failure);
+        Assert.Equal(ExecutionFailureKind.None, results[1].Failure);
+
+        // The exchange declares a 300-second lifetime, so the ceiling is known and bounded.
+        Assert.NotNull(results[0].AuthorityExpiresAtUtc);
+
+        // The stored input secret changed without a Manifest edit, so the authority moved.
+        Assert.NotEqual(results[0].AuthorityFingerprint, results[1].AuthorityFingerprint);
+    }
+
+    /// <summary>
+    /// No acquired or declared secret material is recoverable from the identity or its ceiling.
+    /// </summary>
+    /// <remarks>
+    /// The identity is recorded in cache keys and in sanitized operator output. It must therefore
+    /// be a value an operator can read and compare without it becoming a secret channel.
+    /// </remarks>
+    [Fact]
+    public async Task No_secret_canary_appears_in_the_authority_identity()
+    {
+        var requests = new List<Recorded>();
+        await using var host = await LoopbackHost.StartAsync(
+            context => TokenHandlerAsync(context, requests, refresh: RotatedRefreshCanary),
+            TestContext.Current.CancellationToken);
+
+        var secret = SetVariable(ClientSecretCanary);
+
+        var manifest = Manifest(
+            host,
+            Credentials(
+                new ManifestCredential(
+                    "oauth2-client-secret",
+                    CredentialScheme.OAuth2ClientCredentials,
+                    "clientSecret",
+                    CredentialReference.Env(secret))),
+            Profile(
+                host,
+                OAuthProfileId,
+                AuthenticationKind.OAuth2ClientCredentials,
+                $$"""
+                {
+                  "strategyId": "oauth2-client-credentials",
+                  "tokenEndpoint": "{{host.Address}}token",
+                  "clientId": "example-client",
+                  "tokenAuthMethod": "client_secret_post",
+                  "scopes": ["read"]
+                }
+                """,
+                credentialRef: ["oauth2-client-secret"]),
+            OAuthProfileId);
+
+        var result = await RunAsync(manifest, new AuthenticationRuntime(new UpstreamSender(PermissiveClients())));
+
+        Assert.Equal(ExecutionFailureKind.None, result.Failure);
+
+        string rendered = (result.AuthorityFingerprint ?? string.Empty)
+            + "|"
+            + (result.AuthorityExpiresAtUtc?.ToString("O", CultureInfo.InvariantCulture) ?? string.Empty);
+
+        foreach (string canary in new[]
+        {
+            ClientSecretCanary,
+            RefreshTokenCanary,
+            AccessTokenCanary,
+            RotatedRefreshCanary,
+            ExchangeSecretCanary,
+            SessionCanary,
+            SigningSecretCanary,
+        })
+        {
+            Assert.DoesNotContain(canary, rendered, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>
+    /// Distinct caller partitions stay distinct the whole way through execution.
+    /// </summary>
+    /// <remarks>
+    /// The partition is settled by the authorization boundary and consumed here, so this proves
+    /// the value survives the compilation, the credential application and the send rather than
+    /// only existing at the boundary. Distinctness at the MCP boundary itself becomes observable
+    /// once the response cache exists.
+    /// </remarks>
+    [Fact]
+    public async Task Distinct_caller_partitions_reach_the_execution_result()
+    {
+        await using var host = await LoopbackHost.StartAsync(
+            context => PlainHandlerAsync(context, []),
+            TestContext.Current.CancellationToken);
+
+        var manifest = StaticManifest(
+            host,
+            new ManifestCredential(
+                "api-key",
+                CredentialScheme.ApiKey,
+                "X-Api-Key",
+                CredentialReference.Env(SetVariable("partition-static-value"))));
+
+        var first = await RunStaticAsync(manifest, new CallerPartition("partition-one", IsCallerSpecific: true));
+        var firstAgain = await RunStaticAsync(manifest, new CallerPartition("partition-one", IsCallerSpecific: true));
+        var second = await RunStaticAsync(manifest, new CallerPartition("partition-two", IsCallerSpecific: true));
+        var absent = await RunStaticAsync(manifest);
+
+        Assert.Equal(first.CallerPartitionFingerprint, firstAgain.CallerPartitionFingerprint);
+        Assert.NotEqual(first.CallerPartitionFingerprint, second.CallerPartitionFingerprint);
+
+        // A request with no partition reports none rather than an invented placeholder, because
+        // an invented value would read downstream as a shared identity instead of a bypass.
+        Assert.Null(absent.CallerPartitionFingerprint);
+
+        // The fingerprint is a short readable handle, not the opaque value itself.
+        Assert.NotNull(first.CallerPartitionFingerprint);
+        Assert.DoesNotContain("partition-one", first.CallerPartitionFingerprint, StringComparison.Ordinal);
     }
 
     private static OutboundConnectionPolicy PermissivePolicy() => new(_ => false);
@@ -1393,7 +2095,8 @@ public sealed class AuthenticationExecutionTests : IDisposable
         CredentialsSection credentials,
         AuthenticationProfile profile,
         string authenticationRef,
-        ManifestOperation? operation = null)
+        ManifestOperation? operation = null,
+        ResponseCachePolicySettings? responseCache = null)
     {
         var baseUrl = new Uri(host.Address, "thing");
 
@@ -1412,7 +2115,8 @@ public sealed class AuthenticationExecutionTests : IDisposable
                 new AgentOperationEntry(
                     "get-thing",
                     "Get thing",
-                    new HttpBinding(operation.Key, AuthenticationRef: authenticationRef)),
+                    new HttpBinding(operation.Key, AuthenticationRef: authenticationRef),
+                    ResponseCache: responseCache),
             ]),
             credentials,
             new AuthenticationSection([profile]));
@@ -1420,6 +2124,41 @@ public sealed class AuthenticationExecutionTests : IDisposable
 
     private static CredentialsSection Credentials(params ManifestCredential[] credentials) =>
         credentials.Length == 0 ? CredentialsSection.Empty : new CredentialsSection(credentials);
+
+    /// <summary>
+    /// A manifest whose binding resolves its credentials directly rather than through a profile.
+    /// </summary>
+    /// <remarks>
+    /// Static credential application predates profiles and is still an authority: the binding
+    /// names the credential ids and nothing decides anything else, which is the path a rotated
+    /// stored value must still separate even though no profile id changes.
+    /// </remarks>
+    private static ManifestDocument StaticManifest(LoopbackHost host, params ManifestCredential[] credentials)
+    {
+        var baseUrl = new Uri(host.Address, "thing");
+
+        ManifestOperation operation = new(
+            ManifestOperation.BuildKey("GET", "/thing"),
+            "GET",
+            "/thing");
+
+        return new ManifestDocument(
+            ManifestFormatSupport.Maximum,
+            new ServerSection("test-server", Version: "1.0.0"),
+            new PolicySection(baseUrl, [host.Address.GetLeftPart(UriPartial.Authority)]),
+            new OperationsSection([operation]),
+            new AgentSurfaceSection(
+            [
+                new AgentOperationEntry(
+                    "get-thing",
+                    "Get thing",
+                    new HttpBinding(
+                        operation.Key,
+                        CredentialRef: [.. credentials.Select(static credential => credential.Id)])),
+            ]),
+            Credentials(credentials),
+            AuthenticationSection.Empty);
+    }
 
     private static AuthenticationProfile Profile(
         LoopbackHost host,

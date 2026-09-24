@@ -66,7 +66,8 @@ internal static class ToolInvocation
         string tool,
         JsonObject arguments,
         string? negotiatedProtocolRevision,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        CallerPartition? callerPartition = null)
     {
         if (surface.Find(tool) is not { } advertised)
         {
@@ -89,7 +90,8 @@ internal static class ToolInvocation
                     tool,
                     arguments,
                     negotiatedProtocolRevision,
-                    cancellationToken);
+                    cancellationToken,
+                    callerPartition);
         }
 
         if (!ExposureGate.Permits(mount, surface, advertised.Operation, InvocationPath.Direct))
@@ -111,7 +113,8 @@ internal static class ToolInvocation
             advertised,
             arguments,
             negotiatedProtocolRevision,
-            cancellationToken);
+            cancellationToken,
+            callerPartition);
     }
 
     /// <summary>
@@ -132,7 +135,8 @@ internal static class ToolInvocation
         CatalogueTool operation,
         JsonObject arguments,
         string? negotiatedProtocolRevision,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        CallerPartition? callerPartition = null)
     {
         ArgumentNullException.ThrowIfNull(executions);
         ArgumentNullException.ThrowIfNull(mount);
@@ -162,6 +166,12 @@ internal static class ToolInvocation
                     // host supplies the canonical protected-resource identity, so the bare
                     // default route and the slug-qualified route do not share capabilities.
                     Scope = invocationScope,
+
+                    // The caller identity the host proved for this request, if any. Carried
+                    // through unchanged: the execution layer decides what it means, and a
+                    // component on this path that substituted a value would silently merge
+                    // callers the host kept apart.
+                    CallerPartition = callerPartition,
                 },
                 cancellationToken)
             .ConfigureAwait(false);

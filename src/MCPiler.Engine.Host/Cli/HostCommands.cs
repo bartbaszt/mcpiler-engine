@@ -117,7 +117,7 @@ public static class HostCommands
         }
 
         RuntimeStartResult result = EngineRuntime.Start(binding.Runtime);
-        string report = identity + Environment.NewLine + StartupReport.Render(result, binding.Authorization);
+        string report = identity + Environment.NewLine + StartupReport.Render(result, binding.Authorization, binding.ResponseCacheOperatorSecret is not null);
 
         if (!result.Started)
         {
@@ -272,7 +272,8 @@ public static class HostCommands
             options.Describe(),
             initial.GenerationId!,
             generationsLoader.DurableRuntimeState,
-            binding.Authorization));
+            binding.Authorization,
+            binding.Runtime.ResponseCache));
         progress?.Flush();
 
         await using WebApplication? app = BuildManagedOrRefuse(binding, drain, generations, out CommandOutcome? buildRefusal);
@@ -383,12 +384,12 @@ public static class HostCommands
         {
             return new CommandOutcome(
                 StartupReport.ExitCode(result),
-                identity + Environment.NewLine + StartupReport.Render(result));
+                identity + Environment.NewLine + StartupReport.Render(result, operatorChannelConfigured: binding.ResponseCacheOperatorSecret is not null));
         }
 
         StringBuilder text = new(identity);
         text.AppendLine();
-        text.Append(StartupReport.Render(result));
+        text.Append(StartupReport.Render(result, operatorChannelConfigured: binding.ResponseCacheOperatorSecret is not null));
 
         // Inspection runs the same mount path as serving and stops before the listener. The one
         // thing that path cannot report on its own is the host-side pairing rule, because it

@@ -102,7 +102,13 @@ public static class EngineRuntime
 
         return refusals.Count > 0 || files is null
             ? RuntimeStartResult.Refused(refusals, warnings)
-            : RuntimeStartResult.Ready(mounts, warnings, files, options.AllowInlineSecrets, runtimeState);
+            : RuntimeStartResult.Ready(
+                mounts,
+                warnings,
+                files,
+                options.AllowInlineSecrets,
+                runtimeState,
+                options.ResponseCache.ClampToHardMaxima());
     }
 
     /// <summary>

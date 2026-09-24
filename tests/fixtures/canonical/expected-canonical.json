@@ -2,11 +2,29 @@
   "comment": "SHA-256 hex of the canonical serialization of each input fixture. Generated from the MCPiler Platform canonical writer, which is the byte authority. Engine must reproduce these exactly.",
   "algorithm": "sha256",
   "fixtures": {
-    "01-member-order.input.json": { "canonicalBytes": 183, "sha256": "6f0aea6dfc14ca25fbd07adb38c71846feed90de0dccb558bd8b39c2fc58f5e1" },
-    "02-numbers.input.json": { "canonicalBytes": 281, "sha256": "e4fcdedc35ec3a573b6fb411dc87fa34bdd3c7c0c3bc1bcc2a492be238b89803" },
-    "03-strings-and-escapes.input.json": { "canonicalBytes": 516, "sha256": "c8fc2fd01b728eed9a875528f2f5786d1b45a942e29d8405f9a3634d4a92e981" },
-    "04-structure.input.json": { "canonicalBytes": 270, "sha256": "71760c157fcbc75b2329abb1ad692501a93fc9d79f198ec20a5fe060ffdefa52" },
-    "05-deep-nesting.input.json": { "canonicalBytes": 918, "sha256": "a7d03d7a36bd96fd78febd5b8cabaeb412eba27695222c1f4d25a14e88a18d96" },
-    "06-manifest-shaped.input.json": { "canonicalBytes": 1585, "sha256": "ab29fafc1fbe602451fc0aa834ad53a908b9ba5b7771c4d36ccb64e0c8798f0c" }
+    "01-member-order.input.json": {
+      "canonicalBytes": 183,
+      "sha256": "6f0aea6dfc14ca25fbd07adb38c71846feed90de0dccb558bd8b39c2fc58f5e1"
+    },
+    "02-numbers.input.json": {
+      "canonicalBytes": 281,
+      "sha256": "e4fcdedc35ec3a573b6fb411dc87fa34bdd3c7c0c3bc1bcc2a492be238b89803"
+    },
+    "03-strings-and-escapes.input.json": {
+      "canonicalBytes": 516,
+      "sha256": "c8fc2fd01b728eed9a875528f2f5786d1b45a942e29d8405f9a3634d4a92e981"
+    },
+    "04-structure.input.json": {
+      "canonicalBytes": 270,
+      "sha256": "71760c157fcbc75b2329abb1ad692501a93fc9d79f198ec20a5fe060ffdefa52"
+    },
+    "05-deep-nesting.input.json": {
+      "canonicalBytes": 918,
+      "sha256": "a7d03d7a36bd96fd78febd5b8cabaeb412eba27695222c1f4d25a14e88a18d96"
+    },
+    "06-manifest-shaped.input.json": {
+      "canonicalBytes": 1585,
+      "sha256": "16d141aec2f8e6cc3a9ba0304c9b17f3b000dd54d6cbfba72c4f99e947824091"
+    }
   }
 }

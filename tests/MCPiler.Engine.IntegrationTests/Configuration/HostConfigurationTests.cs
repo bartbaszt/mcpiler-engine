@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 
 using MCPiler.Engine.Host.Configuration;
@@ -717,6 +718,163 @@ public sealed class HostConfigurationTests
     {
         Assert.Contains(HostConfiguration.IntrospectionClientIdKey, HostConfiguration.AcceptedKeys);
         Assert.Contains(HostConfiguration.IntrospectionClientSecretFileKey, HostConfiguration.AcceptedKeys);
+    }
+
+    [Fact]
+    public void Response_cache_host_settings_narrow_each_hard_ceiling()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.ResponseCacheMaxBodyBytesKey] = "1048576",
+            [HostConfiguration.ResponseCacheMaxRetainedBytesKey] = "33554432",
+            [HostConfiguration.ResponseCacheMaxEntriesKey] = "128",
+            [HostConfiguration.ResponseCacheMaxTtlSecondsKey] = "3600",
+        };
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. settings], out HostBinding? binding, out IReadOnlyList<string> refusals));
+        Assert.Empty(refusals);
+        Assert.Equal(1_048_576, binding!.Runtime.ResponseCache.MaxBodyBytes);
+        Assert.Equal(33_554_432, binding.Runtime.ResponseCache.MaxRetainedBytesPerMount);
+        Assert.Equal(128, binding.Runtime.ResponseCache.MaxEntriesPerMount);
+        Assert.Equal(3600, binding.Runtime.ResponseCache.MaxTtlSeconds);
+    }
+
+    [Fact]
+    public void A_zero_response_cache_ceiling_disables_the_cache_without_refusing_the_host()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.ResponseCacheMaxTtlSecondsKey] = "0",
+        };
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. settings], out HostBinding? binding, out _));
+        Assert.True(binding!.Runtime.ResponseCache.IsDisabled);
+    }
+
+    [Theory]
+    [InlineData(HostConfiguration.ResponseCacheMaxBodyBytesKey, "8388609", "8388608")]
+    [InlineData(HostConfiguration.ResponseCacheMaxRetainedBytesKey, "268435457", "268435456")]
+    [InlineData(HostConfiguration.ResponseCacheMaxEntriesKey, "4097", "4096")]
+    [InlineData(HostConfiguration.ResponseCacheMaxTtlSecondsKey, "86401", "86400")]
+    public void A_response_cache_widening_is_refused_with_the_hard_ceiling_named(
+        string key,
+        string attempted,
+        string hardMaximum)
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [key] = attempted,
+        };
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
+        Assert.Contains(refusals, refusal =>
+            refusal.Contains(key, StringComparison.Ordinal)
+            && refusal.Contains(attempted, StringComparison.Ordinal)
+            && refusal.Contains(hardMaximum, StringComparison.Ordinal)
+            && refusal.Contains("only narrow", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("-1")]
+    [InlineData("1.5")]
+    [InlineData("later")]
+    public void A_malformed_response_cache_ceiling_is_refused(string value)
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.ResponseCacheMaxTtlSecondsKey] = value,
+        };
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
+        Assert.Contains(refusals, refusal =>
+            refusal.Contains(HostConfiguration.ResponseCacheMaxTtlSecondsKey, StringComparison.Ordinal)
+            && refusal.Contains("non-negative whole number", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The operator channel is opt-in, and its credential is a file the operator names.
+    /// </summary>
+    /// <remarks>
+    /// Absent configuration must mean the channel is not mapped at all, so the assertion that
+    /// matters is the empty secret plus the accepted key. The secret is read at bind time, so a
+    /// valid file is proven here rather than at the first operator request.
+    /// </remarks>
+    [Fact]
+    public void The_response_cache_operator_secret_is_optional_and_read_at_bind_time()
+    {
+        Assert.Contains(HostConfiguration.ResponseCacheOperatorSecretFileKey, HostConfiguration.AcceptedKeys);
+
+        Dictionary<string, string> withoutChannel = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+        };
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. withoutChannel], out HostBinding? closed, out _));
+
+        // The safe default: no secret means no operator route exists, so nothing has to be
+        // refused at request time.
+        Assert.Null(closed!.ResponseCacheOperatorSecret);
+
+        string path = Path.Combine(Path.GetTempPath(), "mcpiler-operator-" + Guid.NewGuid().ToString("N"));
+        File.WriteAllText(path, "operator-secret-value\n");
+
+        try
+        {
+            Dictionary<string, string> withChannel = new(StringComparer.Ordinal)
+            {
+                [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+                [HostConfiguration.ResponseCacheOperatorSecretFileKey] = path,
+            };
+
+            Assert.True(HostConfiguration.TryBind(Mounts(), [.. withChannel], out HostBinding? open, out _));
+
+            // The trailing newline an editor adds is not part of the secret.
+            Assert.Equal("operator-secret-value", open!.ResponseCacheOperatorSecret);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void A_missing_or_empty_response_cache_operator_secret_file_is_refused_at_bind_time()
+    {
+        Dictionary<string, string> missing = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.ResponseCacheOperatorSecretFileKey] =
+                Path.Combine(Path.GetTempPath(), "mcpiler-absent-" + Guid.NewGuid().ToString("N")),
+        };
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. missing], out _, out IReadOnlyList<string> refusals));
+        Assert.Contains(
+            refusals,
+            refusal => refusal.Contains(HostConfiguration.ResponseCacheOperatorSecretFileKey, StringComparison.Ordinal)
+                || refusal.Contains("does not exist", StringComparison.Ordinal));
+
+        string empty = Path.Combine(Path.GetTempPath(), "mcpiler-empty-" + Guid.NewGuid().ToString("N"));
+        File.WriteAllText(empty, "\n");
+
+        try
+        {
+            Dictionary<string, string> blank = new(StringComparer.Ordinal)
+            {
+                [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+                [HostConfiguration.ResponseCacheOperatorSecretFileKey] = empty,
+            };
+
+            Assert.False(HostConfiguration.TryBind(Mounts(), [.. blank], out _, out IReadOnlyList<string> refused));
+            Assert.Contains(refused, refusal => refusal.Contains("empty", StringComparison.Ordinal));
+        }
+        finally
+        {
+            File.Delete(empty);
+        }
     }
 
     private static List<KeyValuePair<string, string>> Mounts() => [new("/api", "/manifests/api")];

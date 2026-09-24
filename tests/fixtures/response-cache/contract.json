@@ -1,0 +1,152 @@
+{
+  "source": "Independently authored for PRC-MAN-1..6; not generated from Platform or Engine output.",
+  "httpOperations": [
+    { "key": "GET /pets", "method": "GET", "path": "/pets" },
+    { "key": "POST /pets", "method": "POST", "path": "/pets" }
+  ],
+  "validSections": [
+    {
+      "name": "disabled-absent",
+      "section": {
+        "formatVersion": 4,
+        "operations": [
+          {
+            "slug": "list-pets",
+            "name": "list-pets",
+            "inputSchema": { "type": "object" },
+            "annotations": { "readOnly": true, "destructive": false, "idempotent": false, "openWorld": true },
+            "binding": { "type": "http", "operation": "GET /pets" }
+          }
+        ]
+      }
+    },
+    {
+      "name": "enabled-get",
+      "section": {
+        "formatVersion": 4,
+        "operations": [
+          {
+            "slug": "list-pets",
+            "name": "list-pets",
+            "inputSchema": { "type": "object" },
+            "annotations": { "readOnly": true, "destructive": false, "idempotent": false, "openWorld": true },
+            "binding": { "type": "http", "operation": "GET /pets" },
+            "responseCache": { "ttlSeconds": 300 }
+          }
+        ]
+      }
+    }
+  ],
+  "invalidSections": [
+    {
+      "name": "ttl-zero",
+      "section": {
+        "formatVersion": 4,
+        "operations": [
+          {
+            "slug": "list-pets",
+            "name": "List pets",
+            "binding": { "type": "http", "operation": "GET /pets" },
+            "responseCache": { "ttlSeconds": 0 }
+          }
+        ]
+      },
+      "diagnosticCode": "agent/response-cache-policy-invalid",
+      "pointer": "/operations/0/responseCache/ttlSeconds"
+    },
+    {
+      "name": "ttl-fraction",
+      "section": {
+        "formatVersion": 4,
+        "operations": [
+          {
+            "slug": "list-pets",
+            "name": "List pets",
+            "binding": { "type": "http", "operation": "GET /pets" },
+            "responseCache": { "ttlSeconds": 1.5 }
+          }
+        ]
+      },
+      "diagnosticCode": "agent/response-cache-policy-invalid",
+      "pointer": "/operations/0/responseCache/ttlSeconds"
+    },
+    {
+      "name": "ttl-missing",
+      "section": {
+        "formatVersion": 4,
+        "operations": [
+          {
+            "slug": "list-pets",
+            "name": "List pets",
+            "binding": { "type": "http", "operation": "GET /pets" },
+            "responseCache": {}
+          }
+        ]
+      },
+      "diagnosticCode": "agent/response-cache-policy-invalid",
+      "pointer": "/operations/0/responseCache/ttlSeconds"
+    },
+    {
+      "name": "unknown-policy-member",
+      "section": {
+        "formatVersion": 4,
+        "operations": [
+          {
+            "slug": "list-pets",
+            "name": "List pets",
+            "binding": { "type": "http", "operation": "GET /pets" },
+            "responseCache": { "ttlSeconds": 300, "mode": "stale" }
+          }
+        ]
+      },
+      "diagnosticCode": "manifest/unknown-member",
+      "pointer": "/operations/0/responseCache/mode"
+    },
+    {
+      "name": "effective-post-binding",
+      "section": {
+        "formatVersion": 4,
+        "operations": [
+          {
+            "slug": "create-pet",
+            "name": "Create pet",
+            "binding": { "type": "http", "operation": "POST /pets" },
+            "responseCache": { "ttlSeconds": 300 }
+          }
+        ]
+      },
+      "diagnosticCode": "agent/response-cache-policy-invalid",
+      "pointer": "/operations/0/responseCache"
+    },
+    {
+      "name": "compound-binding",
+      "section": {
+        "formatVersion": 4,
+        "operations": [
+          {
+            "slug": "list-pets",
+            "name": "List pets",
+            "binding": { "type": "http", "operation": "GET /pets" }
+          },
+          {
+            "slug": "cached-workflow",
+            "name": "Cached workflow",
+            "binding": {
+              "type": "compound",
+              "steps": [{ "stepId": "read", "operation": "list-pets" }]
+            },
+            "responseCache": { "ttlSeconds": 300 }
+          }
+        ]
+      },
+      "diagnosticCode": "agent/response-cache-policy-invalid",
+      "pointer": "/operations/1/responseCache"
+    }
+  ],
+  "generationTransition": {
+    "from": "disabled-absent",
+    "to": "enabled-get",
+    "sameOperationSlug": "list-pets",
+    "expectedDifferentGeneration": true
+  }
+}

@@ -1,5 +1,7 @@
 using System.Net;
 
+using MCPiler.Engine.Execution;
+
 namespace MCPiler.Engine.Execution.Outbound;
 
 /// <summary>
@@ -36,9 +38,10 @@ public delegate HttpMessageHandler UpstreamHandlerFactory(OutboundLimits limits)
 public sealed class UpstreamClientFactory : IDisposable
 {
     /// <summary>The user agent every Engine-originated request announces.</summary>
-    public const string UserAgent = "MCPiler-Engine/0.1";
+    public const string UserAgent = UpstreamRequestDefaults.UserAgent;
 
     private readonly UpstreamHandlerFactory _handlers;
+    private readonly bool _cookieStateObservable;
     private readonly Lock _gate = new();
     private readonly Dictionary<OutboundLimits, HttpClient> _clients = [];
     private bool _disposed;
@@ -54,6 +57,7 @@ public sealed class UpstreamClientFactory : IDisposable
     {
         ArgumentNullException.ThrowIfNull(connections);
         _handlers = limits => CreateSocketsHandler(limits, connections);
+        _cookieStateObservable = true;
     }
 
     /// <summary>Creates a factory over a substituted transport stack.</summary>
@@ -61,7 +65,11 @@ public sealed class UpstreamClientFactory : IDisposable
     {
         ArgumentNullException.ThrowIfNull(handlers);
         _handlers = handlers;
+        _cookieStateObservable = false;
     }
+
+    /// <summary>Whether the stock handler has no hidden, externally pre-seeded cookie state.</summary>
+    internal bool CookieStateObservable => _cookieStateObservable;
 
     /// <summary>The number of distinct policies currently holding a client.</summary>
     public int CachedClientCount

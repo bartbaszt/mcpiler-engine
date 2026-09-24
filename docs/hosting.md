@@ -57,9 +57,19 @@ The host accepts the following settings:
 | `--introspection-client-secret-file <file>` | File holding that client's secret. A path, never a value: a command-line secret is visible to every process listing. Paired with `--introspection-client-id`. |
 | `--jwks-uri <url>` | Override the issuer's published JWKS URI. |
 | `--drain-timeout-seconds <n>` | Positive whole-second shutdown drain window. Default: 100 seconds. |
+| `--response-cache-max-body-bytes <n>` | Narrows the hard 8 MiB per-entry body ceiling. Zero disables response caching. |
+| `--response-cache-max-retained-bytes <n>` | Narrows the hard 256 MiB accounted-memory ceiling per mount. Zero disables response caching. |
+| `--response-cache-max-entries <n>` | Narrows the hard 4,096-entry ceiling per mount. Zero disables response caching. |
+| `--response-cache-max-ttl-seconds <n>` | Narrows the hard 86,400-second effective TTL ceiling. Zero disables response caching. |
 
 Unknown settings are refused by name. Runtime API destinations, allowed origins, credentials,
 and Manifest-compiled execution limits are not host configuration.
+
+Response-cache settings are host-only ceilings; they never change published Manifest bytes or
+managed desired state. Each value must be a non-negative whole number no greater than its hard
+maximum. A value above that maximum is refused with the allowed ceiling in the diagnostic.
+Setting any of the four ceilings to zero disables caching while leaving ordinary live HTTP
+execution unchanged. Startup and inspection reports show effective ceilings and disabled state.
 
 Two switches affect Manifest admission:
 

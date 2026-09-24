@@ -392,13 +392,20 @@ public sealed class ManagedGenerationLoader : IDisposable
             warnings,
             _files,
             _options.AllowInlineSecrets,
-            _runtimeState);
+            _runtimeState,
+            _options.ResponseCache.ClampToHardMaxima());
 
         EngineExecution execution;
 
         try
         {
-            execution = EngineExecution.Create(started, providers, _connections, diagnostics: null, rotations);
+            execution = EngineExecution.Create(
+                started,
+                providers,
+                _connections,
+                diagnostics: null,
+                rotations: rotations,
+                generationLabel: delivery.GenerationId);
         }
         catch
         {

@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using MCPiler.Engine.Execution;
 using MCPiler.Engine.Execution.Files;
 using MCPiler.Engine.Host.Cli;
+using MCPiler.Engine.Host.Configuration;
 using MCPiler.Engine.Host.Hosting;
 using MCPiler.Engine.IntegrationTests.Mcp;
 using MCPiler.Engine.Runtime;
@@ -134,6 +135,38 @@ public sealed class HostCommandsTests : IDisposable
         }
 
         Assert.NotEmpty(surface.ToolNames);
+    }
+
+    [Fact]
+    public async Task Inspect_reports_the_operator_channel_presence_without_the_secret()
+    {
+        string store = Store();
+        string secret = Path.Combine(_root, "operator-" + Guid.NewGuid().ToString("N"));
+        File.WriteAllText(secret, "operator-secret-canary-value\n");
+
+        CommandOutcome absent = await HostCommands.RunAsync(
+            ["inspect", "--mount", "/api=" + Manifest("api"), "--file-store-root", store],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        // Absent configuration is the safe default, and the report says so.
+        Assert.Contains("response-cache operator channel: absent", absent.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("operator-secret-canary-value", absent.Output, StringComparison.Ordinal);
+
+        CommandOutcome present = await HostCommands.RunAsync(
+            [
+                "inspect",
+                "--mount", "/api=" + Manifest("api"),
+                "--file-store-root", store,
+                "--" + HostConfiguration.ResponseCacheOperatorSecretFileKey, secret,
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("response-cache operator channel: configured", present.Output, StringComparison.Ordinal);
+
+        // Configured is stated as presence only; the secret never appears in the report.
+        Assert.DoesNotContain("operator-secret-canary-value", present.Output, StringComparison.Ordinal);
     }
 
     [Fact]

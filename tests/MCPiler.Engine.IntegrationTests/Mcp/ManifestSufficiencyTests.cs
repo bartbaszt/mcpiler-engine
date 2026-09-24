@@ -115,6 +115,118 @@ public sealed class ManifestSufficiencyTests : IDisposable
         Assert.Equal(0, Volatile.Read(ref arrivals));
     }
 
+    /// <summary>
+    /// The independently authored v4 fixture's enabled policy, served through the real host, must
+    /// actually cache: two identical calls reach the upstream once. This is the behavioral half of
+    /// the shared contract — Platform owns the bytes that carry <c>responseCache</c>, and this side
+    /// proves Engine acts on the member rather than only accepting it at load time.
+    /// </summary>
+    [Fact]
+    public async Task An_opted_in_policy_caches_two_identical_calls_into_one_upstream_request()
+    {
+        int arrivals = 0;
+        await using LoopbackHost upstream = await LoopbackHost.StartAsync(
+            async context =>
+            {
+                Interlocked.Increment(ref arrivals);
+                context.Response.ContentType = "application/json";
+                await context.Response.WriteAsync("{\"ok\":true}", context.RequestAborted);
+            },
+            Token);
+
+        await using ServedEngine engine = await ServeAsync(
+            Manifest(upstream.Address, cacheTtlSeconds: 300),
+            "cached-policy");
+        using McpHttpSession session = await McpHttpSession.OpenAsync(engine.At("/api/full"), Token);
+
+        McpExchange first = await session.CallAsync("ping", "{}", 10, Token);
+        McpExchange second = await session.CallAsync("ping", "{}", 11, Token);
+
+        Assert.Equal(HttpStatusCode.OK, first.Status);
+        Assert.Equal(HttpStatusCode.OK, second.Status);
+        Assert.Equal("{\"ok\":true}", FirstText(first.Payload));
+        Assert.Equal("{\"ok\":true}", FirstText(second.Payload));
+
+        // The claim this test exists for: the second call was answered from cache, so the upstream
+        // saw exactly one request. A fixture that only loaded would leave this at 2.
+        Assert.Equal(1, Volatile.Read(ref arrivals));
+    }
+
+    /// <summary>
+    /// The absent-policy compat case: the same fixture without a <c>responseCache</c> member is
+    /// eligible by method and media type, but a missing policy means every call is a live send.
+    /// Without this, the caching assertion above could pass on an implementation that cached
+    /// everything regardless of the authored opt-in.
+    /// </summary>
+    [Fact]
+    public async Task An_absent_policy_leaves_every_call_a_live_upstream_request()
+    {
+        int arrivals = 0;
+        await using LoopbackHost upstream = await LoopbackHost.StartAsync(
+            async context =>
+            {
+                Interlocked.Increment(ref arrivals);
+                context.Response.ContentType = "application/json";
+                await context.Response.WriteAsync("{\"ok\":true}", context.RequestAborted);
+            },
+            Token);
+
+        await using ServedEngine engine = await ServeAsync(Manifest(upstream.Address), "absent-policy");
+        using McpHttpSession session = await McpHttpSession.OpenAsync(engine.At("/api/full"), Token);
+
+        _ = await session.CallAsync("ping", "{}", 12, Token);
+        _ = await session.CallAsync("ping", "{}", 13, Token);
+
+        Assert.Equal(2, Volatile.Read(ref arrivals));
+    }
+
+    /// <summary>
+    /// A hosted generation exposes neither cache contents nor counters as manifest or desired
+    /// state: the only way to observe them is the operator channel, and the served Manifest bytes
+    /// carry the authored policy member alone.
+    /// </summary>
+    [Fact]
+    public async Task The_served_manifest_carries_the_policy_member_and_no_cache_contents()
+    {
+        int arrivals = 0;
+        await using LoopbackHost upstream = await LoopbackHost.StartAsync(
+            async context =>
+            {
+                Interlocked.Increment(ref arrivals);
+                context.Response.ContentType = "application/json";
+                await context.Response.WriteAsync("{\"ok\":true}", context.RequestAborted);
+            },
+            Token);
+
+        string text = Manifest(upstream.Address, cacheTtlSeconds: 300);
+        await using ServedEngine engine = await ServeAsync(text, "policy-member");
+        using McpHttpSession session = await McpHttpSession.OpenAsync(engine.At("/api/full"), Token);
+
+        // Warm the cache so an implementation that leaked runtime state into the served document
+        // would have something to leak.
+        _ = await session.CallAsync("ping", "{}", 14, Token);
+        Assert.Equal(1, Volatile.Read(ref arrivals));
+
+        var mount = Assert.Single(engine.Started.Mounts);
+        string served = mount.Document.AgentSurfaceDocument!.ToJsonString();
+
+        Assert.Contains("\"responseCache\":{\"ttlSeconds\":300}", served, StringComparison.Ordinal);
+        Assert.DoesNotContain("invocations", served, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("upstreamSends", served, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("keyFingerprint", served, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("observedAtUtc", served, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string FirstText(string payload)
+    {
+        using JsonDocument document = JsonDocument.Parse(payload);
+        return document.RootElement
+            .GetProperty("result")
+            .GetProperty("content")[0]
+            .GetProperty("text")
+            .GetString()!;
+    }
+
     private async Task<ServedEngine> ServeAsync(string manifestText, string name)
     {
         string manifest = ServedManifests.Write(_root, name, manifestText);
@@ -141,7 +253,7 @@ public sealed class ManifestSufficiencyTests : IDisposable
         return text[start..end];
     }
 
-    internal static string Manifest(Uri upstream, bool binary = false, string? credentialVariable = null)
+    internal static string Manifest(Uri upstream, bool binary = false, string? credentialVariable = null, int? cacheTtlSeconds = null)
     {
         string credentialRef = credentialVariable is null ? string.Empty : ", \"credentialRef\": [\"api-key\"]";
         string credentials = credentialVariable is null
@@ -151,6 +263,9 @@ public sealed class ManifestSufficiencyTests : IDisposable
                 + "\"location\": \"header\", \"value\": { \"fromEnv\": "
                 + JsonSerializer.Serialize(credentialVariable)
                 + " } } ] } }";
+        string responseCache = cacheTtlSeconds is { } ttl
+            ? ", \"responseCache\": { \"ttlSeconds\": " + ttl.ToString(System.Globalization.CultureInfo.InvariantCulture) + " }"
+            : string.Empty;
         string content = binary
             ? "\"application/octet-stream\": { \"schema\": { \"type\": \"string\", \"format\": \"binary\" } }"
             : "\"application/json\": { \"schema\": { \"type\": \"object\" } }";
@@ -177,7 +292,7 @@ public sealed class ManifestSufficiencyTests : IDisposable
                 "agentSurface": { "inline": { "operations": [
                   {
                     "slug": "ping", "name": "Ping", "summary": "Checks connectivity",
-                    "binding": { "type": "http", "operation": "GET /ping"{{credentialRef}} }
+                    "binding": { "type": "http", "operation": "GET /ping"{{credentialRef}} }{{responseCache}}
                   }
                 ] } }{{credentials}}
               }

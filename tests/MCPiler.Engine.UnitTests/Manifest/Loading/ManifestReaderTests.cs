@@ -1,6 +1,7 @@
 using MCPiler.Engine.Manifest.Loading;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Manifest.Validation;
+using System.Text.Json.Nodes;
 
 using Xunit;
 
@@ -377,4 +378,42 @@ public sealed class ManifestReaderTests
     [Fact]
     public void Every_required_section_is_a_known_section()
         => Assert.All(ManifestReader.RequiredSections, name => Assert.True(ManifestSectionName.IsKnown(name)));
+
+    [Fact]
+    public void Independently_authored_v4_response_cache_sections_load_or_refuse_by_fixture_contract()
+    {
+        var fixture = JsonNode.Parse(File.ReadAllBytes(
+            TestRepository.Fixture("response-cache", "contract.json")))!.AsObject();
+
+        foreach (var entry in fixture["validSections"]!.AsArray())
+        {
+            var result = ReadWithAgentSurface(entry!["section"]!.DeepClone());
+            Assert.True(
+                result.Succeeded,
+                $"Fixture '{entry["name"]!.GetValue<string>()}' failed: "
+                + string.Join(" | ", result.Diagnostics.Select(static diagnostic => diagnostic.ToString())));
+        }
+
+        foreach (var entry in fixture["invalidSections"]!.AsArray())
+        {
+            var result = ReadWithAgentSurface(entry!["section"]!.DeepClone());
+            var diagnosticCode = entry["diagnosticCode"]!.GetValue<string>();
+            var pointer = entry["pointer"]!.GetValue<string>();
+            var diagnostic = Assert.Single(result.Errors, item => item.Code == diagnosticCode);
+
+            Assert.Equal(pointer, diagnostic.Pointer);
+        }
+    }
+
+    private static ManifestReadResult ReadWithAgentSurface(JsonNode agentSurface)
+    {
+        var fixture = JsonNode.Parse(File.ReadAllBytes(
+            TestRepository.Fixture("response-cache", "contract.json")))!.AsObject();
+        var root = JsonNode.Parse(MinimalManifest)!.AsObject();
+        var sections = root["sections"]!.AsObject();
+        sections["agentSurface"]!.AsObject()["inline"] = agentSurface;
+        sections["operations"]!.AsObject()["inline"]!["operations"] = fixture["httpOperations"]!.DeepClone();
+
+        return Read(root.ToJsonString());
+    }
 }

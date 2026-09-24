@@ -47,6 +47,18 @@ public sealed record UpstreamRequest
     /// redact these values while preserving ordinary request structure.
     /// </summary>
     public IReadOnlyCollection<string> SensitiveQueryParameters { get; init; } = [];
+
+    /// <summary>
+    /// Optional header values for keyed identity after credential values have been replaced by
+    /// stable authority markers. Never passed to the transport.
+    /// </summary>
+    internal IReadOnlyDictionary<string, string[]>? CacheIdentityHeaders { get; init; }
+
+    /// <summary>Header names whose cache-identity values are wholly represented by authority.</summary>
+    internal IReadOnlyCollection<string> AuthorityRepresentedSensitiveHeaders { get; init; } = [];
+
+    /// <summary>The credential-normalized URI used only for opaque cache identity derivation.</summary>
+    internal Uri? CacheIdentityUri { get; init; }
 }
 
 /// <summary>The governing outbound policy for one exchange.</summary>
@@ -104,7 +116,8 @@ public sealed class UpstreamResponse : IAsyncDisposable
         IReadOnlyDictionary<string, string[]> headers,
         string? mediaType,
         Stream body,
-        IAsyncDisposable? owner = null)
+        IAsyncDisposable? owner = null,
+        bool wasRedirected = false)
     {
         ArgumentNullException.ThrowIfNull(headers);
         ArgumentNullException.ThrowIfNull(body);
@@ -114,6 +127,7 @@ public sealed class UpstreamResponse : IAsyncDisposable
         MediaType = mediaType;
         Body = body;
         _owner = owner;
+        WasRedirected = wasRedirected;
     }
 
     /// <summary>The observed status code.</summary>
@@ -127,6 +141,9 @@ public sealed class UpstreamResponse : IAsyncDisposable
 
     /// <summary>The body stream. Bounded reading is the caller's obligation.</summary>
     public Stream Body { get; }
+
+    /// <summary>Whether the transport followed one or more redirects before this response.</summary>
+    public bool WasRedirected { get; }
 
     /// <inheritdoc />
     public async ValueTask DisposeAsync()

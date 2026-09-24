@@ -41,17 +41,21 @@ internal sealed class MountAuthorizationMiddleware
 {
     private readonly RequestDelegate _next;
     private readonly ITokenValidator _tokens;
+    private readonly CallerPartitionKey _partitions;
 
     /// <summary>
     /// The middleware constructor. Public because the middleware convention requires it; the
-    /// validator is registered and the next delegate is supplied by the pipeline.
+    /// validator and the partition key are registered and the next delegate is supplied by the
+    /// pipeline.
     /// </summary>
     public MountAuthorizationMiddleware(
         RequestDelegate next,
-        ITokenValidator tokens)
+        ITokenValidator tokens,
+        CallerPartitionKey partitions)
     {
         _next = next;
         _tokens = tokens;
+        _partitions = partitions;
     }
 
     /// <summary>
@@ -89,11 +93,14 @@ internal sealed class MountAuthorizationMiddleware
 
         if (!admission.Resolution.Mount.RequiresAuthorization())
         {
+            // An open mount states its identity explicitly rather than leaving a consumer to
+            // infer one from an absence: every caller of this mount shares one public partition.
+            admission.CallerPartition = CallerPartition.Public;
             await _next(context);
             return;
         }
 
-        TokenVerification verification = await VerifyAsync(context).ConfigureAwait(false);
+        (TokenVerification verification, string? presented) = await VerifyAsync(context).ConfigureAwait(false);
 
         if (!verification.Active)
         {
@@ -122,6 +129,14 @@ internal sealed class MountAuthorizationMiddleware
             }
         }
 
+        // Derived here because this is the only place the authorization decision was made: the
+        // presented token, the resource it was admitted for and the scopes it carried are all
+        // available together, and nowhere else are they. A partition derived anywhere else would
+        // be derived from facts some other component believed rather than from what was decided.
+        admission.CallerPartition = new CallerPartition(
+            CallerPartitionDerivation.Derive(presented!, canonical, verification.Scopes, _partitions.Value),
+            IsCallerSpecific: true);
+
         await _next(context).ConfigureAwait(false);
     }
 
@@ -129,23 +144,23 @@ internal sealed class MountAuthorizationMiddleware
     /// Reads the bearer token, admitting no other scheme, no other placement and no
     /// credentials that parse to nothing.
     /// </summary>
-    private async Task<TokenVerification> VerifyAsync(HttpContext context)
+    private async Task<(TokenVerification Verification, string? Presented)> VerifyAsync(HttpContext context)
     {
         string? header = context.Request.Headers.Authorization.ToString();
 
         if (header is null || !header.StartsWith("Bearer ", StringComparison.Ordinal))
         {
-            return TokenVerification.Inactive;
+            return (TokenVerification.Inactive, null);
         }
 
         string token = header["Bearer ".Length..].Trim();
 
         if (token.Length == 0)
         {
-            return TokenVerification.Inactive;
+            return (TokenVerification.Inactive, null);
         }
 
-        return await _tokens.ValidateAsync(token, context.RequestAborted).ConfigureAwait(false);
+        return (await _tokens.ValidateAsync(token, context.RequestAborted).ConfigureAwait(false), token);
     }
 
     /// <summary>

@@ -135,6 +135,12 @@ internal static class CompoundExecutor
                             Scope = request.Scope,
                             Files = carried,
 
+                            // The caller identity the host proved for this invocation. A workflow
+                            // step runs under the same caller as the workflow: a step that
+                            // dropped it would let two different callers share one step's
+                            // cached response while their workflows stayed separate.
+                            CallerPartition = request.CallerPartition,
+
                             // What is left of the workflow's budget, so the aggregate is a
                             // bound on what arrives rather than a sum checked afterwards. A
                             // step is still separately bounded by the policy's own ceiling;

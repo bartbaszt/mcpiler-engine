@@ -21,7 +21,7 @@ public sealed record AgentSurfaceSection(
     /// moved rather than only the root version because each change is confined to this
     /// section's payload.
     /// </remarks>
-    public const int FormatVersion = 3;
+    public const int FormatVersion = 4;
 
     /// <summary>The declared operations, never null.</summary>
     public IReadOnlyList<AgentOperationEntry> Operations { get; init; } = Operations ?? [];
@@ -85,7 +85,8 @@ public sealed record AgentOperationEntry(
     OutputSchemaPolicySettings? OutputSchemaPolicy = null,
     ToolAnnotations? Annotations = null,
     string? Risk = null,
-    SearchMetadataEntry? Search = null)
+    SearchMetadataEntry? Search = null,
+    ResponseCachePolicySettings? ResponseCache = null)
 {
     /// <summary>The risk string meaning "no risk flags set".</summary>
     public const string NoRisk = "none";
@@ -147,6 +148,9 @@ public sealed record AgentOperationEntry(
         return ToolAnnotations.FromMethod(method);
     }
 }
+
+/// <summary>Optional per-operation upstream response cache policy.</summary>
+public sealed record ResponseCachePolicySettings(int TtlSeconds);
 
 /// <summary>A declared operation group.</summary>
 /// <param name="Name">The group name. The join key for an operation's group list.</param>

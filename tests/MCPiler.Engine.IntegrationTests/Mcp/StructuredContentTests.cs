@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -9,7 +10,10 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
+using MCPiler.Engine.Mcp;
 using MCPiler.Engine.Runtime;
+
+using Microsoft.AspNetCore.Http;
 
 using Xunit;
 
@@ -269,6 +273,52 @@ public sealed class StructuredContentTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Output_schema_validation_runs_again_on_a_cached_raw_response()
+    {
+        int upstreamSends = 0;
+        await using LoopbackHost upstream = await LoopbackHost.StartAsync(
+            async context =>
+            {
+                Interlocked.Increment(ref upstreamSends);
+                context.Response.StatusCode = 200;
+                context.Response.ContentType = "application/json";
+                await context.Response.WriteAsync("{\"value\":\"not-an-integer\"}", context.RequestAborted);
+            },
+            Token);
+        ConcurrentQueue<RuntimeDiagnostic> diagnostics = new();
+        (ServedEngine engine, _) = await ServeWithManifestAsync(
+            upstream.Address,
+            "yes",
+            capability: true,
+            diagnostics.Enqueue,
+            outputSchema: ObjectSchema,
+            responseCacheTtlSeconds: 300);
+
+        await using (engine)
+        {
+            using McpHttpSession session = await McpHttpSession.OpenAsync(
+                engine.At("/api/full"),
+                Token,
+                "2025-06-18");
+
+            McpExchange listed = await session.RequestAsync("tools/list", 2, Token);
+            Assert.True(Tool(listed).TryGetProperty("outputSchema", out _));
+
+            McpExchange first = await session.CallAsync("read-value", "{}", 3, Token);
+            McpExchange second = await session.CallAsync("read-value", "{}", 4, Token);
+
+            Assert.Equal("{\"value\":\"not-an-integer\"}", Text(first));
+            Assert.Equal(Text(first), Text(second));
+            Assert.False(Result(first).TryGetProperty("structuredContent", out _));
+            Assert.False(Result(second).TryGetProperty("structuredContent", out _));
+            Assert.False(Result(first).TryGetProperty("isError", out JsonElement firstError) && firstError.GetBoolean());
+            Assert.False(Result(second).TryGetProperty("isError", out JsonElement secondError) && secondError.GetBoolean());
+            Assert.Equal(1, upstreamSends);
+            Assert.Equal(2, diagnostics.Count(diagnostic => diagnostic.Code == StructuredContentValidator.DiagnosticCode));
+        }
+    }
+
     private async Task<ServedEngine> ServeAsync(
         Uri upstream,
         string advertise,
@@ -286,13 +336,14 @@ public sealed class StructuredContentTests : IDisposable
         string advertise,
         bool capability,
         Action<RuntimeDiagnostic>? diagnostics,
-        string outputSchema = ArraySchema)
+        string outputSchema = ArraySchema,
+        int? responseCacheTtlSeconds = null)
     {
         string name = "manifest-" + Guid.NewGuid().ToString("N");
         string manifest = ServedManifests.Write(
             _root,
             name,
-            Manifest(upstream, advertise, capability, outputSchema));
+            Manifest(upstream, advertise, capability, outputSchema, responseCacheTtlSeconds));
         string store = Directory.CreateDirectory(Path.Combine(_root, "files-" + name)).FullName;
         ServedEngine engine = await ServedEngine.StartAsync(
             new RuntimeOptions([new MountRequest("/api", manifest)], store),
@@ -302,8 +353,18 @@ public sealed class StructuredContentTests : IDisposable
         return (engine, manifest);
     }
 
-    private static string Manifest(Uri upstream, string advertise, bool capability, string outputSchema)
-        => $$"""
+    private static string Manifest(
+        Uri upstream,
+        string advertise,
+        bool capability,
+        string outputSchema,
+        int? responseCacheTtlSeconds)
+    {
+        string cacheMember = responseCacheTtlSeconds is { } ttl
+            ? $", \"responseCache\": {{\"ttlSeconds\": {ttl}}}"
+            : string.Empty;
+
+        return $$"""
         {
           "manifestFormatVersion": "0.3",
           "sections": {
@@ -340,7 +401,7 @@ public sealed class StructuredContentTests : IDisposable
                       "advertise": "{{advertise}}",
                       "useInternally": false
                     },
-                    "binding": { "type": "http", "operation": "GET /value" }
+                    "binding": { "type": "http", "operation": "GET /value" }{{cacheMember}}
                   }
                 ]
               }
@@ -348,6 +409,7 @@ public sealed class StructuredContentTests : IDisposable
           }
         }
         """;
+    }
 
     private static Task<LoopbackHost> Respond(string body)
         => LoopbackHost.StartAsync(

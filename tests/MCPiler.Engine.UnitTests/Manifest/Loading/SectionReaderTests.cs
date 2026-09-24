@@ -1240,6 +1240,132 @@ public sealed class SectionReaderTests
     }
 
     [Fact]
+    public void AgentSurface_reads_an_absent_response_cache_as_no_policy()
+    {
+        var section = SectionReader.ReadAgentSurface(
+            Json(
+                """
+                {
+                  "operations": [
+                    { "slug": "a", "name": "A", "binding": { "type": "http", "operation": "GET /a" } }
+                  ]
+                }
+                """),
+            _diagnostics);
+
+        AssertNoErrors();
+        Assert.Null(section!.Operations[0].ResponseCache);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(300)]
+    [InlineData(86400)]
+    public void AgentSurface_reads_a_response_cache_ttl(int ttl)
+    {
+        var section = SectionReader.ReadAgentSurface(
+            Json(
+                $$"""
+                {
+                  "operations": [
+                    {
+                      "slug": "a", "name": "A",
+                      "binding": { "type": "http", "operation": "GET /a" },
+                      "responseCache": { "ttlSeconds": {{ttl}} }
+                    }
+                  ]
+                }
+                """),
+            _diagnostics);
+
+        AssertNoErrors();
+        Assert.Equal(ttl, section!.Operations[0].ResponseCache!.TtlSeconds);
+    }
+
+    /// <summary>
+    /// Member order inside the policy object is not semantic, so the same policy declared in a
+    /// different layout reads identically.
+    /// </summary>
+    [Fact]
+    public void AgentSurface_response_cache_reading_is_member_order_independent()
+    {
+        var first = SectionReader.ReadAgentSurface(
+            Json(
+                """
+                {
+                  "operations": [
+                    {
+                      "slug": "a", "name": "A",
+                      "responseCache": { "ttlSeconds": 60 },
+                      "binding": { "type": "http", "operation": "GET /a" }
+                    }
+                  ]
+                }
+                """),
+            _diagnostics);
+
+        AssertNoErrors();
+        Assert.Equal(60, first!.Operations[0].ResponseCache!.TtlSeconds);
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("""{ "ttlSeconds": 0 }""")]
+    [InlineData("""{ "ttlSeconds": 86401 }""")]
+    [InlineData("""{ "ttlSeconds": -1 }""")]
+    [InlineData("""{ "ttlSeconds": 1.5 }""")]
+    [InlineData("""{ "ttlSeconds": "300" }""")]
+    [InlineData("""{ "ttlSeconds": null }""")]
+    public void AgentSurface_refuses_a_malformed_response_cache_policy(string policy)
+    {
+        SectionReader.ReadAgentSurface(
+            Json(
+                $$"""
+                {
+                  "operations": [
+                    {
+                      "slug": "a", "name": "A",
+                      "binding": { "type": "http", "operation": "GET /a" },
+                      "responseCache": {{policy}}
+                    }
+                  ]
+                }
+                """),
+            _diagnostics);
+
+        var diagnostic = Assert.Single(
+            _diagnostics,
+            static d => string.Equals(d.Code, ManifestDiagnosticCodes.ResponseCachePolicyInvalid, StringComparison.Ordinal));
+
+        Assert.Equal("/operations/0/responseCache/ttlSeconds", diagnostic.Pointer);
+    }
+
+    [Fact]
+    public void AgentSurface_refuses_an_unknown_response_cache_member()
+    {
+        SectionReader.ReadAgentSurface(
+            Json(
+                """
+                {
+                  "operations": [
+                    {
+                      "slug": "a", "name": "A",
+                      "binding": { "type": "http", "operation": "GET /a" },
+                      "responseCache": { "ttlSeconds": 60, "mode": "aggressive" }
+                    }
+                  ]
+                }
+                """),
+            _diagnostics);
+
+        var diagnostic = Assert.Single(
+            _diagnostics,
+            static d => string.Equals(d.Code, ManifestDiagnosticCodes.UnknownMember, StringComparison.Ordinal));
+
+        Assert.Equal("/operations/0/responseCache/mode", diagnostic.Pointer);
+    }
+
+    [Fact]
     public void AgentSurface_reads_a_transformed_binding_and_carries_the_programs_verbatim()
     {
         var section = SectionReader.ReadAgentSurface(
@@ -1279,7 +1405,7 @@ public sealed class SectionReaderTests
             Json(
                 """
                 {
-                  "formatVersion": 3,
+                  "formatVersion": 4,
                   "operations": [
                     {
                       "slug": "a", "name": "A",

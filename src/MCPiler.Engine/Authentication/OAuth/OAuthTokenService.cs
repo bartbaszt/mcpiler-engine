@@ -9,10 +9,15 @@ namespace MCPiler.Engine.Authentication.OAuth;
 /// <param name="Credentials">The credential set to apply, exactly one bearer.</param>
 /// <param name="AuthorityEpoch">The epoch the acquisition ran under, for reconciliation.</param>
 /// <param name="RuntimeRevision">The revision the acquisition observed.</param>
+/// <param name="ExpiresAtUtc">
+/// When the acquired access token stops being usable. A response obtained under this authority
+/// must not be cached past it, so the expiry is reported rather than kept inside the cache.
+/// </param>
 public sealed record OAuthAcquisition(
     IReadOnlyList<ResolvedCredential> Credentials,
     long AuthorityEpoch,
-    long RuntimeRevision);
+    long RuntimeRevision,
+    DateTimeOffset ExpiresAtUtc);
 
 /// <summary>
 /// Acquires the bearer access token an OAuth profile authenticates a request with.
@@ -146,7 +151,7 @@ public sealed class OAuthTokenService
 
         if (_cache.TryGet(key, configuration.AccessTokenSafetySkew, _timeProvider.GetUtcNow(), out var cached))
         {
-            return new OAuthAcquisition(Bearer(cached.Value), authorityEpoch, runtimeRevision);
+            return new OAuthAcquisition(Bearer(cached.Value), authorityEpoch, runtimeRevision, cached.ExpiresAtUtc);
         }
 
         var acquired = await _singleFlight.RunAsync(
@@ -205,10 +210,18 @@ public sealed class OAuthTokenService
                     cancellationToken).ConfigureAwait(false);
             }
 
-            return new OAuthAcquisition(Bearer(acquired.AccessToken), slot.AuthorityEpoch, slot.RuntimeRevision + 1);
+            return new OAuthAcquisition(
+                Bearer(acquired.AccessToken),
+                slot.AuthorityEpoch,
+                slot.RuntimeRevision + 1,
+                acquired.ExpiresAtUtc);
         }
 
-        return new OAuthAcquisition(Bearer(acquired.AccessToken), authorityEpoch, runtimeRevision);
+        return new OAuthAcquisition(
+            Bearer(acquired.AccessToken),
+            authorityEpoch,
+            runtimeRevision,
+            acquired.ExpiresAtUtc);
     }
 
     /// <summary>

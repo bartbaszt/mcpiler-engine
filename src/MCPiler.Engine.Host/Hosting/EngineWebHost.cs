@@ -203,6 +203,10 @@ public static class EngineWebHost
 
         if (MountAuthorizationSetup.IsConfigured(binding.Authorization))
         {
+            // An instance, not a type: the key is generated exactly once for the process, and a
+            // type activation would let a later resolution produce a second key under which the
+            // same callers would derive different partitions.
+            builder.Services.AddSingleton(new CallerPartitionKey());
             builder.Services.AddSingleton(MountAuthorizationSetup.Validator(binding.Authorization!));
 
             builder.Services
@@ -314,6 +318,11 @@ public static class EngineWebHost
         }
 
         HealthEndpoints.Map(app, binding.Runtime.FileStoreRoot, drain);
+
+        // The operator channel is mapped last and only when a dedicated secret was configured.
+        // Its routes are not MCP addresses, so neither the origin check nor generation admission
+        // above applies to them; the endpoints authenticate and lease a generation themselves.
+        ResponseCacheOperatorEndpoints.Map(app, binding);
 
         return app;
     }

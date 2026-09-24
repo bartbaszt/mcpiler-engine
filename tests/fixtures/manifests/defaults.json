@@ -5,7 +5,7 @@
     "server.formatVersion": 2,
     "policy.formatVersion": 1,
     "operations.formatVersion": 1,
-    "agentSurface.formatVersion": 3,
+    "agentSurface.formatVersion": 4,
     "credentials.formatVersion": 4,
     "authentication.formatVersion": 2,
     "tools.formatVersion": 1,
