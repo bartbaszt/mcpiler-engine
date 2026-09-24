@@ -46,8 +46,237 @@ public static class ManifestValidator
         ValidateSchemaReferences(manifest, diagnostics);
         ValidateDeclaredTools(manifest, diagnostics);
         ValidateTransformPrograms(manifest, diagnostics);
+        ValidateOutputProjections(manifest, diagnostics);
 
         return diagnostics;
+    }
+
+    /// <summary>
+    /// The cross-operation half of a reviewed pagination policy.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The reader already refused structural defects inside one projection. What is left is what
+    /// only the whole manifest can answer: whether a named next operation exists, whether it is
+    /// HTTP-backed, whether the mapped arguments exist in its input schema, whether required
+    /// target input is supplied, and whether the surface that publishes the paginating operation
+    /// can actually reach the target. Engine repeats these checks because manifests are
+    /// hand-authorable, and a defect here would serve a continuation naming a tool the caller
+    /// cannot invoke.
+    /// </para>
+    /// <para>
+    /// A self-continuation needs none of this: the target is the invoking operation, and the
+    /// caller's own surface grant is what admitted it.
+    /// </para>
+    /// </remarks>
+    private static void ValidateOutputProjections(ManifestDocument manifest, List<ManifestDiagnostic> diagnostics)
+    {
+        SchemaReferenceResolver? schemaResolver = manifest.AgentSurfaceDocument is { } agentDocument
+            ? new SchemaReferenceResolver(agentDocument, manifest.Policy.EffectiveSchemaBounds)
+            : null;
+
+        for (int index = 0; index < manifest.AgentSurface.Operations.Count; index++)
+        {
+            AgentOperationEntry operation = manifest.AgentSurface.Operations[index];
+
+            if (operation.OutputProjection is not { } projection)
+            {
+                continue;
+            }
+
+            foreach (string error in ProjectionOutputSchemaValidator.Validate(
+                projection,
+                operation,
+                schemaResolver))
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.ProjectionOutputSchemaInvalid,
+                    error,
+                    section: ManifestSectionName.AgentSurface,
+                    pointer: JsonPointer.Build("operations", Segment(index), "outputProjection")));
+            }
+
+            if (projection.Pagination is not { } pagination
+                || pagination.NextOperation is not { } nextSlug
+                || string.Equals(nextSlug, operation.Slug, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (manifest.AgentSurface.Operation(nextSlug) is not { } target)
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.ProjectionTargetUnknown,
+                    $"Operation '{DiagnosticText.Echo(operation.Slug)}' names next operation " +
+                    $"'{DiagnosticText.Echo(nextSlug)}', which the '{ManifestSectionName.AgentSurface}' " +
+                    "section does not declare.",
+                    section: ManifestSectionName.AgentSurface,
+                    pointer: JsonPointer.Build(
+                        "operations",
+                        Segment(index),
+                        "outputProjection",
+                        "pagination",
+                        "nextOperation")));
+                continue;
+            }
+
+            if (ManifestBindingDispatcher.TryResolveHttp(target.Binding) is null)
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.ProjectionTargetNotHttp,
+                    $"Operation '{DiagnosticText.Echo(operation.Slug)}' names next operation " +
+                    $"'{DiagnosticText.Echo(nextSlug)}', which is not HTTP-backed. A continuation " +
+                    "produces arguments for one ordinary operation invocation.",
+                    section: ManifestSectionName.AgentSurface,
+                    pointer: JsonPointer.Build(
+                        "operations",
+                        Segment(index),
+                        "outputProjection",
+                        "pagination",
+                        "nextOperation")));
+                continue;
+            }
+
+            ValidateProjectionMappings(operation, target, pagination, index, diagnostics);
+            ValidateProjectionReachability(manifest, operation, nextSlug, index, diagnostics);
+        }
+    }
+
+    /// <summary>
+    /// A surface that publishes the paginating operation must also expose its cross-operation
+    /// target, or the continuation names a tool the caller cannot invoke.
+    /// </summary>
+    private static void ValidateProjectionReachability(
+        ManifestDocument manifest,
+        AgentOperationEntry operation,
+        string nextSlug,
+        int operationIndex,
+        List<ManifestDiagnostic> diagnostics)
+    {        for (int surfaceIndex = 0; surfaceIndex < manifest.Server.Surfaces.Count; surfaceIndex++)
+        {
+            ManifestSurface surface = manifest.Server.Surfaces[surfaceIndex];
+
+            if (!surface.Enabled
+                || surface.ExposureOf(operation.Slug) is not (OperationExposure.Direct or OperationExposure.Navigator))
+            {
+                continue;
+            }
+
+            if (surface.InvocationAllowed(nextSlug))
+            {
+                continue;
+            }
+
+            diagnostics.Add(ManifestDiagnostic.Error(
+                ManifestDiagnosticCodes.ProjectionTargetUnreachable,
+                $"Surface '{DiagnosticText.Echo(surface.Slug)}' publishes " +
+                $"'{DiagnosticText.Echo(operation.Slug)}', whose pagination policy names next " +
+                $"operation '{DiagnosticText.Echo(nextSlug)}' that the surface does not expose. " +
+                "The continuation would name a tool its caller cannot invoke.",
+                section: ManifestSectionName.Server,
+                pointer: JsonPointer.Build("surfaces", Segment(surfaceIndex), "operations")));
+        }
+    }
+
+    private static void ValidateProjectionMappings(
+        AgentOperationEntry operation,
+        AgentOperationEntry target,
+        PaginationPolicy pagination,
+        int operationIndex,
+        List<ManifestDiagnostic> diagnostics)
+    {
+        string pointer = JsonPointer.Build(
+            "operations",
+            Segment(operationIndex),
+            "outputProjection",
+            "pagination",
+            "nextArguments");
+
+        HashSet<string> mapped = new(StringComparer.Ordinal);
+        HashSet<string> properties = InputProperties(target);
+
+        foreach (PaginationArgumentMapping mapping in pagination.NextArguments)
+        {
+            if (mapping.Target.Length == 0 || mapping.Target[0] != '/'
+                || mapping.Target[1..].Contains('/', StringComparison.Ordinal))
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.ProjectionMappingInvalid,
+                    $"Mapping target '{DiagnosticText.Echo(mapping.Target)}' does not name one " +
+                    $"top-level input of '{DiagnosticText.Echo(target.Slug)}'.",
+                    section: ManifestSectionName.AgentSurface,
+                    pointer: pointer));
+                continue;
+            }
+
+            string name = JsonPointer.Unescape(mapping.Target[1..]);
+            mapped.Add(name);
+
+            if (!properties.Contains(name))
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.ProjectionMappingInvalid,
+                    $"Mapping target '{DiagnosticText.Echo(mapping.Target)}' is absent from the " +
+                    $"input schema of '{DiagnosticText.Echo(target.Slug)}'.",
+                    section: ManifestSectionName.AgentSurface,
+                    pointer: pointer));
+            }
+        }
+
+        if (RequiredInputs(target) is not { Count: > 0 } required)
+        {
+            return;
+        }
+
+        foreach (string name in required)
+        {
+            if (!mapped.Contains(name))
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.ProjectionMappingIncomplete,
+                    $"The policy does not map required input '{DiagnosticText.Echo(name)}' of " +
+                    $"'{DiagnosticText.Echo(target.Slug)}'. A continuation that omits it is not callable.",
+                    section: ManifestSectionName.AgentSurface,
+                    pointer: pointer));
+            }
+        }
+    }
+
+    private static HashSet<string> InputProperties(AgentOperationEntry operation)
+    {
+        HashSet<string> properties = new(StringComparer.Ordinal);
+
+        if (operation.InputSchema?.Object?["properties"] is not JsonObject declared)
+        {
+            return properties;
+        }
+
+        foreach ((string name, _) in declared)
+        {
+            properties.Add(name);
+        }
+
+        return properties;
+    }
+
+    private static List<string>? RequiredInputs(AgentOperationEntry operation)
+    {
+        if (operation.InputSchema?.Object?["required"] is not JsonArray required)
+        {
+            return null;
+        }
+
+        List<string> names = [];
+
+        foreach (JsonNode? item in required)
+        {
+            if (item is JsonValue value && value.TryGetValue<string>(out string? name))
+            {
+                names.Add(name);
+            }
+        }
+
+        return names;
     }
 
     /// <summary>

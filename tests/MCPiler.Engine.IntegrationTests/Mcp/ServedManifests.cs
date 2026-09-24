@@ -536,6 +536,123 @@ internal static class ServedManifests
     public static IReadOnlyList<string> IndexedOperations { get; } =
         ["get-pet", "hidden-pet", "list-pets", "quiet-pet"];
 
+    /// <summary>
+    /// A paginating source whose continuation names a cross-operation target.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// One policy, two surfaces, two answers: <c>full</c> advertises the target directly, and
+    /// <c>nav</c> exposes it only through the Navigator, so the same response produces a plain
+    /// target input on one surface and the <c>catalogue.invoke</c> payload on the other.
+    /// </para>
+    /// <para>
+    /// The target's advertised schema constrains the mapped argument, so a value the target
+    /// itself would refuse is observable at runtime rather than only statically.
+    /// </para>
+    /// </remarks>
+    public static string Paginating(Uri upstream)
+    {
+        ArgumentNullException.ThrowIfNull(upstream);
+
+        return $$"""
+            {
+              "manifestFormatVersion": "0.3",
+              "sections": {
+                "server": {
+                  "inline": {
+                    "name": "Pet API",
+                    "authenticationRequired": false,
+                    "surfaces": [
+                      {
+                        "slug": "full",
+                        "isDefault": true,
+                        "navigator": { "enabled": true },
+                        "operations": [ { "operation": "list-pets" }, { "operation": "get-pet" } ]
+                      },
+                      {
+                        "slug": "nav",
+                        "navigator": { "enabled": true },
+                        "operations": [
+                          { "operation": "list-pets" },
+                          { "operation": "get-pet", "exposure": "navigator" }
+                        ]
+                      },
+                      {
+                        "slug": "nodirect",
+                        "operations": [
+                          { "operation": "list-pets" },
+                          { "operation": "get-pet", "exposure": "navigator" }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "policy": { "inline": { "baseUrl": "{{upstream.AbsoluteUri}}" } },
+                "operations": {
+                  "inline": {
+                    "operations": [
+                      {
+                        "key": "GET /pets",
+                        "method": "GET",
+                        "path": "/pets",
+                        "parameters": [ { "name": "status", "in": "query", "required": true, "schema": { "type": "string" } } ]
+                      },
+                      {
+                        "key": "GET /pets/{petId}",
+                        "method": "GET",
+                        "path": "/pets/{petId}",
+                        "parameters": [ { "name": "petId", "in": "path", "required": true, "schema": { "type": "string" } } ]
+                      }
+                    ]
+                  }
+                },
+                "agentSurface": {
+                  "inline": {
+                    "formatVersion": 4,
+                    "operations": [
+                      {
+                        "slug": "list-pets",
+                        "name": "List pets",
+                        "inputSchema": {
+                          "type": "object",
+                          "required": ["status"],
+                          "properties": { "status": { "type": "string" } }
+                        },
+                        "binding": { "type": "http", "operation": "GET /pets" },
+                        "outputProjection": {
+                          "bodyTarget": "/data",
+                          "pagination": {
+                            "target": "/pagination",
+                            "source": { "kind": "linkHeader", "header": "link", "relation": "next" },
+                            "nextOperation": "get-pet",
+                            "nextArguments": [
+                              {
+                                "target": "/petId",
+                                "from": { "kind": "urlPathParameter", "name": "petId" },
+                                "as": "string"
+                              }
+                            ]
+                          }
+                        }
+                      },
+                      {
+                        "slug": "get-pet",
+                        "name": "Get pet",
+                        "inputSchema": {
+                          "type": "object",
+                          "required": ["petId"],
+                          "properties": { "petId": { "type": "string", "maxLength": 3 } }
+                        },
+                        "binding": { "type": "http", "operation": "GET /pets/{petId}" }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+    }
+
     /// <summary>Writes <paramref name="manifest"/> into a fresh bundle directory.</summary>
     public static string Write(string root, string name, string manifest)
     {

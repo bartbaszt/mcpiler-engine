@@ -17,11 +17,12 @@ public sealed record AgentSurfaceSection(
     /// <summary>The section format version this model represents.</summary>
     /// <remarks>
     /// Version 2 added the credential scope an <c>http</c> binding authorizes. Version 3 adds
-    /// the authentication profile reference an <c>http</c> binding names. The section version
-    /// moved rather than only the root version because each change is confined to this
-    /// section's payload.
+    /// the authentication profile reference an <c>http</c> binding names. Version 4 adds the
+    /// optional reviewed output projection and dedicated pagination policy. The
+    /// section version moved rather than only the root version because each change is confined
+    /// to this section's payload.
     /// </remarks>
-    public const int FormatVersion = 3;
+    public const int FormatVersion = 4;
 
     /// <summary>The declared operations, never null.</summary>
     public IReadOnlyList<AgentOperationEntry> Operations { get; init; } = Operations ?? [];
@@ -71,6 +72,11 @@ public sealed record AgentSurfaceSection(
 /// boundary.
 /// </param>
 /// <param name="Search">Search metadata, never advertised to clients.</param>
+/// <param name="OutputProjection">
+/// The reviewed agent-facing output policy, or <c>null</c> when the operation keeps
+/// its legacy result shape. Absence is the compatibility contract: an operation without one
+/// returns exactly the bytes it returned before this format version existed.
+/// </param>
 public sealed record AgentOperationEntry(
     string Slug,
     string Name,
@@ -85,7 +91,8 @@ public sealed record AgentOperationEntry(
     OutputSchemaPolicySettings? OutputSchemaPolicy = null,
     ToolAnnotations? Annotations = null,
     string? Risk = null,
-    SearchMetadataEntry? Search = null)
+    SearchMetadataEntry? Search = null,
+    AgentOutputProjection? OutputProjection = null)
 {
     /// <summary>The risk string meaning "no risk flags set".</summary>
     public const string NoRisk = "none";

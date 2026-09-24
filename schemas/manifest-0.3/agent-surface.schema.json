@@ -7,7 +7,7 @@
   "required": ["operations"],
   "additionalProperties": false,
   "properties": {
-    "formatVersion": { "const": 3 },
+    "formatVersion": { "const": 4 },
     "groups": {
       "type": "array",
       "items": { "$ref": "#/$defs/group" }
@@ -78,8 +78,167 @@
             "exampleIntents": { "type": "array", "items": { "type": "string" } }
           }
         },
-        "binding": { "$ref": "#/$defs/binding" }
+        "binding": { "$ref": "#/$defs/binding" },
+        "outputProjection": { "$ref": "#/$defs/outputProjection" }
       }
+    },
+    "outputProjection": {
+      "description": "The reviewed agent-facing output policy (ADR-0071). Absence preserves the legacy result shape exactly.",
+      "type": "object",
+      "required": ["bodyTarget"],
+      "additionalProperties": false,
+      "properties": {
+        "bodyTarget": { "$ref": "#/$defs/nonRootPointer" },
+        "metadata": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/metadataMapping" }
+        },
+        "pagination": { "$ref": "#/$defs/paginationPolicy" }
+      }
+    },
+    "nonRootPointer": {
+      "description": "RFC 6901 JSON Pointer that is not the document root.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^/([^/~]|~[01])*"
+    },
+    "metadataMapping": {
+      "type": "object",
+      "required": ["source", "target"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "$ref": "#/$defs/metadataSource" },
+        "target": { "$ref": "#/$defs/nonRootPointer" }
+      }
+    },
+    "metadataSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "name", "valueMode"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "responseHeader" },
+            "name": { "type": "string", "minLength": 1, "pattern": "^[\\x21-\\x7e]+$" },
+            "valueMode": { "enum": ["first", "all"] }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind"],
+          "additionalProperties": false,
+          "properties": { "kind": { "const": "statusCode" } }
+        }
+      ]
+    },
+    "paginationPolicy": {
+      "type": "object",
+      "required": ["target", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "target": { "$ref": "#/$defs/nonRootPointer" },
+        "source": { "$ref": "#/$defs/paginationSource" },
+        "nextOperation": { "type": "string", "minLength": 1 },
+        "nextArguments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/paginationArgumentMapping" }
+        },
+        "exposeUrl": { "type": "boolean" },
+        "linkRelations": {
+          "type": "array",
+          "items": { "enum": ["next", "prev", "first", "last"] }
+        }
+      }
+    },
+    "paginationSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "header", "relation"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "linkHeader" },
+            "header": { "type": "string", "minLength": 1, "pattern": "^[\\x21-\\x7e]+$" },
+            "relation": { "$comment": "Version 1 continuation requires 'next'; the other relations are operator inspection only.", "enum": ["next", "prev", "first", "last"] }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "name", "scalarType"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "responseHeader" },
+            "name": { "type": "string", "minLength": 1, "pattern": "^[\\x21-\\x7e]+$" },
+            "scalarType": { "enum": ["string", "integer", "number", "boolean"] }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "pointer", "interpretation"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "jsonPointer" },
+            "pointer": { "$ref": "#/$defs/nonRootPointer" },
+            "interpretation": { "enum": ["value", "url"] }
+          }
+        }
+      ]
+    },
+    "paginationArgumentMapping": {
+      "type": "object",
+      "required": ["target", "from", "as"],
+      "additionalProperties": false,
+      "properties": {
+        "target": { "$ref": "#/$defs/nonRootPointer" },
+        "from": { "$ref": "#/$defs/paginationArgumentSource" },
+        "as": { "enum": ["string", "integer", "number", "boolean", "preserveJson"] }
+      }
+    },
+    "paginationArgumentSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind"],
+          "additionalProperties": false,
+          "properties": { "kind": { "const": "extractedValue" } }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "name"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "urlQuery" },
+            "name": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "name"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "urlPathParameter" },
+            "name": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "pointer"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "currentArgument" },
+            "pointer": { "$ref": "#/$defs/nonRootPointer" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "value"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "literal" },
+            "value": true
+          }
+        }
+      ]
     },
     "annotations": {
       "type": "object",

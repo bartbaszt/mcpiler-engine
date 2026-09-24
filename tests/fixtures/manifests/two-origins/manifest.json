@@ -33,7 +33,7 @@
     },
     "agentSurface": {
       "inline": {
-        "formatVersion": 3,
+        "formatVersion": 4,
         "operations": [
           {
             "slug": "list-pets",

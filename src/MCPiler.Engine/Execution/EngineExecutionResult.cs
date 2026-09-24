@@ -31,6 +31,16 @@ public sealed record EngineExecutionResult
     /// <summary>The observed media type without parameters.</summary>
     public string? ResponseMediaType { get; init; }
 
+    /// <summary>
+    /// The URI of the final request in the redirect chain, when a response was observed.
+    /// </summary>
+    /// <remarks>
+    /// Captured as an execution fact rather than derived later: a relative pagination link is
+    /// only meaningful against the representation's own URL, and the transport is the only
+    /// component that saw which request produced the response.
+    /// </remarks>
+    public Uri? ResponseEffectiveUri { get; init; }
+
     /// <summary>The response body, when it was read as a value.</summary>
     public byte[]? ResponseBody { get; init; }
 
@@ -63,6 +73,17 @@ public sealed record EngineExecutionResult
 
     /// <summary>What kind of failure occurred, or <see cref="ExecutionFailureKind.None"/>.</summary>
     public ExecutionFailureKind Failure { get; init; } = ExecutionFailureKind.None;
+
+    /// <summary>
+    /// Bounded metadata findings produced after the response arrived.
+    /// </summary>
+    /// <remarks>
+    /// A projection or pagination refusal is not an execution failure: the body stays available
+    /// and these explain what was withheld. They are carried on the result so the serving layer
+    /// can attribute them to a mounted Manifest and surface, which are facts the execution does
+    /// not own.
+    /// </remarks>
+    public IReadOnlyList<ExecutionDiagnostic> Diagnostics { get; init; } = [];
 
     /// <summary>True when nothing failed.</summary>
     public bool Succeeded => Failure == ExecutionFailureKind.None;

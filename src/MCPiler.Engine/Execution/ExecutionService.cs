@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -8,6 +9,7 @@ using MCPiler.Engine.Execution.RuntimeState;
 using MCPiler.Engine.Authentication.Signing;
 using MCPiler.Engine.Compound;
 using MCPiler.Engine.Execution.Files;
+using MCPiler.Engine.Execution.Projection;
 using MCPiler.Engine.Files;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Transform;
@@ -47,6 +49,18 @@ public sealed record ExecutionRequest(ManifestDocument Manifest, string Slug, Js
     /// two, so a caller cannot raise a ceiling the policy compiled.
     /// </remarks>
     public long? ResponseSizeLimitBytes { get; init; }
+
+    /// <summary>
+    /// The serving layer's continuation resolution, when the caller can supply one.
+    /// </summary>
+    /// <remarks>
+    /// Projection itself is protocol-neutral, but deciding whether a continuation names a target
+    /// the addressed surface can actually call is not: it needs the mounted surface and its
+    /// exposure table. The resolver is supplied rather than derived so this service keeps
+    /// reaching nothing, and so a workflow step, which has no one addressed surface, can omit it
+    /// and receive an <c>unavailable</c> continuation instead of a guessed one.
+    /// </remarks>
+    public IContinuationResolver? Continuations { get; init; }
 }
 
 /// <summary>
@@ -313,6 +327,11 @@ public sealed class ExecutionService
             return outcome;
         }
 
+        // Captured before the output transformation runs. A declared body extraction reads what
+        // the upstream sent, and a presentation transform that removes a field from the agent
+        // body must not remove the continuation the upstream put there.
+        byte[]? rawBody = outcome.ResponseBody;
+
         if (!TransformStage.TryOutput(manifest, entry, outcome, out byte[]? body, out transformFailure))
         {
             return outcome with
@@ -322,7 +341,77 @@ public sealed class ExecutionService
             };
         }
 
-        return ReferenceEquals(body, outcome.ResponseBody) ? outcome : outcome with { ResponseBody = body };
+        EngineExecutionResult shaped = ReferenceEquals(body, outcome.ResponseBody)
+            ? outcome
+            : outcome with { ResponseBody = body };
+
+        // A stored binary response is never projected: its bytes were deliberately not
+        // materialized, and an envelope around a file handle would advertise structured content
+        // the caller cannot receive. The projection's own contract is a JSON envelope over a
+        // materialized body.
+        return entry.OutputProjection is { } projection && shaped.ResponseFile is null
+            ? Project(projection, shaped, arguments, rawBody, credentials, request)
+            : shaped;
+    }
+
+    /// <summary>
+    /// Builds the agent-facing projection envelope over one completed response.
+    /// </summary>
+    /// <remarks>
+    /// The body is the final value after any accepted output transformation; a declared
+    /// <c>jsonPointer</c> extraction reads the bounded raw upstream body instead. A refusal
+    /// inside the projection becomes an <c>unavailable</c> state or an omitted mapping plus a
+    /// diagnostic, never a failed call: the upstream answered, and the answer is the result.
+    /// </remarks>
+    private static EngineExecutionResult Project(
+        AgentOutputProjection projection,
+        EngineExecutionResult shaped,
+        JsonObject currentArguments,
+        byte[]? rawBody,
+        IReadOnlyList<ResolvedCredential> credentials,
+        ExecutionRequest request)
+    {
+        ResponseProjectionOutcome outcome = ResponseProjectionEvaluator.Evaluate(
+            projection,
+            shaped.StatusCode ?? 0,
+            shaped.ResponseHeaders ?? new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase),
+            shaped.ResponseEffectiveUri,
+            Parse(shaped.ResponseBody),
+            Parse(rawBody),
+            currentArguments,
+            SensitiveHeaderNames.For(credentials),
+            request.Continuations);
+
+        return shaped with
+        {
+            ResponseBody = outcome.Value is null ? shaped.ResponseBody : Encoding.UTF8.GetBytes(outcome.Value.ToJsonString()),
+            Diagnostics = [.. shaped.Diagnostics, .. outcome.Diagnostics],
+        };
+    }
+
+    /// <summary>
+    /// Parses a materialized body as JSON, or null when it is absent or not a JSON value.
+    /// </summary>
+    /// <remarks>
+    /// A non-JSON body leaves the envelope's body target as the text carrier's content rather
+    /// than failing the projection: an operation may legitimately return text, and the metadata
+    /// half of the projection is still meaningful.
+    /// </remarks>
+    private static JsonNode? Parse(byte[]? body)
+    {
+        if (body is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonNode.Parse(body);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private async Task<EngineExecutionResult> SendAsync(
@@ -469,6 +558,7 @@ public sealed class ExecutionService
                 StatusCode = response.StatusCode,
                 ResponseHeaders = response.Headers,
                 ResponseMediaType = response.MediaType,
+                ResponseEffectiveUri = response.EffectiveUri,
             };
 
             try

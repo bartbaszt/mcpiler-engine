@@ -22,6 +22,10 @@ public sealed class StructuredContentTests : IDisposable
     private const string ObjectSchema =
         "{\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"]}";
     private const string ScalarSchema = "{\"type\":\"string\"}";
+    private const string ProjectionSchema =
+        "{\"type\":\"object\",\"properties\":{\"data\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"pagination\":{\"type\":\"object\",\"properties\":{\"state\":{\"type\":\"string\",\"enum\":[\"next\",\"end\",\"unavailable\"]},\"hasNext\":{\"type\":\"boolean\"}}}},\"required\":[\"data\",\"pagination\"],\"additionalProperties\":false}";
+    private const string ProjectionPolicy =
+        "{\"bodyTarget\":\"/data\",\"pagination\":{\"target\":\"/pagination\",\"source\":{\"kind\":\"linkHeader\",\"header\":\"link\",\"relation\":\"next\"}}}";
     private const string GoldenEnvelope =
         """{"type":"object","properties":{"result":{"type":"array","items":{"type":"string"}}},"required":["result"]}""";
 
@@ -269,6 +273,64 @@ public sealed class StructuredContentTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task Structured_content_and_advertised_schema_describe_the_final_projection_envelope()
+    {
+        await using LoopbackHost upstream = await Respond("[\"a\"]");
+        (ServedEngine engine, _) = await ServeWithManifestAsync(
+            upstream.Address,
+            "yes",
+            capability: true,
+            diagnostics: null,
+            outputSchema: ProjectionSchema,
+            outputProjection: ProjectionPolicy);
+        await using (engine)
+        {
+            using McpHttpSession session = await McpHttpSession.OpenAsync(engine.At("/api/full"), Token, "2026-07-28");
+
+            McpExchange listed = await session.RequestAsync("tools/list", 2, Token);
+            McpExchange called = await session.CallAsync("read-value", "{}", 3, Token);
+            JsonElement result = Result(called);
+            JsonDocument text = JsonDocument.Parse(Text(called));
+
+            Assert.Contains("data", Tool(listed).GetProperty("outputSchema").GetProperty("properties").EnumerateObject().Select(p => p.Name));
+            Assert.Contains("pagination", Tool(listed).GetProperty("outputSchema").GetProperty("properties").EnumerateObject().Select(p => p.Name));
+            Assert.Equal("[\"a\"]", result.GetProperty("structuredContent").GetProperty("data").GetRawText());
+            Assert.Equal("end", result.GetProperty("structuredContent").GetProperty("pagination").GetProperty("state").GetString());
+            Assert.Equal(result.GetProperty("structuredContent").GetRawText(), text.RootElement.GetRawText());
+        }
+    }
+
+    [Fact]
+    public async Task Generate_disabled_keeps_projected_json_as_text_without_advertised_schema()
+    {
+        await using LoopbackHost upstream = await Respond("[\"a\"]");
+        string manifest = Manifest(
+            upstream.Address,
+            "yes",
+            capability: true,
+            outputSchema: ProjectionSchema,
+            outputProjection: ProjectionPolicy)
+            .Replace("\"generate\": true", "\"generate\": false", StringComparison.Ordinal);
+        string name = "manifest-projection-text-" + Guid.NewGuid().ToString("N");
+        string manifestPath = ServedManifests.Write(_root, name, manifest);
+        string store = Directory.CreateDirectory(Path.Combine(_root, "files-" + name)).FullName;
+        await using ServedEngine engine = await ServedEngine.StartAsync(
+            new RuntimeOptions([new MountRequest("/api", manifestPath)], store),
+            Token);
+        using McpHttpSession session = await McpHttpSession.OpenAsync(engine.At("/api/full"), Token, "2026-07-28");
+
+        McpExchange listed = await session.RequestAsync("tools/list", 2, Token);
+        McpExchange called = await session.CallAsync("read-value", "{}", 3, Token);
+
+        Assert.False(Tool(listed).TryGetProperty("outputSchema", out _));
+        Assert.False(Result(called).TryGetProperty("structuredContent", out _));
+        using JsonDocument text = JsonDocument.Parse(Text(called));
+        Assert.Equal("[\"a\"]", text.RootElement.GetProperty("data").GetRawText());
+        Assert.Equal("end", text.RootElement.GetProperty("pagination").GetProperty("state").GetString());
+        Assert.False(Result(called).TryGetProperty("isError", out _));
+    }
+
     private async Task<ServedEngine> ServeAsync(
         Uri upstream,
         string advertise,
@@ -286,13 +348,14 @@ public sealed class StructuredContentTests : IDisposable
         string advertise,
         bool capability,
         Action<RuntimeDiagnostic>? diagnostics,
-        string outputSchema = ArraySchema)
+        string outputSchema = ArraySchema,
+        string? outputProjection = null)
     {
         string name = "manifest-" + Guid.NewGuid().ToString("N");
         string manifest = ServedManifests.Write(
             _root,
             name,
-            Manifest(upstream, advertise, capability, outputSchema));
+            Manifest(upstream, advertise, capability, outputSchema, outputProjection));
         string store = Directory.CreateDirectory(Path.Combine(_root, "files-" + name)).FullName;
         ServedEngine engine = await ServedEngine.StartAsync(
             new RuntimeOptions([new MountRequest("/api", manifest)], store),
@@ -302,7 +365,7 @@ public sealed class StructuredContentTests : IDisposable
         return (engine, manifest);
     }
 
-    private static string Manifest(Uri upstream, string advertise, bool capability, string outputSchema)
+    private static string Manifest(Uri upstream, string advertise, bool capability, string outputSchema, string? outputProjection = null)
         => $$"""
         {
           "manifestFormatVersion": "0.3",
@@ -340,6 +403,7 @@ public sealed class StructuredContentTests : IDisposable
                       "advertise": "{{advertise}}",
                       "useInternally": false
                     },
+                    {{(outputProjection is null ? string.Empty : "\"outputProjection\": " + outputProjection + ",")}}
                     "binding": { "type": "http", "operation": "GET /value" }
                   }
                 ]

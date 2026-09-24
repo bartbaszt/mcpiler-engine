@@ -315,6 +315,43 @@ public sealed class ToolSetDeriverTests
         Assert.Equal(expected, tools.Tools.Single(tool => tool.Operation == "list-pets").OutputSchema is not null);
     }
 
+    // ---- cross-operation continuation targets (ADR-0071) ------------------------------
+
+    /// <summary>
+    /// The projected <c>next.tool</c> for a Direct target is the actual advertised name, which is
+    /// allocated from the whole agent surface rather than the surface's own list.
+    /// </summary>
+    [Fact]
+    public void ADirectCrossOperationTargetKeepsItsAllocatedAdvertisedName()
+    {
+        var manifest = Load(MultiSurface);
+        var tools = ToolSetDeriver.Derive(manifest, manifest.Server.Surface("default")!);
+
+        var getPet = tools.Tools.Single(tool => tool.Operation == "get-pet");
+
+        Assert.Equal("get-pet", getPet.Name);
+        Assert.True(manifest.AgentSurface.Operation("get-pet")!.OutputProjection is null);
+    }
+
+    /// <summary>
+    /// A Navigator-only target is absent from the advertised set but present in the navigable set,
+    /// which is exactly the distinction <c>catalogue.invoke</c> depends on.
+    /// </summary>
+    [Fact]
+    public void ANavigatorOnlyTargetIsReachableWithoutBeingAdvertised()
+    {
+        var manifest = Load(MultiSurface);
+        var surface = manifest.Server.Surface("default")!;
+
+        var advertised = ToolSetDeriver.Derive(manifest, surface)
+            .Tools.Select(tool => tool.Operation).ToHashSet(StringComparer.Ordinal);
+        var navigable = ToolSetDeriver.DeriveNavigable(manifest, surface)
+            .Tools.Select(tool => tool.Operation).ToHashSet(StringComparer.Ordinal);
+
+        Assert.DoesNotContain("delete-pet", advertised);
+        Assert.Contains("delete-pet", navigable);
+    }
+
     // ---- derived versus pinned --------------------------------------------------------
 
     [Fact]

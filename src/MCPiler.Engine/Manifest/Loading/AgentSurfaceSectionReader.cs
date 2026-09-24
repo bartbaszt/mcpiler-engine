@@ -30,6 +30,7 @@ internal static class AgentSurfaceSectionReader
         "risk",
         "search",
         "binding",
+        "outputProjection",
     ];
 
     internal static readonly string[] PolicyMembers = ["generate", "advertise", "useInternally"];
@@ -205,7 +206,8 @@ internal static class AgentSurfaceSectionReader
                 ReadOutputSchemaPolicy(element, pointer, context),
                 ReadAnnotations(element, pointer, context),
                 context.Text(element, "risk", pointer),
-                ReadSearchMetadata(element, pointer, context)));
+                ReadSearchMetadata(element, pointer, context),
+                AgentOutputProjectionReader.Read(element, pointer, context)));
         }
 
         return operations;

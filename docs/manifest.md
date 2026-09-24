@@ -421,7 +421,8 @@ The operations as an agent sees them.
 Each entry carries `slug` (unique, and the reference key used by surface exposure
 lists, compound steps and the derivable sections), `name`, and `binding`.
 Optionally `kind`, `summary`, `description`, `groups`, `tags`, `inputSchema`,
-`outputSchema`, `outputSchemaPolicy`, `annotations`, `risk`, `search`.
+`outputSchema`, `outputSchemaPolicy`, `annotations`, `risk`, `search`,
+`outputProjection`.
 
 **The slug is the manifest's identity for an operation.** No producer-side
 identifier is required at runtime. That is what makes a manifest hand-writable
@@ -471,6 +472,49 @@ A step naming an operation the same surface marks `hidden` is refused at load
 (`binding/compound-step-excluded`), because the composition would otherwise be a
 tunnel to an operation that surface withheld. An operation simply absent from a
 surface's list is not an exclusion.
+
+### Output projection and pagination
+
+`outputProjection` is the reviewed agent-facing output policy of one operation. It
+is optional; **absence preserves the operation's pre-existing result bytes
+exactly**, which is the compatibility contract of this member.
+
+The projection declares a non-root RFC 6901 `bodyTarget` receiving the final body,
+and optionally `metadata` mappings and one `pagination` policy:
+
+- a metadata mapping selects a `responseHeader` (`first` or `all` values) or the
+  `statusCode`, and writes it to an explicit target. There is no wildcard. Header
+  names are canonical lower-case ASCII and lookup is case-insensitive. No target
+  may overlap `bodyTarget`, another mapping or the pagination target
+  (`agent/projection-target-overlap`).
+- a `pagination` policy has a closed source vocabulary: `linkHeader` (a
+  standards-compatible Link source with the `next` relation), `responseHeader` (a
+  cursor/offset carried in a header) or `jsonPointer` (a value or URL read from the
+  bounded upstream body). No expression language, regex or runtime provider
+  heuristic exists.
+- `nextArguments` maps an extracted value, a named URL query/path component, a
+  reviewed current-invocation argument or a reviewed literal into the target
+  operation's input schema. `nextOperation` names another `agentSurface` slug in
+  the same manifest; absent, the target is the invoking operation.
+- When an operation declares a modelled `outputSchema`, it must accept the final
+  projected envelope, including every target the policy writes and each pagination
+  state (`next`, `end`, and `unavailable`). A schema that requires an optional
+  header-derived value or excludes a projected target is refused.
+
+The hard-denied header set (`authorization`, `proxy-authorization`, `cookie`,
+`set-cookie`, `set-cookie2`, `www-authenticate`, `proxy-authenticate`,
+`authentication-info`, `proxy-authentication-info`) cannot be selected for
+projection or pagination, in either casing, and no policy can override that
+(`agent/projection-header-sensitive`).
+
+A cross-operation target must be HTTP-backed, must declare the mapped arguments in
+its input schema, must have every required input mapped, and must be reachable on
+every enabled surface that publishes the paginating source
+(`agent/projection-target-unknown`, `agent/projection-target-not-http`,
+`agent/projection-mapping-invalid`, `agent/projection-mapping-incomplete`,
+`agent/projection-target-unreachable`). A continuation never executes
+automatically: it names the callable tool and its exact arguments, and the
+subsequent call goes through the ordinary admission and outbound policy.
 
 Two bounds belong to the workflow rather than to any step. `maxTotalResponseBytes`
 is the aggregate across every step and is enforced in addition to each step's own
@@ -708,8 +752,8 @@ described.
 
 **Engine declares an explicit supported range.** This Engine supports manifest
 format `0.3`. Section versions are not uniform, because they move
-independently: `credentials` and `agentSurface` are at `3`, `authentication` is
-at `1`, while `server`, `policy`, `operations`, `tools` and `search` are still
+independently: `agentSurface` is at `4`, `credentials` is at `3`, `authentication`
+is at `1`, while `server`, `policy`, `operations`, `tools` and `search` are still
 at `1`. A section that omits `formatVersion` is accepted at whatever version this
 Engine supports for it. A refusal always names the version observed and the range
 supported. Hostile input echoed for context is truncated.
@@ -807,6 +851,20 @@ The following codes are always warnings; every other code is an error:
 | `agent/duplicate-slug` | Two operations share a slug. |
 | `agent/unknown-group` | An operation names a group the section does not declare. |
 | `agent/kind-binding-mismatch` | A declared `kind` contradicts the binding. |
+| `agent/projection-unknown-member` | An output projection or pagination policy declares a member this format defines nowhere. |
+| `agent/projection-unknown-value` | A source kind, value mode, relation, scalar type or conversion is outside the closed vocabulary. |
+| `agent/projection-pointer-invalid` | A projection pointer is malformed or is the document root where a non-root pointer is required. |
+| `agent/projection-target-overlap` | Two projection/pagination targets overlap, so one value would overwrite the other. |
+| `agent/projection-header-sensitive` | A selected response header is classified sensitive and cannot be agent-visible. |
+| `agent/projection-header-name-invalid` | A response header source name is empty or not a printable ASCII token. |
+| `agent/projection-url-source-required` | A URL-derived argument mapping is declared without a URL-valued pagination source. |
+| `agent/projection-shape-invalid` | A required projection member is absent or empty. |
+| `agent/projection-target-unknown` | A pagination policy names a next-operation slug the surface does not declare. |
+| `agent/projection-target-not-http` | A pagination policy names a next operation that is not HTTP-backed. |
+| `agent/projection-target-unreachable` | A surface that publishes the paginating source does not expose its cross-operation target. |
+| `agent/projection-mapping-invalid` | A mapped next-argument target is absent from the target operation's input schema. |
+| `agent/projection-mapping-incomplete` | The mappings cannot supply every required input of the resolved target operation. |
+| `agent/projection-output-schema-invalid` | The declared output schema cannot accept the final projected envelope or one of its valid pagination states. |
 
 ### `binding` — execution bindings
 

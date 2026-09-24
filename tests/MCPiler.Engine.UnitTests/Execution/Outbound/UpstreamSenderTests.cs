@@ -99,6 +99,10 @@ public sealed class UpstreamSenderTests
         Assert.Equal(200, response.StatusCode);
         Assert.Equal("done", await Text(response));
         Assert.Equal("https://cdn.example.com/end", handler.Requests[^1].Uri.ToString());
+
+        // The final request is the response's own URL. A relative pagination link resolves
+        // against this and not against the request the caller originally sent.
+        Assert.Equal("https://cdn.example.com/end", response.EffectiveUri!.ToString());
     }
 
     [Fact]

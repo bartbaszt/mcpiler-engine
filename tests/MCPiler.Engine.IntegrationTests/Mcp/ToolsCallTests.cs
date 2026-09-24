@@ -4,6 +4,7 @@ using System.IO;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -362,18 +363,139 @@ public sealed class ToolsCallTests : IDisposable
             .GetString()!;
     }
 
+    [Fact]
+    public async Task A_projected_continuation_names_the_direct_tool_and_exact_arguments()
+    {
+        List<string> received = [];
+
+        await using var upstream = await Recording(
+            received,
+            200,
+            "application/json",
+            """{"id":"p-7"}""",
+            extraHeaders: [("Link", "</pets/p-7>; rel=\"next\"")]);
+
+        await using var engine = await ServePaginatingAsync(upstream.Address);
+        using var session = await McpHttpSession.OpenAsync(engine.At("api/full"), Token);
+
+        var call = await session.CallAsync("list-pets", """{"status":"available"}""", 2, Token);
+
+        var pagination = Pagination(call);
+
+        Assert.Equal("next", pagination["state"]!.GetValue<string>());
+        Assert.True(pagination["hasNext"]!.GetValue<bool>());
+
+        var next = Assert.IsType<JsonObject>(pagination["next"]);
+
+        Assert.Equal("get-pet", next["operation"]!.GetValue<string>());
+        Assert.Equal("get-pet", next["tool"]!.GetValue<string>());
+        Assert.Equal("p-7", Assert.IsType<JsonObject>(next["arguments"])["petId"]!.GetValue<string>());
+
+        // One request: the page itself. A continuation is data, never a second exchange.
+        Assert.Equal(["GET /pets?status=available"], received);
+    }
+
+    [Fact]
+    public async Task A_navigator_only_target_is_named_by_the_advertised_wrapper()
+    {
+        List<string> received = [];
+
+        await using var upstream = await Recording(
+            received,
+            200,
+            "application/json",
+            """{"id":"p-7"}""",
+            extraHeaders: [("Link", "</pets/p-7>; rel=\"next\"")]);
+
+        await using var engine = await ServePaginatingAsync(upstream.Address);
+        using var session = await McpHttpSession.OpenAsync(engine.At("api/nav"), Token);
+
+        var call = await session.CallAsync("list-pets", """{"status":"available"}""", 2, Token);
+
+        var next = Assert.IsType<JsonObject>(Pagination(call)["next"]);
+        var payload = Assert.IsType<JsonObject>(next["arguments"]);
+
+        Assert.Equal("catalogue.invoke", next["tool"]!.GetValue<string>());
+        Assert.Equal("get-pet", payload["operationKey"]!.GetValue<string>());
+        Assert.Equal("p-7", Assert.IsType<JsonObject>(payload["arguments"])["petId"]!.GetValue<string>());
+        Assert.Equal(["GET /pets?status=available"], received);
+    }
+
+    [Fact]
+    public async Task A_target_the_surface_cannot_call_is_unavailable_rather_than_emitted()
+    {
+        List<string> received = [];
+
+        await using var upstream = await Recording(
+            received,
+            200,
+            "application/json",
+            """{"id":"p-7"}""",
+            extraHeaders: [("Link", "</pets/p-7>; rel=\"next\"")]);
+
+        await using var engine = await ServePaginatingAsync(upstream.Address);
+
+        // 'nodirect' exposes 'get-pet' only through the Navigator and leaves the Navigator off,
+        // so the static reachability table is satisfied while no callable name exists.
+        using var session = await McpHttpSession.OpenAsync(engine.At("api/nodirect"), Token);
+
+        var call = await session.CallAsync("list-pets", """{"status":"available"}""", 2, Token);
+
+        Assert.Equal("unavailable", Pagination(call)["state"]!.GetValue<string>());
+        Assert.Equal(["GET /pets?status=available"], received);
+    }
+
+    [Fact]
+    public async Task Arguments_the_target_schema_refuses_are_unavailable_rather_than_emitted()
+    {
+        List<string> received = [];
+
+        // The target declares 'petId' with maxLength 3, so the mapped value is one the target's
+        // own advertised schema refuses even though every static mapping check passes.
+        await using var upstream = await Recording(
+            received,
+            200,
+            "application/json",
+            """{"id":"p-12345"}""",
+            extraHeaders: [("Link", "</pets/p-12345>; rel=\"next\"")]);
+
+        await using var engine = await ServePaginatingAsync(upstream.Address);
+        using var session = await McpHttpSession.OpenAsync(engine.At("api/full"), Token);
+
+        var call = await session.CallAsync("list-pets", """{"status":"available"}""", 2, Token);
+
+        Assert.Equal("unavailable", Pagination(call)["state"]!.GetValue<string>());
+
+        // Only the page. A continuation the target would refuse never becomes a second request.
+        Assert.Equal(["GET /pets?status=available"], received);
+    }
+
+    /// <summary>The normalized pagination object of a call result.</summary>
+    private static JsonObject Pagination(McpExchange exchange)
+    {
+        using var document = JsonDocument.Parse(Text(exchange));
+
+        return JsonNode.Parse(document.RootElement.GetProperty("pagination").GetRawText())!.AsObject();
+    }
+
     /// <summary>An upstream that records the request line of everything it is sent.</summary>
     private static Task<LoopbackHost> Recording(
         List<string> received,
         int statusCode,
         string mediaType,
-        string body)
+        string body,
+        IReadOnlyList<(string Name, string Value)>? extraHeaders = null)
         => LoopbackHost.StartAsync(
             async context =>
             {
                 lock (received)
                 {
                     received.Add(context.Request.Method + " " + context.Request.Path + context.Request.QueryString);
+                }
+
+                foreach ((string name, string value) in extraHeaders ?? [])
+                {
+                    context.Response.Headers[name] = value;
                 }
 
                 byte[] bytes = Encoding.UTF8.GetBytes(body);
@@ -398,6 +520,19 @@ public sealed class ToolsCallTests : IDisposable
             new RuntimeOptions([new MountRequest("/api", bundle)], files),
             Token,
             connections);
+    }
+
+    private async Task<ServedEngine> ServePaginatingAsync(Uri upstream)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "mcpiler-call-" + Guid.NewGuid().ToString("N"));
+        _roots.Add(root);
+
+        string bundle = ServedManifests.Write(root, "pets", ServedManifests.Paginating(upstream));
+        string files = Directory.CreateDirectory(Path.Combine(root, "files")).FullName;
+
+        return await ServedEngine.StartAsync(
+            new RuntimeOptions([new MountRequest("/api", bundle)], files),
+            Token);
     }
 
     private async Task<ServedEngine> ServeTwoAsync(Uri upstream, int concurrency)

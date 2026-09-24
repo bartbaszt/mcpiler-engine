@@ -122,7 +122,7 @@
     },
     "agentSurface": {
       "inline": {
-        "formatVersion": 3,
+        "formatVersion": 4,
         "groups": [
           { "name": "pets", "priority": 10 },
           { "name": "admin", "priority": 1 }

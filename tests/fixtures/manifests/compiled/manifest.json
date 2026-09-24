@@ -133,7 +133,7 @@
     },
     "agentSurface": {
       "inline": {
-        "formatVersion": 3,
+        "formatVersion": 4,
         "operations": [
           {
             "slug": "search",
@@ -162,7 +162,7 @@
   },
   "completeness": {
     "algorithm": "sha256",
-    "value": "112391d47f43da1b10f2daad1834fcdba3412eb0c1d25fe06180b6f9dcce2728"
+    "value": "ad6009bf87dc9e845771f725f1b470c84fd034587dbe0946c9541c8d44bf28ea"
   },
   "provenance": {
     "connectorId": "7a1c0000000040008000000000000001",

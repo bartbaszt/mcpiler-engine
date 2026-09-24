@@ -93,12 +93,17 @@ public sealed class UpstreamResponse : IAsyncDisposable
     /// The transport resource whose lifetime the stream depends on, released by
     /// <see cref="DisposeAsync"/>.
     /// </param>
+    /// <param name="effectiveUri">
+    /// The URI of the request that produced this response, after every accepted redirect. A
+    /// relative <c>Link</c> target resolves against this and not against the original request.
+    /// </param>
     public UpstreamResponse(
         int statusCode,
         IReadOnlyDictionary<string, string[]> headers,
         string? mediaType,
         Stream body,
-        IAsyncDisposable? owner = null)
+        IAsyncDisposable? owner = null,
+        Uri? effectiveUri = null)
     {
         ArgumentNullException.ThrowIfNull(headers);
         ArgumentNullException.ThrowIfNull(body);
@@ -108,6 +113,7 @@ public sealed class UpstreamResponse : IAsyncDisposable
         MediaType = mediaType;
         Body = body;
         _owner = owner;
+        EffectiveUri = effectiveUri;
     }
 
     /// <summary>The observed status code.</summary>
@@ -121,6 +127,16 @@ public sealed class UpstreamResponse : IAsyncDisposable
 
     /// <summary>The body stream. Bounded reading is the caller's obligation.</summary>
     public Stream Body { get; }
+
+    /// <summary>
+    /// The URI of the final request in the redirect chain, when the transport observed one.
+    /// </summary>
+    /// <remarks>
+    /// A relative link or a relative redirect-resolved reference is only meaningful against the
+    /// representation's own URL. Capturing it here keeps that fact with the response rather than
+    /// making every consumer re-derive it from the request it happened to send.
+    /// </remarks>
+    public Uri? EffectiveUri { get; }
 
     /// <inheritdoc />
     public async ValueTask DisposeAsync()

@@ -162,6 +162,11 @@ internal static class ToolInvocation
                     // host supplies the canonical protected-resource identity, so the bare
                     // default route and the slug-qualified route do not share capabilities.
                     Scope = invocationScope,
+
+                    // Continuation resolution is bound to the surface that admitted this call,
+                    // because "can the caller reach this target next" is a fact about that
+                    // surface and not about the Manifest as a whole.
+                    Continuations = new SurfaceContinuationResolver(mount.Document, mount, surface, slug),
                 },
                 cancellationToken)
             .ConfigureAwait(false);
@@ -227,6 +232,17 @@ internal static class ToolInvocation
     {
         ToolOutcome plain = Shape(result);
 
+        // A projection finding is an operational fact about a served call, so it is reported
+        // whether or not this session was promised structured content. Reporting it only on the
+        // structured path would hide every refusal from an operator on a text-only session.
+        if (result.Diagnostics.Count > 0)
+        {
+            plain = plain with
+            {
+                Diagnostic = ProjectionDiagnostic(result, mount, surface, operation.Operation!),
+            };
+        }
+
         if (plain.IsError
             || result.ResponseBody is null
             || result.ResponseFile is not null
@@ -272,6 +288,30 @@ internal static class ToolInvocation
             };
         }
     }
+
+    /// <summary>
+    /// Turns one execution's bounded metadata findings into operator diagnostics.
+    /// </summary>
+    /// <remarks>
+    /// Attribution belongs here: the execution knows what it refused and why, and the mount and
+    /// surface are facts the invocation owns. Only the first finding is reported, because a
+    /// diagnostic sink is an operational channel rather than a report of everything withheld,
+    /// and every finding's code is already stable.
+    /// </remarks>
+    private static RuntimeDiagnostic? ProjectionDiagnostic(
+        EngineExecutionResult result,
+        MountedManifest mount,
+        MountedSurface surface,
+        string slug)
+        => result.Diagnostics.Count > 0
+            ? new RuntimeDiagnostic(
+                result.Diagnostics[0].Code,
+                "Response projection or pagination withheld a declared value; see the code for the reason.",
+                mount.Path,
+                surface.Slug,
+                slug,
+                result.Diagnostics[0].Pointer ?? string.Empty)
+            : null;
 
     /// <summary>
     /// Measures the arguments against the schema that was advertised for this tool.

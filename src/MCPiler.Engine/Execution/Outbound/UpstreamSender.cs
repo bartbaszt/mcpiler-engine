@@ -108,7 +108,7 @@ public sealed class UpstreamSender : IUpstreamTransport
 
             if (!RedirectRules.IsRedirect((int)response.StatusCode))
             {
-                return await CaptureAsync(response, cancellationToken).ConfigureAwait(false);
+                return await CaptureAsync(response, uri, cancellationToken).ConfigureAwait(false);
             }
 
             var location = response.Headers.Location;
@@ -198,8 +198,8 @@ public sealed class UpstreamSender : IUpstreamTransport
     }
 
     /// <summary>
-    /// Captures status, headers and media type as values, and hands over the body stream with
-    /// the response's lifetime attached.
+    /// Captures status, headers, media type and the final request URI as values, and hands over
+    /// the body stream with the response's lifetime attached.
     /// </summary>
     /// <remarks>
     /// Reading metadata after the response is released happens to work today. It is not a
@@ -208,6 +208,7 @@ public sealed class UpstreamSender : IUpstreamTransport
     /// </remarks>
     private static async Task<UpstreamResponse> CaptureAsync(
         HttpResponseMessage response,
+        Uri effectiveUri,
         CancellationToken cancellationToken)
     {
         try
@@ -235,7 +236,8 @@ public sealed class UpstreamSender : IUpstreamTransport
                 headers,
                 mediaType,
                 body,
-                new ResponseOwner(response));
+                new ResponseOwner(response),
+                effectiveUri);
         }
         catch
         {
