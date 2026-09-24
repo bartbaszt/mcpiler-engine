@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -11,6 +12,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 
 using MCPiler.Engine.Authentication;
+using MCPiler.Engine.Authentication.OAuth1;
 using MCPiler.Engine.Execution.RuntimeState;
 using MCPiler.Engine.Execution;
 using MCPiler.Engine.Execution.Outbound;
@@ -55,6 +57,10 @@ public sealed class AuthenticationExecutionTests : IDisposable
     private const string ExchangeProfileId = "token-session-exchange";
     private const string ChallengeProfileId = "challenge-session";
     private const string SigningProfileId = "request-signing";
+    private const string OAuth1ProfileId = "oauth1-authorization";
+
+    private const string OAuth1ConsumerSecretCanary = "CANARY-oauth1-consumer-secret-c03e";
+    private const string OAuth1TokenSecretCanary = "CANARY-oauth1-token-secret-91ab";
 
     private readonly List<string> _variables = [];
 
@@ -445,23 +451,805 @@ public sealed class AuthenticationExecutionTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task OAuth1_header_flow_signs_the_request_and_never_sends_a_secret()
+    {
+        var requests = new List<Recorded>();
+        await using var host = await LoopbackHost.StartAsync(
+            context => OAuth1PlainHandlerAsync(context, requests),
+            TestContext.Current.CancellationToken);
+
+        var consumerSecret = SetVariable(OAuth1ConsumerSecretCanary);
+        var tokenSecret = SetVariable(OAuth1TokenSecretCanary);
+
+        var manifest = Manifest(
+            host,
+            Credentials(
+                new ManifestCredential(
+                    "oauth1-consumer-secret",
+                    CredentialScheme.OAuth1Authorization,
+                    "consumerSecret",
+                    CredentialReference.Env(consumerSecret)),
+                new ManifestCredential(
+                    "oauth1-token",
+                    CredentialScheme.OAuth1Authorization,
+                    "oauthToken",
+                    CredentialReference.Env(SetVariable("CANARY-oauth1-token-id-44d1"))),
+                new ManifestCredential(
+                    "oauth1-token-secret",
+                    CredentialScheme.OAuth1Authorization,
+                    "oauthTokenSecret",
+                    CredentialReference.Env(tokenSecret))),
+            Profile(
+                host,
+                OAuth1ProfileId,
+                AuthenticationKind.OAuth1Authorization,
+                """
+                {
+                  "consumerKey": "example-client",
+                  "signatureMethod": "HMAC-SHA1",
+                  "parameterTransport": "authorization-header"
+                }
+                """,
+                credentialRef: ["oauth1-consumer-secret", "oauth1-token", "oauth1-token-secret"]),
+            OAuth1ProfileId);
+
+        var result = await RunAsync(manifest, new AuthenticationRuntime(new UpstreamSender(PermissiveClients())));
+
+        Assert.Equal(ExecutionFailureKind.None, result.Failure);
+
+        var apiCall = Assert.Single(requests);
+        Assert.NotNull(apiCall.Authorization);
+        Assert.StartsWith("OAuth ", apiCall.Authorization, StringComparison.Ordinal);
+        Assert.Contains("oauth_signature_method=\"HMAC-SHA1\"", apiCall.Authorization, StringComparison.Ordinal);
+        Assert.Contains("oauth_token=\"CANARY-oauth1-token-id-44d1\"", apiCall.Authorization, StringComparison.Ordinal);
+        Assert.DoesNotContain(OAuth1ConsumerSecretCanary, apiCall.Authorization ?? string.Empty, StringComparison.Ordinal);
+        Assert.DoesNotContain(OAuth1TokenSecretCanary, apiCall.Authorization ?? string.Empty, StringComparison.Ordinal);
+        Assert.DoesNotContain(OAuth1ConsumerSecretCanary, apiCall.Form ?? string.Empty, StringComparison.Ordinal);
+        AssertOAuthSignature(apiCall, "authorization-header", "HMAC-SHA1", "example-client", OAuth1ConsumerSecretCanary, "CANARY-oauth1-token-id-44d1", OAuth1TokenSecretCanary);
+        Assert.DoesNotContain("oauth_", result.Request!.ExactUrl, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OAuth1_query_flow_carries_fresh_parameters_in_the_uri_and_no_authorization_header()
+    {
+        var requests = new List<Recorded>();
+        await using var host = await LoopbackHost.StartAsync(
+            context => OAuth1PlainHandlerAsync(context, requests),
+            TestContext.Current.CancellationToken);
+
+        var consumerSecret = SetVariable(OAuth1ConsumerSecretCanary);
+        var tokenSecret = SetVariable(OAuth1TokenSecretCanary);
+
+        var manifest = Manifest(
+            host,
+            Credentials(
+                new ManifestCredential(
+                    "oauth1-consumer-secret",
+                    CredentialScheme.OAuth1Authorization,
+                    "consumerSecret",
+                    CredentialReference.Env(consumerSecret)),
+                new ManifestCredential(
+                    "oauth1-token",
+                    CredentialScheme.OAuth1Authorization,
+                    "oauthToken",
+                    CredentialReference.Env(SetVariable("CANARY-oauth1-token-id-55e2"))),
+                new ManifestCredential(
+                    "oauth1-token-secret",
+                    CredentialScheme.OAuth1Authorization,
+                    "oauthTokenSecret",
+                    CredentialReference.Env(tokenSecret))),
+            Profile(
+                host,
+                OAuth1ProfileId,
+                AuthenticationKind.OAuth1Authorization,
+                """
+                {
+                  "consumerKey": "example-client",
+                  "signatureMethod": "HMAC-SHA256",
+                  "parameterTransport": "query"
+                }
+                """,
+                credentialRef: ["oauth1-consumer-secret", "oauth1-token", "oauth1-token-secret"]),
+            OAuth1ProfileId);
+
+        var result = await RunAsync(manifest, new AuthenticationRuntime(new UpstreamSender(PermissiveClients())));
+
+        Assert.Equal(ExecutionFailureKind.None, result.Failure);
+
+        var apiCall = Assert.Single(requests);
+        Assert.Null(apiCall.Authorization);
+        Assert.Contains("oauth_signature=", apiCall.Query, StringComparison.Ordinal);
+        Assert.Contains("oauth_signature_method=HMAC-SHA256", apiCall.Query, StringComparison.Ordinal);
+        Assert.Contains("oauth_nonce=", apiCall.Query, StringComparison.Ordinal);
+        Assert.DoesNotContain(OAuth1ConsumerSecretCanary, apiCall.Query, StringComparison.Ordinal);
+        Assert.DoesNotContain(OAuth1TokenSecretCanary, apiCall.Query, StringComparison.Ordinal);
+        AssertOAuthSignature(apiCall, "query", "HMAC-SHA256", "example-client", OAuth1ConsumerSecretCanary, "CANARY-oauth1-token-id-55e2", OAuth1TokenSecretCanary);
+        Assert.DoesNotContain("oauth_", result.Request!.ExactUrl, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OAuth1_form_body_redirect_is_resigned_from_the_final_uri_and_replayed_form_body()
+    {
+        var requests = new List<Recorded>();
+        await using var host = await LoopbackHost.StartAsync(
+            context => OAuth1RedirectHandlerAsync(context, requests, StatusCodes.Status307TemporaryRedirect, "/moved?redirect=second"),
+            TestContext.Current.CancellationToken);
+
+        var consumerSecret = SetVariable(OAuth1ConsumerSecretCanary);
+        var tokenSecret = SetVariable(OAuth1TokenSecretCanary);
+        string token = "CANARY-oauth1-form-token-8c52";
+        var manifest = Manifest(
+            host,
+            Credentials(
+                new ManifestCredential("oauth1-consumer-secret", CredentialScheme.OAuth1Authorization, "consumerSecret", CredentialReference.Env(consumerSecret)),
+                new ManifestCredential("oauth1-token", CredentialScheme.OAuth1Authorization, "oauthToken", CredentialReference.Env(SetVariable(token))),
+                new ManifestCredential("oauth1-token-secret", CredentialScheme.OAuth1Authorization, "oauthTokenSecret", CredentialReference.Env(tokenSecret))),
+            Profile(
+                host,
+                OAuth1ProfileId,
+                AuthenticationKind.OAuth1Authorization,
+                """
+                {
+                  "consumerKey": "example-client",
+                  "signatureMethod": "HMAC-SHA1",
+                  "parameterTransport": "form-body"
+                }
+                """,
+                credentialRef: ["oauth1-consumer-secret", "oauth1-token", "oauth1-token-secret"]),
+            OAuth1ProfileId,
+            FormOperation("POST"));
+
+        var clock = new AdvancingClock(new DateTimeOffset(2026, 9, 23, 12, 0, 0, TimeSpan.Zero));
+        var result = await RunAsync(
+            manifest,
+            new AuthenticationRuntime(new UpstreamSender(PermissiveClients()), timeProvider: clock),
+            new JsonObject
+            {
+                ["body"] = new JsonObject
+                {
+                    ["ordinary"] = "hello world",
+                    ["tag"] = new JsonArray("one", "two"),
+                },
+            });
+
+        Assert.Equal(ExecutionFailureKind.None, result.Failure);
+        Assert.Equal(2, requests.Count);
+        Assert.Equal("POST", requests[0].Method);
+        Assert.Equal("POST", requests[1].Method);
+        Assert.Equal("/thing/thing", requests[0].Path);
+        Assert.Equal("/moved", requests[1].Path);
+        Assert.Contains("redirect=second", requests[1].Query, StringComparison.Ordinal);
+        Assert.Equal("application/x-www-form-urlencoded", requests[0].ContentType);
+        Assert.Equal("application/x-www-form-urlencoded", requests[1].ContentType);
+
+        foreach (Recorded request in requests)
+        {
+            var bodyPairs = OAuth1Canonicalizer.ParseFormEncodedPairs(request.Form);
+            Assert.Contains(new KeyValuePair<string, string>("ordinary", "hello world"), bodyPairs);
+            Assert.Equal(2, bodyPairs.Count(pair => pair.Key == "tag"));
+            Assert.Equal(1, bodyPairs.Count(pair => pair.Key == "oauth_signature"));
+            AssertOAuthSignature(request, "form-body", "HMAC-SHA1", "example-client", OAuth1ConsumerSecretCanary, token, OAuth1TokenSecretCanary);
+        }
+
+        var firstOAuth = OAuth1Canonicalizer.ParseFormEncodedPairs(requests[0].Form)
+            .Where(pair => pair.Key.StartsWith("oauth_", StringComparison.Ordinal))
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        var secondOAuth = OAuth1Canonicalizer.ParseFormEncodedPairs(requests[1].Form)
+            .Where(pair => pair.Key.StartsWith("oauth_", StringComparison.Ordinal))
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        Assert.NotEqual(firstOAuth["oauth_nonce"], secondOAuth["oauth_nonce"]);
+        Assert.NotEqual(firstOAuth["oauth_timestamp"], secondOAuth["oauth_timestamp"]);
+        Assert.NotEqual(firstOAuth["oauth_signature"], secondOAuth["oauth_signature"]);
+
+        // Result inspection remains the compiler's unsigned semantic request, never a captured
+        // signer-mutated URL or body.
+        Assert.DoesNotContain("oauth_", result.Request!.ExactUrl, StringComparison.Ordinal);
+        Assert.DoesNotContain(token, result.Request.ExactUrl, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OAuth1_ineligible_body_transport_refuses_before_resolving_credentials_or_sending()
+    {
+        var requests = new List<Recorded>();
+        await using var host = await LoopbackHost.StartAsync(
+            context => OAuth1PlainHandlerAsync(context, requests),
+            TestContext.Current.CancellationToken);
+
+        var credentials = Credentials(
+            new ManifestCredential(
+                "oauth1-consumer-secret",
+                CredentialScheme.OAuth1Authorization,
+                "consumerSecret",
+                CredentialReference.Env("MCPILER_TEST_OAUTH1_CONSUMER_SECRET_UNSET")),
+            new ManifestCredential(
+                "oauth1-token",
+                CredentialScheme.OAuth1Authorization,
+                "oauthToken",
+                CredentialReference.Env("MCPILER_TEST_OAUTH1_TOKEN_UNSET")),
+            new ManifestCredential(
+                "oauth1-token-secret",
+                CredentialScheme.OAuth1Authorization,
+                "oauthTokenSecret",
+                CredentialReference.Env("MCPILER_TEST_OAUTH1_TOKEN_SECRET_UNSET")));
+        var profile = Profile(
+            host,
+            OAuth1ProfileId,
+            AuthenticationKind.OAuth1Authorization,
+            """
+            {
+              "consumerKey": "example-client",
+              "signatureMethod": "HMAC-SHA1",
+              "parameterTransport": "form-body"
+            }
+            """,
+            credentialRef: ["oauth1-consumer-secret", "oauth1-token", "oauth1-token-secret"]);
+        var manifest = Manifest(host, credentials, profile, OAuth1ProfileId);
+        var secretResolver = new CountingSecretResolver();
+
+        var result = await RunAsync(
+            manifest,
+            new AuthenticationRuntime(new UpstreamSender(PermissiveClients())),
+            secrets: secretResolver);
+
+        Assert.Equal(ExecutionFailureKind.Authentication, result.Failure);
+        Assert.Contains("body transport", result.FailureReason!, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, secretResolver.Calls);
+        Assert.Empty(requests);
+    }
+
+    [Fact]
+    public async Task OAuth1_original_query_collision_refuses_before_resolving_credentials_or_sending()
+    {
+        var requests = new List<Recorded>();
+        await using var host = await LoopbackHost.StartAsync(
+            context => OAuth1PlainHandlerAsync(context, requests),
+            TestContext.Current.CancellationToken);
+
+        var credentials = Credentials(
+            new ManifestCredential(
+                "oauth1-consumer-secret",
+                CredentialScheme.OAuth1Authorization,
+                "consumerSecret",
+                CredentialReference.Env("MCPILER_TEST_OAUTH1_CONSUMER_SECRET_UNSET")),
+            new ManifestCredential(
+                "oauth1-token",
+                CredentialScheme.OAuth1Authorization,
+                "oauthToken",
+                CredentialReference.Env("MCPILER_TEST_OAUTH1_TOKEN_UNSET")),
+            new ManifestCredential(
+                "oauth1-token-secret",
+                CredentialScheme.OAuth1Authorization,
+                "oauthTokenSecret",
+                CredentialReference.Env("MCPILER_TEST_OAUTH1_TOKEN_SECRET_UNSET")));
+        var profile = Profile(
+            host,
+            OAuth1ProfileId,
+            AuthenticationKind.OAuth1Authorization,
+            """
+            {
+              "consumerKey": "example-client",
+              "signatureMethod": "HMAC-SHA1",
+              "parameterTransport": "query"
+            }
+            """,
+            credentialRef: ["oauth1-consumer-secret", "oauth1-token", "oauth1-token-secret"]);
+        var operation = new ManifestOperation(
+            ManifestOperation.BuildKey("GET", "/thing"),
+            "GET",
+            "/thing",
+            Parameters: [new ManifestParameter("oauth_token", ParameterLocation.Query, Required: true)]);
+        var manifest = Manifest(host, credentials, profile, OAuth1ProfileId, operation);
+        var secretResolver = new CountingSecretResolver();
+
+        var result = await RunAsync(
+            manifest,
+            new AuthenticationRuntime(new UpstreamSender(PermissiveClients())),
+            new JsonObject { ["oauth_token"] = "CANARY-original-oauth-token" },
+            secretResolver);
+
+        Assert.Equal(ExecutionFailureKind.Authentication, result.Failure);
+        Assert.Contains("oauth_token", result.FailureReason!, StringComparison.Ordinal);
+        Assert.DoesNotContain("CANARY-original-oauth-token", result.FailureReason!, StringComparison.Ordinal);
+        Assert.Equal(0, secretResolver.Calls);
+        Assert.Empty(requests);
+    }
+
+    [Fact]
+    public async Task OAuth1_initial_destination_scope_refuses_before_resolving_credentials_or_sending()
+    {
+        var requests = new List<Recorded>();
+        await using var host = await LoopbackHost.StartAsync(
+            context => OAuth1PlainHandlerAsync(context, requests),
+            TestContext.Current.CancellationToken);
+
+        var credentials = Credentials(
+            new ManifestCredential(
+                "oauth1-consumer-secret",
+                CredentialScheme.OAuth1Authorization,
+                "consumerSecret",
+                CredentialReference.Env("MCPILER_TEST_OAUTH1_CONSUMER_SECRET_UNSET")),
+            new ManifestCredential(
+                "oauth1-token",
+                CredentialScheme.OAuth1Authorization,
+                "oauthToken",
+                CredentialReference.Env("MCPILER_TEST_OAUTH1_TOKEN_UNSET")),
+            new ManifestCredential(
+                "oauth1-token-secret",
+                CredentialScheme.OAuth1Authorization,
+                "oauthTokenSecret",
+                CredentialReference.Env("MCPILER_TEST_OAUTH1_TOKEN_SECRET_UNSET")));
+        var profile = Profile(
+            host,
+            OAuth1ProfileId,
+            AuthenticationKind.OAuth1Authorization,
+            """
+            {
+              "consumerKey": "example-client",
+              "signatureMethod": "HMAC-SHA1",
+              "parameterTransport": "authorization-header"
+            }
+            """,
+            credentialRef: ["oauth1-consumer-secret", "oauth1-token", "oauth1-token-secret"])
+            with
+            {
+                DestinationOrigins = ["https://different.example.test:443"],
+            };
+        var manifest = Manifest(host, credentials, profile, OAuth1ProfileId);
+        var secretResolver = new CountingSecretResolver();
+
+        var result = await RunAsync(
+            manifest,
+            new AuthenticationRuntime(new UpstreamSender(PermissiveClients())),
+            secrets: secretResolver);
+
+        Assert.Equal(ExecutionFailureKind.Authentication, result.Failure);
+        Assert.Contains("outside the stored authentication scope", result.FailureReason!, StringComparison.Ordinal);
+        Assert.Equal(0, secretResolver.Calls);
+        Assert.Empty(requests);
+    }
+
+    [Fact]
+    public async Task OAuth1_post_302_rewrite_signs_get_target_without_replaying_the_body()
+    {
+        var requests = new List<Recorded>();
+        await using var host = await LoopbackHost.StartAsync(
+            context => OAuth1RedirectHandlerAsync(context, requests, StatusCodes.Status302Found, "/moved?redirect=post-to-get"),
+            TestContext.Current.CancellationToken);
+
+        var consumerSecret = SetVariable(OAuth1ConsumerSecretCanary);
+        var tokenSecret = SetVariable(OAuth1TokenSecretCanary);
+        string token = "CANARY-oauth1-method-token-2a6d";
+        var manifest = Manifest(
+            host,
+            Credentials(
+                new ManifestCredential("oauth1-consumer-secret", CredentialScheme.OAuth1Authorization, "consumerSecret", CredentialReference.Env(consumerSecret)),
+                new ManifestCredential("oauth1-token", CredentialScheme.OAuth1Authorization, "oauthToken", CredentialReference.Env(SetVariable(token))),
+                new ManifestCredential("oauth1-token-secret", CredentialScheme.OAuth1Authorization, "oauthTokenSecret", CredentialReference.Env(tokenSecret))),
+            Profile(
+                host,
+                OAuth1ProfileId,
+                AuthenticationKind.OAuth1Authorization,
+                """
+                {
+                  "consumerKey": "example-client",
+                  "signatureMethod": "HMAC-SHA256",
+                  "parameterTransport": "authorization-header"
+                }
+                """,
+                credentialRef: ["oauth1-consumer-secret", "oauth1-token", "oauth1-token-secret"]),
+            OAuth1ProfileId,
+            FormOperation("POST"));
+
+        var clock = new AdvancingClock(new DateTimeOffset(2026, 9, 23, 12, 0, 0, TimeSpan.Zero));
+        var result = await RunAsync(
+            manifest,
+            new AuthenticationRuntime(new UpstreamSender(PermissiveClients()), timeProvider: clock),
+            new JsonObject { ["body"] = new JsonObject { ["ordinary"] = "before redirect" } });
+
+        Assert.Equal(ExecutionFailureKind.None, result.Failure);
+        Assert.Equal(2, requests.Count);
+        Assert.Equal("POST", requests[0].Method);
+        Assert.Equal("GET", requests[1].Method);
+        Assert.NotEmpty(requests[0].Form);
+        Assert.Empty(requests[1].Form);
+        Assert.Contains("redirect=post-to-get", requests[1].Query, StringComparison.Ordinal);
+        AssertOAuthSignature(requests[0], "authorization-header", "HMAC-SHA256", "example-client", OAuth1ConsumerSecretCanary, token, OAuth1TokenSecretCanary);
+        AssertOAuthSignature(requests[1], "authorization-header", "HMAC-SHA256", "example-client", OAuth1ConsumerSecretCanary, token, OAuth1TokenSecretCanary);
+
+        var firstOAuth = ParseOAuthAuthorization(requests[0].Authorization!);
+        var secondOAuth = ParseOAuthAuthorization(requests[1].Authorization!);
+        Assert.NotEqual(firstOAuth["oauth_nonce"], secondOAuth["oauth_nonce"]);
+        Assert.NotEqual(firstOAuth["oauth_timestamp"], secondOAuth["oauth_timestamp"]);
+        Assert.NotEqual(firstOAuth["oauth_signature"], secondOAuth["oauth_signature"]);
+    }
+
+    [Fact]
+    public async Task OAuth1_query_values_are_redacted_from_transport_failure_diagnostics()
+    {
+        var requests = new List<Recorded>();
+        await using var host = await LoopbackHost.StartAsync(
+            async context =>
+            {
+                var recorded = await RecordOAuth1Async(context);
+                lock (requests)
+                {
+                    requests.Add(recorded);
+                }
+
+                if (requests.Count == 1)
+                {
+                    context.Response.StatusCode = StatusCodes.Status307TemporaryRedirect;
+                    context.Response.Headers.Location = "/malformed";
+                    return;
+                }
+
+                context.Response.StatusCode = StatusCodes.Status302Found;
+                // Deliberately omit Location: this failure message includes the current URI.
+            },
+            TestContext.Current.CancellationToken);
+
+        var consumerSecret = SetVariable(OAuth1ConsumerSecretCanary);
+        var tokenSecret = SetVariable(OAuth1TokenSecretCanary);
+        string token = "CANARY-oauth1-diagnostic-token-f4b1";
+        var manifest = Manifest(
+            host,
+            Credentials(
+                new ManifestCredential("oauth1-consumer-secret", CredentialScheme.OAuth1Authorization, "consumerSecret", CredentialReference.Env(consumerSecret)),
+                new ManifestCredential("oauth1-token", CredentialScheme.OAuth1Authorization, "oauthToken", CredentialReference.Env(SetVariable(token))),
+                new ManifestCredential("oauth1-token-secret", CredentialScheme.OAuth1Authorization, "oauthTokenSecret", CredentialReference.Env(tokenSecret))),
+            Profile(
+                host,
+                OAuth1ProfileId,
+                AuthenticationKind.OAuth1Authorization,
+                """
+                {
+                  "consumerKey": "example-client",
+                  "signatureMethod": "HMAC-SHA1",
+                  "parameterTransport": "query"
+                }
+                """,
+                credentialRef: ["oauth1-consumer-secret", "oauth1-token", "oauth1-token-secret"]),
+            OAuth1ProfileId);
+
+        var result = await RunAsync(manifest, new AuthenticationRuntime(new UpstreamSender(PermissiveClients())));
+
+        Assert.Equal(ExecutionFailureKind.Transport, result.Failure);
+        Assert.Equal(2, requests.Count);
+        Assert.Contains("oauth_token=%5BREDACTED%5D", result.FailureReason!, StringComparison.Ordinal);
+        Assert.Contains("oauth_signature=%5BREDACTED%5D", result.FailureReason!, StringComparison.Ordinal);
+        Assert.DoesNotContain(token, result.FailureReason!, StringComparison.Ordinal);
+        Assert.Contains("oauth_nonce=%5BREDACTED%5D", result.FailureReason!, StringComparison.Ordinal);
+        Assert.Contains("oauth_timestamp=%5BREDACTED%5D", result.FailureReason!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OAuth1_redirect_is_resigned_for_the_hop_it_actually_takes()
+    {
+        var requests = new List<Recorded>();
+        await using var host = await LoopbackHost.StartAsync(
+            context => RedirectHandlerAsync(context, requests),
+            TestContext.Current.CancellationToken);
+
+        var consumerSecret = SetVariable(OAuth1ConsumerSecretCanary);
+        var tokenSecret = SetVariable(OAuth1TokenSecretCanary);
+
+        var manifest = Manifest(
+            host,
+            Credentials(
+                new ManifestCredential(
+                    "oauth1-consumer-secret",
+                    CredentialScheme.OAuth1Authorization,
+                    "consumerSecret",
+                    CredentialReference.Env(consumerSecret)),
+                new ManifestCredential(
+                    "oauth1-token",
+                    CredentialScheme.OAuth1Authorization,
+                    "oauthToken",
+                    CredentialReference.Env(SetVariable("CANARY-oauth1-token-id-66f3"))),
+                new ManifestCredential(
+                    "oauth1-token-secret",
+                    CredentialScheme.OAuth1Authorization,
+                    "oauthTokenSecret",
+                    CredentialReference.Env(tokenSecret))),
+            Profile(
+                host,
+                OAuth1ProfileId,
+                AuthenticationKind.OAuth1Authorization,
+                """
+                {
+                  "consumerKey": "example-client",
+                  "signatureMethod": "HMAC-SHA1",
+                  "parameterTransport": "authorization-header"
+                }
+                """,
+                credentialRef: ["oauth1-consumer-secret", "oauth1-token", "oauth1-token-secret"]),
+            OAuth1ProfileId);
+
+        var result = await RunAsync(manifest, new AuthenticationRuntime(new UpstreamSender(PermissiveClients())));
+
+        Assert.Equal(ExecutionFailureKind.None, result.Failure);
+
+        // The redirect target is a different request: it must carry a freshly computed
+        // signature, never a copy of the first hop, and no secret material either way.
+        Assert.Equal(2, requests.Count);
+        Assert.NotNull(requests[0].Authorization);
+        Assert.NotNull(requests[1].Authorization);
+        Assert.NotEqual(requests[0].Authorization, requests[1].Authorization);
+        Assert.Equal("/moved", requests[1].Path);
+        Assert.DoesNotContain(OAuth1ConsumerSecretCanary, requests[1].Authorization ?? string.Empty, StringComparison.Ordinal);
+        Assert.DoesNotContain(OAuth1TokenSecretCanary, requests[1].Authorization ?? string.Empty, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task OAuth1_redirect_outside_the_profile_scope_sends_nothing_there()
+    {
+        var firstRequests = new List<Recorded>();
+        var secondRequests = new List<Recorded>();
+        await using var second = await LoopbackHost.StartAsync(
+            context => PlainHandlerAsync(context, secondRequests),
+            TestContext.Current.CancellationToken);
+        await using var first = await LoopbackHost.StartAsync(
+            context => CrossOriginRedirectHandlerAsync(context, firstRequests, second.Address.ToString()),
+            TestContext.Current.CancellationToken);
+
+        var consumerSecret = SetVariable(OAuth1ConsumerSecretCanary);
+        var tokenSecret = SetVariable(OAuth1TokenSecretCanary);
+
+        // The broad perimeter admits both loopback origins, but the profile scope names only
+        // the first: the second hop must be refused before credential material is attached.
+        var manifest = ManifestWithPolicyOrigins(
+            first,
+            [first.Address.GetLeftPart(UriPartial.Authority), second.Address.GetLeftPart(UriPartial.Authority)],
+            Credentials(
+                new ManifestCredential(
+                    "oauth1-consumer-secret",
+                    CredentialScheme.OAuth1Authorization,
+                    "consumerSecret",
+                    CredentialReference.Env(consumerSecret)),
+                new ManifestCredential(
+                    "oauth1-token",
+                    CredentialScheme.OAuth1Authorization,
+                    "oauthToken",
+                    CredentialReference.Env(SetVariable("CANARY-oauth1-token-id-77a4"))),
+                new ManifestCredential(
+                    "oauth1-token-secret",
+                    CredentialScheme.OAuth1Authorization,
+                    "oauthTokenSecret",
+                    CredentialReference.Env(tokenSecret))),
+            Profile(
+                first,
+                OAuth1ProfileId,
+                AuthenticationKind.OAuth1Authorization,
+                """
+                {
+                  "consumerKey": "example-client",
+                  "signatureMethod": "HMAC-SHA1",
+                  "parameterTransport": "authorization-header"
+                }
+                """,
+                credentialRef: ["oauth1-consumer-secret", "oauth1-token", "oauth1-token-secret"]),
+            OAuth1ProfileId);
+
+        var result = await RunAsync(manifest, new AuthenticationRuntime(new UpstreamSender(PermissiveClients())));
+
+        Assert.Equal(ExecutionFailureKind.Authentication, result.Failure);
+        Assert.Single(firstRequests);
+        Assert.Empty(secondRequests);
+    }
+
     /// <summary>One arrival, as the listener observed it.</summary>
-    private sealed record Recorded(string Path, string? Authorization, string Form);
+    private sealed record Recorded(string Path, string? Authorization, string Form, string Query)
+    {
+        public string Method { get; init; } = "GET";
+
+        public string FullUri { get; init; } = string.Empty;
+
+        public string? ContentType { get; init; }
+    }
+
+    /// <summary>Redirects the first arrival to the target, which must never be reached.</summary>
+    private static async Task CrossOriginRedirectHandlerAsync(HttpContext context, List<Recorded> requests, string target)
+    {
+        string path = context.Request.Path.Value ?? "/";
+        string form = await ReadBodyAsync(context);
+        int arrival;
+
+        lock (requests)
+        {
+            requests.Add(new Recorded(path, context.Request.Headers.Authorization, form, context.Request.QueryString.Value ?? string.Empty));
+            arrival = requests.Count;
+        }
+
+        if (arrival == 1)
+        {
+            context.Response.StatusCode = StatusCodes.Status307TemporaryRedirect;
+            context.Response.Headers.Location = target;
+            return;
+        }
+
+        await WriteAsync(context, 200, "text/plain", "ok");
+    }
+
+    private static async Task OAuth1RedirectHandlerAsync(
+        HttpContext context,
+        List<Recorded> requests,
+        int redirectStatus,
+        string location)
+    {
+        Recorded recorded = await RecordOAuth1Async(context);
+        int arrival;
+        lock (requests)
+        {
+            requests.Add(recorded);
+            arrival = requests.Count;
+        }
+
+        if (arrival == 1)
+        {
+            context.Response.StatusCode = redirectStatus;
+            context.Response.Headers.Location = location;
+            return;
+        }
+
+        await WriteAsync(context, StatusCodes.Status200OK, "text/plain", "ok");
+    }
+
+    private static async Task OAuth1PlainHandlerAsync(HttpContext context, List<Recorded> requests)
+    {
+        Recorded recorded = await RecordOAuth1Async(context);
+        lock (requests)
+        {
+            requests.Add(recorded);
+        }
+
+        await WriteAsync(context, StatusCodes.Status200OK, "text/plain", "ok");
+    }
+
+    private static async Task<Recorded> RecordOAuth1Async(HttpContext context)
+    {
+        string path = context.Request.Path.Value ?? "/";
+        string form = await ReadBodyAsync(context);
+        string query = context.Request.QueryString.Value ?? string.Empty;
+        string fullUri = $"{context.Request.Scheme}://{context.Request.Host}{context.Request.PathBase}{context.Request.Path}{query}";
+
+        return new Recorded(path, context.Request.Headers.Authorization, form, query)
+        {
+            Method = context.Request.Method,
+            FullUri = fullUri,
+            ContentType = context.Request.ContentType,
+        };
+    }
+
+    private static void AssertOAuthSignature(
+        Recorded request,
+        string transport,
+        string signatureMethod,
+        string consumerKey,
+        string consumerSecret,
+        string token,
+        string tokenSecret)
+    {
+        var uri = new Uri(request.FullUri, UriKind.Absolute);
+        var parameters = new List<KeyValuePair<string, string>>(OAuth1Canonicalizer.ParseQueryPairs(uri));
+        if (OAuth1Canonicalizer.IsFormUrlEncodedContentType(request.ContentType))
+        {
+            parameters.AddRange(OAuth1Canonicalizer.ParseFormEncodedPairs(request.Form));
+        }
+
+        if (string.Equals(transport, "authorization-header", StringComparison.Ordinal))
+        {
+            parameters.AddRange(ParseOAuthAuthorization(request.Authorization!));
+        }
+
+        string signature = parameters.Single(pair => pair.Key == "oauth_signature").Value;
+        parameters.RemoveAll(pair => pair.Key == "oauth_signature");
+
+        string normalized = OAuth1Canonicalizer.NormalizeParameters([.. parameters]);
+        string baseString = OAuth1Canonicalizer.BuildSignatureBaseString(
+            request.Method,
+            OAuth1Canonicalizer.BaseStringUri(uri),
+            normalized);
+        byte[] key = Encoding.UTF8.GetBytes(
+            OAuth1Canonicalizer.Rfc3986Encode(consumerSecret)
+            + "&"
+            + OAuth1Canonicalizer.Rfc3986Encode(tokenSecret));
+        byte[] message = Encoding.UTF8.GetBytes(baseString);
+        byte[] digest = signatureMethod switch
+        {
+#pragma warning disable CA5350 // Independent test verification for the reviewed OAuth1 HMAC-SHA1 compatibility method.
+            "HMAC-SHA1" => HMACSHA1.HashData(key, message),
+#pragma warning restore CA5350
+            "HMAC-SHA256" => HMACSHA256.HashData(key, message),
+            _ => throw new InvalidOperationException($"Test verifier does not support '{signatureMethod}'."),
+        };
+        string expected = Convert.ToBase64String(digest);
+
+        Assert.Equal(consumerKey, parameters.Single(pair => pair.Key == "oauth_consumer_key").Value);
+        Assert.Equal(token, parameters.Single(pair => pair.Key == "oauth_token").Value);
+        Assert.Equal(expected, signature);
+    }
+
+    private static Dictionary<string, string> ParseOAuthAuthorization(string value)
+    {
+        string parameters = value.StartsWith("OAuth ", StringComparison.Ordinal)
+            ? value["OAuth ".Length..]
+            : value;
+
+        return parameters.Split(',').Select(part =>
+        {
+            string trimmed = part.Trim();
+            int separator = trimmed.IndexOf('=');
+            string name = Uri.UnescapeDataString(trimmed[..separator]);
+            string quoted = trimmed[(separator + 1)..].Trim();
+            return new KeyValuePair<string, string>(
+                name,
+                Uri.UnescapeDataString(quoted[1..^1]));
+        }).ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+    }
+
+    private static ManifestOperation FormOperation(string method)
+    {
+        const string mediaType = "application/x-www-form-urlencoded";
+        return new ManifestOperation(
+            ManifestOperation.BuildKey(method, "/thing"),
+            method,
+            "/thing",
+            RequestBody: new ManifestRequestBody(
+                new Dictionary<string, ManifestMediaType>(StringComparer.Ordinal)
+                {
+                    [mediaType] = new ManifestMediaType(mediaType),
+                },
+                Required: true));
+    }
+
+    private static ManifestDocument ManifestWithPolicyOrigins(
+        LoopbackHost host,
+        IReadOnlyList<string> policyOrigins,
+        CredentialsSection credentials,
+        AuthenticationProfile profile,
+        string authenticationRef,
+        ManifestOperation? operation = null)
+    {
+        var baseUrl = new Uri(host.Address, "thing");
+
+        operation ??= new ManifestOperation(
+            ManifestOperation.BuildKey("GET", "/thing"),
+            "GET",
+            "/thing");
+
+        return new ManifestDocument(
+            ManifestFormatSupport.Maximum,
+            new ServerSection("test-server", Version: "1.0.0"),
+            new PolicySection(baseUrl, policyOrigins),
+            new OperationsSection([operation]),
+            new AgentSurfaceSection(
+            [
+                new AgentOperationEntry(
+                    "get-thing",
+                    "Get thing",
+                    new HttpBinding(operation.Key, AuthenticationRef: authenticationRef)),
+            ]),
+            credentials,
+            new AuthenticationSection([profile]));
+    }
 
     private static async Task<EngineExecutionResult> RunAsync(
         ManifestDocument manifest,
-        AuthenticationRuntime runtime)
+        AuthenticationRuntime runtime,
+        JsonObject? arguments = null,
+        IManifestSecretResolver? secrets = null)
     {
         using var clients = PermissiveClients();
         using var owned = runtime;
         var service = new ExecutionService(
             new UpstreamSender(clients),
-            new ManifestSecretResolver(),
+            secrets ?? new ManifestSecretResolver(),
             files: null,
             runtime);
 
         return await service.ExecuteAsync(
-            new ExecutionRequest(manifest, "get-thing", []),
+            new ExecutionRequest(manifest, "get-thing", arguments ?? []),
             TestContext.Current.CancellationToken);
     }
 
@@ -483,7 +1271,7 @@ public sealed class AuthenticationExecutionTests : IDisposable
 
         lock (requests)
         {
-            requests.Add(new Recorded(path, context.Request.Headers.Authorization, form));
+            requests.Add(new Recorded(path, context.Request.Headers.Authorization, form, context.Request.QueryString.Value ?? string.Empty));
         }
 
         if (string.Equals(path, "/token", StringComparison.Ordinal))
@@ -514,7 +1302,7 @@ public sealed class AuthenticationExecutionTests : IDisposable
 
         lock (requests)
         {
-            requests.Add(new Recorded(path, context.Request.Headers.Authorization, form));
+            requests.Add(new Recorded(path, context.Request.Headers.Authorization, form, context.Request.QueryString.Value ?? string.Empty));
         }
 
         if (string.Equals(path, "/session", StringComparison.Ordinal))
@@ -535,7 +1323,7 @@ public sealed class AuthenticationExecutionTests : IDisposable
 
         lock (requests)
         {
-            requests.Add(new Recorded(path, context.Request.Headers.Authorization, form));
+            requests.Add(new Recorded(path, context.Request.Headers.Authorization, form, context.Request.QueryString.Value ?? string.Empty));
             arrival = requests.Count;
         }
 
@@ -558,7 +1346,7 @@ public sealed class AuthenticationExecutionTests : IDisposable
 
         lock (requests)
         {
-            requests.Add(new Recorded(path, context.Request.Headers.Authorization, form));
+            requests.Add(new Recorded(path, context.Request.Headers.Authorization, form, context.Request.QueryString.Value ?? string.Empty));
             arrival = requests.Count;
         }
 
@@ -579,7 +1367,7 @@ public sealed class AuthenticationExecutionTests : IDisposable
 
         lock (requests)
         {
-            requests.Add(new Recorded(path, context.Request.Headers.Authorization, form));
+            requests.Add(new Recorded(path, context.Request.Headers.Authorization, form, context.Request.QueryString.Value ?? string.Empty));
         }
 
         await WriteAsync(context, 200, "text/plain", "ok");
@@ -604,11 +1392,12 @@ public sealed class AuthenticationExecutionTests : IDisposable
         LoopbackHost host,
         CredentialsSection credentials,
         AuthenticationProfile profile,
-        string authenticationRef)
+        string authenticationRef,
+        ManifestOperation? operation = null)
     {
         var baseUrl = new Uri(host.Address, "thing");
 
-        ManifestOperation operation = new(
+        operation ??= new ManifestOperation(
             ManifestOperation.BuildKey("GET", "/thing"),
             "GET",
             "/thing");
@@ -659,6 +1448,28 @@ public sealed class AuthenticationExecutionTests : IDisposable
         Environment.SetEnvironmentVariable(name, value);
         _variables.Add(name);
         return name;
+    }
+
+    private sealed class AdvancingClock(DateTimeOffset start) : TimeProvider
+    {
+        private long _seconds = -1;
+
+        public override DateTimeOffset GetUtcNow()
+            => start.AddSeconds(Interlocked.Increment(ref _seconds));
+    }
+
+    private sealed class CountingSecretResolver : IManifestSecretResolver
+    {
+        public int Calls { get; private set; }
+
+        public ValueTask<IReadOnlyList<ResolvedCredential>> ResolveAsync(
+            CredentialsSection credentials,
+            IReadOnlyList<string> credentialRefs,
+            CancellationToken cancellationToken)
+        {
+            Calls++;
+            return ValueTask.FromResult<IReadOnlyList<ResolvedCredential>>([]);
+        }
     }
 }
 

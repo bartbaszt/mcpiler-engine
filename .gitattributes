@@ -11,3 +11,7 @@ CHANGELOG.md text eol=lf
 # Preserve the committed bytes on checkout so cross-repository byte-identity checks are stable
 # when core.autocrlf is enabled on Windows.
 tests/fixtures/managed/** -text
+
+# OAuth1 protocol and Manifest fixtures are byte contracts shared with Platform.
+tests/fixtures/oauth1/** -text
+tests/fixtures/manifests/manifest-0.3/oauth1-authorization/** -text

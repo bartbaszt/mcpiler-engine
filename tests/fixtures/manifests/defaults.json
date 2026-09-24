@@ -6,8 +6,8 @@
     "policy.formatVersion": 1,
     "operations.formatVersion": 1,
     "agentSurface.formatVersion": 3,
-    "credentials.formatVersion": 3,
-    "authentication.formatVersion": 1,
+    "credentials.formatVersion": 4,
+    "authentication.formatVersion": 2,
     "tools.formatVersion": 1,
     "search.formatVersion": 1,
 

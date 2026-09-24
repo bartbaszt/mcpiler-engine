@@ -35,7 +35,7 @@
     },
     "credentials": {
       "inline": {
-        "formatVersion": 3,
+        "formatVersion": 4,
         "credentials": [
           {
             "id": "exchange-api-key",
@@ -48,7 +48,7 @@
     },
     "authentication": {
       "inline": {
-        "formatVersion": 1,
+        "formatVersion": 2,
         "profiles": [
           {
             "id": "token-session-exchange",

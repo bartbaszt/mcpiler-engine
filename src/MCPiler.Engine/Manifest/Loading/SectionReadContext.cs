@@ -143,6 +143,47 @@ public sealed class SectionReadContext
         return false;
     }
 
+    /// <summary>
+    /// Verifies the optional <c>formatVersion</c> member against an inclusive supported range.
+    /// Sections whose closed vocabulary grew carry the range so older documents keep loading;
+    /// vocabulary newer than the declared version is refused separately, at the member that
+    /// uses it.
+    /// </summary>
+    public bool VerifySectionFormatVersionRange(JsonObject root, int minimum, int maximum)
+    {
+        ArgumentNullException.ThrowIfNull(root);
+
+        if (root["formatVersion"] is null)
+        {
+            return true;
+        }
+
+        var declared = Integer(root, "formatVersion", string.Empty);
+
+        if (declared is null)
+        {
+            return false;
+        }
+
+        if (declared.Value >= minimum && declared.Value <= maximum)
+        {
+            return true;
+        }
+
+        Error(
+            ManifestDiagnosticCodes.SectionFormatVersionUnsupported,
+            minimum == maximum
+                ? string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"Section format version {declared.Value} is not supported. This Engine implements version {minimum}.")
+                : string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"Section format version {declared.Value} is not supported. This Engine implements versions {minimum} to {maximum}."),
+            "/formatVersion");
+
+        return false;
+    }
+
     /// <summary>Reads an optional object member.</summary>
     public JsonObject? Object(JsonObject parent, string member, string pointer)
     {

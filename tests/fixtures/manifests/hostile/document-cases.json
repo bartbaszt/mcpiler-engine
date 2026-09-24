@@ -1124,7 +1124,7 @@
   "name": "authentication-kind-not-executable",
   "code": "authentication/kind-not-executable",
   "schemaRefuses": false,
-  "why": "The kind is in the vocabulary so a stored value round-trips, but no accepted artifact defines its runtime semantics, so accepting it would defer the failure to the first invocation.",
+  "why": "The kind is in the vocabulary so a stored value round-trips, but no accepted artifact defines its runtime semantics, so accepting it would defer the failure to the first invocation. The sections declare the current versions so the refusal pins the kind rule rather than the version gate.",
   "manifest": {
     "sections": {
       "operations": {
@@ -1175,7 +1175,7 @@
               "scheme": "bearer"
             }
           ],
-          "formatVersion": 3
+          "formatVersion": 4
         }
       },
       "authentication": {
@@ -1200,7 +1200,7 @@
               ]
             }
           ],
-          "formatVersion": 1
+          "formatVersion": 2
         }
       }
     },

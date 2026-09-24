@@ -574,7 +574,7 @@ public sealed class SectionReaderTests
             Json(
                 """
                 {
-                  "formatVersion": 3,
+                  "formatVersion": 4,
                   "credentials": [
                     { "id": "bearer", "scheme": "bearer", "slot": "Authorization", "value": { "fromEnv": "TOKEN" } },
                     { "id": "x-api-key", "scheme": "apiKey", "slot": "X-Api-Key", "location": "header", "value": { "fromEnv": "KEY" } },

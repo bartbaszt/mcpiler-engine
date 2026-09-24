@@ -20,7 +20,11 @@ namespace MCPiler.Engine.Manifest.Model;
 public sealed record AuthenticationSection(IReadOnlyList<AuthenticationProfile> Profiles = null!)
 {
     /// <summary>The section format version this model represents.</summary>
-    public const int FormatVersion = 1;
+    /// <remarks>
+    /// Version 2 adds the <c>oauth1-authorization</c> kind with its bounded runtime
+    /// configuration; older documents are refused rather than migrated.
+    /// </remarks>
+    public const int FormatVersion = 2;
 
     /// <summary>The declared profiles, never null.</summary>
     public IReadOnlyList<AuthenticationProfile> Profiles { get; init; } = Profiles ?? [];

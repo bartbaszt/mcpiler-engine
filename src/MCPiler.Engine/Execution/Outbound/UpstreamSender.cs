@@ -1,6 +1,8 @@
 using System.Net.Http.Headers;
 using System.Net;
 
+using MCPiler.Engine.Execution;
+
 namespace MCPiler.Engine.Execution.Outbound;
 
 /// <summary>
@@ -43,19 +45,27 @@ public sealed class UpstreamSender : IUpstreamTransport
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(policy);
 
+        if (request.Body is not null && request.BodySource is not null)
+        {
+            throw new InvalidOperationException(
+                "An upstream request cannot declare both materialized and replayable body sources.");
+        }
+
         var client = _clients.Client(policy.Limits);
         var hopLimit = policy.Limits.RedirectHopLimit;
 
         var method = request.Method;
         var uri = request.Uri;
         var headers = request.Headers;
+        var sensitiveQueryParameters = request.SensitiveQueryParameters;
         var preserveBody = true;
 
         for (var hop = 0; ; hop++)
         {
             if (!policy.AllowedOrigins.IsAllowed(uri))
             {
-                throw new OriginPolicyViolationException(uri);
+                throw new OriginPolicyViolationException(
+                    UpstreamUriRedactor.Redact(uri, sensitiveQueryParameters));
             }
 
             if (hop > hopLimit)
@@ -76,6 +86,7 @@ public sealed class UpstreamSender : IUpstreamTransport
                 Body = preserveBody ? request.Body : null,
                 BodySource = preserveBody ? request.BodySource : null,
                 BodyMediaType = preserveBody ? request.BodyMediaType : null,
+                SensitiveQueryParameters = sensitiveQueryParameters,
             };
 
             if (policy.SignRequest is { } sign)
@@ -84,6 +95,7 @@ public sealed class UpstreamSender : IUpstreamTransport
                 method = hopRequest.Method;
                 uri = hopRequest.Uri;
                 headers = hopRequest.Headers;
+                sensitiveQueryParameters = hopRequest.SensitiveQueryParameters;
             }
 
             using var message = Build(method, uri, headers, hopRequest);
@@ -103,7 +115,7 @@ public sealed class UpstreamSender : IUpstreamTransport
             }
             catch (Exception ex)
             {
-                throw Translate(ex, uri);
+                throw Translate(ex, uri, hopRequest.SensitiveQueryParameters);
             }
 
             if (!RedirectRules.IsRedirect((int)response.StatusCode))
@@ -115,7 +127,8 @@ public sealed class UpstreamSender : IUpstreamTransport
             if (location is null)
             {
                 response.Dispose();
-                throw new MalformedRedirectException(uri);
+                throw new MalformedRedirectException(
+                    UpstreamUriRedactor.Redact(uri, hopRequest.SensitiveQueryParameters));
             }
 
             var next = RedirectRules.ResolveLocation(uri, location);
@@ -124,7 +137,7 @@ public sealed class UpstreamSender : IUpstreamTransport
 
             response.Dispose();
 
-            headers = Carry(headers, sameOrigin, request.SensitiveHeaders);
+            headers = Carry(headers, sameOrigin, hopRequest.SensitiveHeaders);
             method = nextMethod;
             preserveBody = preserveBody && nextPreservesBody;
             uri = next;
@@ -255,7 +268,10 @@ public sealed class UpstreamSender : IUpstreamTransport
     /// instead of a policy. Unwrapping first is what keeps the address-containment
     /// classification reachable at all.
     /// </remarks>
-    private static Exception Translate(Exception exception, Uri uri)
+    private static Exception Translate(
+        Exception exception,
+        Uri uri,
+        IReadOnlyCollection<string> sensitiveQueryParameters)
     {
         for (var current = exception; current is not null; current = current.InnerException)
         {
@@ -265,9 +281,14 @@ public sealed class UpstreamSender : IUpstreamTransport
             }
         }
 
-        return new UpstreamTransportException(
-            $"The exchange with '{uri}' failed before a response was observed.",
-            exception);
+        string message =
+            $"The exchange with '{UpstreamUriRedactor.Redact(uri, sensitiveQueryParameters)}' failed before a response was observed.";
+
+        // Framework exception trees can retain the original request URI. When a signer marked
+        // query values sensitive, keep the public diagnostic useful but do not preserve an
+        // unreviewed inner message that could reintroduce those values through logging.
+        Exception? safeInner = sensitiveQueryParameters.Count == 0 ? exception : null;
+        return new UpstreamTransportException(message, safeInner);
     }
 
     private sealed class ResponseOwner(HttpResponseMessage response) : IAsyncDisposable

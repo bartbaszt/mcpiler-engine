@@ -1,0 +1,127 @@
+{
+  "manifestFormatVersion": "0.3",
+  "sections": {
+    "server": {
+      "inline": {
+        "name": "OAuth 1.0a Compatibility"
+      }
+    },
+    "policy": {
+      "inline": {
+        "formatVersion": 1,
+        "baseUrl": "https://api.flickr.example/",
+        "allowedOrigins": [
+          "https://api.flickr.example",
+          "https://jira.example.test:8443",
+          "https://1234567.suitetalk.example"
+        ]
+      }
+    },
+    "operations": {
+      "inline": {
+        "operations": [
+          { "key": "GET /services/rest", "method": "GET", "path": "/services/rest" },
+          { "key": "POST /plugins/servlet/oauth/access-token", "method": "POST", "path": "/plugins/servlet/oauth/access-token" },
+          { "key": "GET /services/rest/record/v1/customer", "method": "GET", "path": "/services/rest/record/v1/customer" }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "operations": [
+          {
+            "slug": "flickr-protected-resource",
+            "name": "Flickr-style protected resource",
+            "binding": {
+              "type": "http",
+              "operation": "GET /services/rest",
+              "serverUrl": "https://api.flickr.example",
+              "authenticationRef": "oauth1-flickr"
+            }
+          },
+          {
+            "slug": "jira-oob-token-stage",
+            "name": "Jira-style OOB token stage",
+            "binding": {
+              "type": "http",
+              "operation": "POST /plugins/servlet/oauth/access-token",
+              "serverUrl": "https://jira.example.test:8443",
+              "authenticationRef": "oauth1-jira"
+            }
+          },
+          {
+            "slug": "netsuite-pre-provisioned-resource",
+            "name": "NetSuite-style pre-provisioned resource",
+            "binding": {
+              "type": "http",
+              "operation": "GET /services/rest/record/v1/customer",
+              "serverUrl": "https://1234567.suitetalk.example",
+              "authenticationRef": "oauth1-netsuite"
+            }
+          }
+        ]
+      }
+    },
+    "credentials": {
+      "inline": {
+        "formatVersion": 4,
+        "credentials": [
+          { "id": "flickr-consumer-secret", "scheme": "oauth1-authorization", "slot": "consumerSecret", "value": { "fromEnv": "MCPILER_OAUTH1_FIXTURE_FLICKR_CONSUMER_SECRET" } },
+          { "id": "flickr-token", "scheme": "oauth1-authorization", "slot": "oauthToken", "value": { "fromEnv": "MCPILER_OAUTH1_FIXTURE_FLICKR_TOKEN" } },
+          { "id": "flickr-token-secret", "scheme": "oauth1-authorization", "slot": "oauthTokenSecret", "value": { "fromEnv": "MCPILER_OAUTH1_FIXTURE_FLICKR_TOKEN_SECRET" } },
+          { "id": "jira-private-key", "scheme": "oauth1-authorization", "slot": "rsaPrivateKey", "value": { "fromEnv": "MCPILER_OAUTH1_FIXTURE_JIRA_PRIVATE_KEY" } },
+          { "id": "jira-token", "scheme": "oauth1-authorization", "slot": "oauthToken", "value": { "fromEnv": "MCPILER_OAUTH1_FIXTURE_JIRA_TOKEN" } },
+          { "id": "netsuite-consumer-secret", "scheme": "oauth1-authorization", "slot": "consumerSecret", "value": { "fromEnv": "MCPILER_OAUTH1_FIXTURE_NETSUITE_CONSUMER_SECRET" } },
+          { "id": "netsuite-token", "scheme": "oauth1-authorization", "slot": "oauthToken", "value": { "fromEnv": "MCPILER_OAUTH1_FIXTURE_NETSUITE_TOKEN" } },
+          { "id": "netsuite-token-secret", "scheme": "oauth1-authorization", "slot": "oauthTokenSecret", "value": { "fromEnv": "MCPILER_OAUTH1_FIXTURE_NETSUITE_TOKEN_SECRET" } }
+        ]
+      }
+    },
+    "authentication": {
+      "inline": {
+        "formatVersion": 2,
+        "profiles": [
+          {
+            "id": "oauth1-flickr",
+            "kind": "oauth1-authorization",
+            "configuration": {
+              "consumerKey": "flickr-example-client",
+              "signatureMethod": "HMAC-SHA1",
+              "parameterTransport": "query"
+            },
+            "authenticationOrigins": ["https://api.flickr.example:443"],
+            "destinationOrigins": ["https://api.flickr.example:443"],
+            "credentialRef": ["flickr-consumer-secret", "flickr-token", "flickr-token-secret"],
+            "scopeFingerprint": "0000000000000000000000000000000000000000000000000000000000000001"
+          },
+          {
+            "id": "oauth1-jira",
+            "kind": "oauth1-authorization",
+            "configuration": {
+              "consumerKey": "jira-example-client",
+              "signatureMethod": "RSA-SHA1",
+              "parameterTransport": "authorization-header"
+            },
+            "authenticationOrigins": ["https://jira.example.test:8443"],
+            "destinationOrigins": ["https://jira.example.test:8443"],
+            "credentialRef": ["jira-private-key", "jira-token"],
+            "scopeFingerprint": "0000000000000000000000000000000000000000000000000000000000000002"
+          },
+          {
+            "id": "oauth1-netsuite",
+            "kind": "oauth1-authorization",
+            "configuration": {
+              "consumerKey": "netsuite-example-client",
+              "signatureMethod": "HMAC-SHA256",
+              "parameterTransport": "authorization-header"
+            },
+            "authenticationOrigins": ["https://1234567.suitetalk.example:443"],
+            "destinationOrigins": ["https://1234567.suitetalk.example:443"],
+            "credentialRef": ["netsuite-consumer-secret", "netsuite-token", "netsuite-token-secret"],
+            "scopeFingerprint": "0000000000000000000000000000000000000000000000000000000000000003"
+          }
+        ]
+      }
+    }
+  }
+}

@@ -124,7 +124,7 @@ internal static class ServedManifests
                     "binding": { "type": "http", "operation": "GET /generation",
                       "credentialRef": ["generation-secret"] } }
                 ] } },
-                "credentials": { "inline": { "formatVersion": 3, "credentials": [
+                "credentials": { "inline": { "formatVersion": 4, "credentials": [
                   { "id": "generation-secret", "scheme": "apiKey", "slot": "X-Generation-Secret",
                     "location": "header", "value": { "fromEnv": "{{secretVariable}}" } }
                 ] } }

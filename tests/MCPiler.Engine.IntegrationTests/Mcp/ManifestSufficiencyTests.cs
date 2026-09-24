@@ -146,7 +146,7 @@ public sealed class ManifestSufficiencyTests : IDisposable
         string credentialRef = credentialVariable is null ? string.Empty : ", \"credentialRef\": [\"api-key\"]";
         string credentials = credentialVariable is null
             ? string.Empty
-            : ", \"credentials\": { \"inline\": { \"formatVersion\": 3, \"credentials\": ["
+            : ", \"credentials\": { \"inline\": { \"formatVersion\": 4, \"credentials\": ["
                 + "{ \"id\": \"api-key\", \"scheme\": \"apiKey\", \"slot\": \"X-Api-Key\", "
                 + "\"location\": \"header\", \"value\": { \"fromEnv\": "
                 + JsonSerializer.Serialize(credentialVariable)

@@ -134,6 +134,13 @@ public enum CredentialScheme
 
     /// <summary>A reviewed request signer's signing secret.</summary>
     RequestSigning,
+
+    /// <summary>
+    /// An OAuth 1.0a method-specific secret: the consumer secret, the RSA private key, the
+    /// token identifier, or the token secret. Never applied to a request directly; a signing
+    /// step consumes exactly the slots its method requires.
+    /// </summary>
+    OAuth1Authorization,
 }
 
 /// <summary>Where an API key is placed. Applies to <see cref="CredentialScheme.ApiKey"/>.</summary>
@@ -192,6 +199,9 @@ public enum AuthenticationKind
 
     /// <summary>Request signing through the closed reviewed signer registry.</summary>
     RequestSigning,
+
+    /// <summary>OAuth 1.0a protected-resource authentication from method-specific material.</summary>
+    OAuth1Authorization,
 
     /// <summary>Reserved for reviewed composites. Part of the vocabulary, not executable.</summary>
     ReviewedComposite,
@@ -267,6 +277,7 @@ public static class Vocabulary
         (CredentialScheme.TokenSessionExchange, "token-session-exchange"),
         (CredentialScheme.ChallengeSession, "challenge-session"),
         (CredentialScheme.RequestSigning, "request-signing"),
+        (CredentialScheme.OAuth1Authorization, "oauth1-authorization"),
     ];
 
     private static readonly (CredentialLocation Value, string Wire)[] CredentialLocations =
@@ -289,6 +300,7 @@ public static class Vocabulary
         (AuthenticationKind.TokenSessionExchange, "token-session-exchange"),
         (AuthenticationKind.ChallengeSession, "challenge-session"),
         (AuthenticationKind.RequestSigning, "request-signing"),
+        (AuthenticationKind.OAuth1Authorization, "oauth1-authorization"),
         (AuthenticationKind.ReviewedComposite, "reviewed-composite"),
     ];
 

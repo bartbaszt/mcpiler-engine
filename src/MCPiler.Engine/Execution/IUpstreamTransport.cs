@@ -41,6 +41,12 @@ public sealed record UpstreamRequest
     /// collection is what makes a configured one sensitive too.
     /// </remarks>
     public IReadOnlyCollection<string> SensitiveHeaders { get; init; } = [];
+
+    /// <summary>
+    /// Query parameter names carrying credential or signature material. Transport diagnostics
+    /// redact these values while preserving ordinary request structure.
+    /// </summary>
+    public IReadOnlyCollection<string> SensitiveQueryParameters { get; init; } = [];
 }
 
 /// <summary>The governing outbound policy for one exchange.</summary>

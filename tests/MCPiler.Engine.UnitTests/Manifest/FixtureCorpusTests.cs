@@ -67,6 +67,7 @@ public sealed class FixtureCorpusTests
             "search", "transformed", "two-origins",
             "manifest-0.3/challenge-session", "manifest-0.3/exchange", "manifest-0.3/managed-provider",
             "manifest-0.3/oauth-authorization-code", "manifest-0.3/oauth-client-credentials",
+            "manifest-0.3/oauth1-authorization",
             "manifest-0.3/request-signing-aws-sigv4", "manifest-0.3/request-signing-hmac",
             "manifest-0.3/request-signing-jwt-hmac", "manifest-0.3/request-signing-subsonic-md5",
             "manifest-0.3/static",

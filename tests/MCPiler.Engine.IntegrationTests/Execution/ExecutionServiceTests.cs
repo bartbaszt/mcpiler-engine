@@ -8,6 +8,8 @@ using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 
+using MCPiler.Engine.Authentication;
+using MCPiler.Engine.Authentication.OAuth1;
 using MCPiler.Engine.Execution;
 using MCPiler.Engine.Execution.Files;
 using MCPiler.Engine.Execution.Outbound;
@@ -423,6 +425,81 @@ public sealed class ExecutionServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task OAuth1_signing_changes_only_transport_request_not_inspectable_compiled_request()
+    {
+        const string consumerSecret = "CANARY-oauth1-engine-consumer-secret";
+        const string token = "CANARY-oauth1-engine-token";
+        const string tokenSecret = "CANARY-oauth1-engine-token-secret";
+        string consumerSecretRef = SetVariable(consumerSecret);
+        string tokenRef = SetVariable(token);
+        string tokenSecretRef = SetVariable(tokenSecret);
+        const string origin = "https://api.example.com";
+
+        var credentials = new CredentialsSection(
+        [
+            new ManifestCredential(
+                "oauth1-consumer-secret",
+                CredentialScheme.OAuth1Authorization,
+                "consumerSecret",
+                CredentialReference.Env(consumerSecretRef)),
+            new ManifestCredential(
+                "oauth1-token",
+                CredentialScheme.OAuth1Authorization,
+                "oauthToken",
+                CredentialReference.Env(tokenRef)),
+            new ManifestCredential(
+                "oauth1-token-secret",
+                CredentialScheme.OAuth1Authorization,
+                "oauthTokenSecret",
+                CredentialReference.Env(tokenSecretRef)),
+        ]);
+        var profile = new AuthenticationProfile(
+            "oauth1-profile",
+            AuthenticationKind.OAuth1Authorization,
+            new JsonObject
+            {
+                ["consumerKey"] = "example-client",
+                ["signatureMethod"] = "HMAC-SHA1",
+                ["parameterTransport"] = "query",
+            },
+            [origin],
+            [origin],
+            ["oauth1-consumer-secret", "oauth1-token", "oauth1-token-secret"]);
+        var operation = ExecutionManifests.Operation();
+        var binding = new HttpBinding(operation.Key, AuthenticationRef: profile.Id);
+        var manifest = ExecutionManifests.For(
+            new Uri(origin),
+            allowedOrigins: [origin],
+            operation: operation,
+            binding: binding,
+            credentials: credentials) with
+            {
+                Authentication = new AuthenticationSection([profile]),
+            };
+
+        var transport = new CapturingTransport();
+        using var runtime = new AuthenticationRuntime(transport);
+        var service = new ExecutionService(transport, new ManifestSecretResolver(), authentication: runtime);
+        var result = await service.ExecuteAsync(
+            new ExecutionRequest(manifest, ExecutionManifests.Slug, []),
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionFailureKind.None, result.Failure);
+        Assert.NotNull(result.Request);
+        Assert.DoesNotContain("oauth_", result.Request!.ExactUrl, StringComparison.Ordinal);
+        Assert.DoesNotContain(token, result.Request.ExactUrl, StringComparison.Ordinal);
+        Assert.DoesNotContain(consumerSecret, Describe(result), StringComparison.Ordinal);
+        Assert.DoesNotContain(tokenSecret, Describe(result), StringComparison.Ordinal);
+
+        Assert.NotNull(transport.LastRequest);
+        Assert.Contains("oauth_token=", transport.LastRequest!.Uri.Query, StringComparison.Ordinal);
+        Assert.Contains("oauth_signature=", transport.LastRequest.Uri.Query, StringComparison.Ordinal);
+        Assert.Contains("oauth_signature", transport.LastRequest.SensitiveQueryParameters);
+        Assert.DoesNotContain(consumerSecret, transport.LastRequest.Uri.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(tokenSecret, transport.LastRequest.Uri.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task A_credential_the_binding_does_not_reference_is_neither_read_nor_sent()
     {
         var received = new List<string?>();
@@ -641,5 +718,26 @@ public sealed class ExecutionServiceTests : IDisposable
             UpstreamSendPolicy policy,
             CancellationToken cancellationToken)
             => send(request, policy, cancellationToken);
+    }
+
+    private sealed class CapturingTransport : IUpstreamTransport
+    {
+        public UpstreamRequest? LastRequest { get; private set; }
+
+        public async Task<UpstreamResponse> SendAsync(
+            UpstreamRequest request,
+            UpstreamSendPolicy policy,
+            CancellationToken cancellationToken)
+        {
+            LastRequest = policy.SignRequest is { } sign
+                ? await sign(request, 0, cancellationToken).ConfigureAwait(false)
+                : request;
+
+            return new UpstreamResponse(
+                StatusCodes.Status200OK,
+                new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase),
+                "text/plain",
+                new MemoryStream("ok"u8.ToArray()));
+        }
     }
 }

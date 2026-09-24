@@ -314,7 +314,7 @@ public sealed class StartupReportTests : IDisposable
             },
             "credentials": {
               "inline": {
-                "formatVersion": 3,
+                "formatVersion": 4,
                 "credentials": [
                   {
                     "id": "oauth2-authorization-refresh-token",
@@ -327,7 +327,7 @@ public sealed class StartupReportTests : IDisposable
             },
             "authentication": {
               "inline": {
-                "formatVersion": 1,
+                "formatVersion": 2,
                 "profiles": [
                   {
                     "id": "oauth2-authorization-code-pkce-refresh",

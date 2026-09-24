@@ -4,6 +4,7 @@ using System.Text.Json.Nodes;
 using MCPiler.Engine.Authentication;
 using MCPiler.Engine.Authentication.Challenge;
 using MCPiler.Engine.Authentication.Exchange;
+using MCPiler.Engine.Authentication.OAuth1;
 using MCPiler.Engine.Execution.RuntimeState;
 using MCPiler.Engine.Authentication.Signing;
 using MCPiler.Engine.Compound;
@@ -231,6 +232,53 @@ public sealed class ExecutionService
             ? profile.CredentialRef
             : ManifestBindingDispatcher.CredentialRefsOf(entry.Binding);
 
+        // OAuth1 request-shape refusals must happen before resolving any credential references.
+        // Compilation is independent of signer material, so retain this ordinary request and
+        // reuse it below after the method/transport and parameter locations are validated.
+        CompiledRequest? precompiledOAuth1 = null;
+        UpstreamRequest? prevalidatedOAuth1 = null;
+        if (profile is { Kind: AuthenticationKind.OAuth1Authorization })
+        {
+            try
+            {
+                ResolvedOAuth1Signing.ValidateConfiguration(profile);
+                ResolvedOAuth1Signing.ValidateDestinationScope(profile, baseUri);
+                precompiledOAuth1 = RequestCompiler.Compile(
+                    operation,
+                    baseUri,
+                    arguments,
+                    request.Files);
+                prevalidatedOAuth1 = CredentialApplier.Apply(precompiledOAuth1, []);
+                await ResolvedOAuth1Signing.ValidateRequestShapeAsync(
+                    profile,
+                    prevalidatedOAuth1,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (CredentialUnavailableException ex)
+            {
+                return Failed(ExecutionFailureKind.Authentication, ex.Message);
+            }
+            catch (UnsupportedAuthenticationStrategyException ex)
+            {
+                return Failed(ExecutionFailureKind.Authentication, ex.Message);
+            }
+            catch (AuthenticationPlanException ex)
+            {
+                return Failed(ExecutionFailureKind.Authentication, ex.Message);
+            }
+            catch (FileRuntimeException ex)
+            {
+                return Failed(ExecutionFailureKind.FileRuntime, ex.Message);
+            }
+            catch (Exception ex) when (ex is ArgumentValidationException
+                or InvalidBaseUrlException
+                or UnsupportedSerializationException
+                or UnsupportedBodyMediaTypeException)
+            {
+                return Failed(ExecutionFailureKind.Compilation, ex.Message);
+            }
+        }
+
         IReadOnlyList<ResolvedCredential> credentials;
         try
         {
@@ -244,8 +292,9 @@ public sealed class ExecutionService
             return Failed(ExecutionFailureKind.Authentication, ex.Message);
         }
 
-        // Resolution happens before compilation so a token endpoint failure is reported without
-        // ever building the downstream request.
+        // Other dynamic profiles resolve before compilation so a token endpoint failure is
+        // reported without building the downstream request. OAuth1 is the deliberate exception:
+        // its compiled unsigned request was shape-checked above before its credentials resolve.
         ResolvedAuthentication? authentication = null;
         if (profile is not null)
         {
@@ -275,7 +324,7 @@ public sealed class ExecutionService
         UpstreamRequest upstream;
         try
         {
-            compiled = RequestCompiler.Compile(
+            compiled = precompiledOAuth1 ?? RequestCompiler.Compile(
                 operation,
                 baseUri,
                 arguments,
@@ -286,7 +335,9 @@ public sealed class ExecutionService
                 compiled = Rebind(compiled, destination);
             }
 
-            upstream = CredentialApplier.Apply(compiled, authentication?.Credentials ?? credentials);
+            upstream = prevalidatedOAuth1 ?? CredentialApplier.Apply(
+                compiled,
+                authentication?.Credentials ?? credentials);
         }
         catch (CredentialUnavailableException ex)
         {
@@ -347,9 +398,16 @@ public sealed class ExecutionService
         // One attempt per exchange, preserved across redirect hops. A provider signature carries
         // its own timestamp and nonce, and re-deriving them per hop would make two hops of one
         // chain look like two independent attempts to a nonce-rejecting upstream.
+        // OAuth 1.0a is the deliberate exception: every hop is a new authenticated request, so
+        // its closure mints fresh hop values instead of reusing an exchange-wide attempt.
         var signingAttempt = authentication?.Signing?.CreateAttempt();
 
-        var policy = SendPolicy(origins, limits, authentication?.Signing, signingAttempt);
+        IReadOnlyCollection<string> sensitiveQueryParameters = authentication?.OAuth1Signing is { } oauth1
+            ? ResolvedOAuth1Signing.SensitiveQueryParameters
+            : authentication?.Signing?.SensitiveQueryParameters ?? upstream.SensitiveQueryParameters;
+        upstream = upstream with { SensitiveQueryParameters = sensitiveQueryParameters };
+
+        var policy = SendPolicy(origins, limits, authentication, signingAttempt);
         var effective = compiled;
 
         UpstreamResponse response;
@@ -412,7 +470,7 @@ public sealed class ExecutionService
                     // because the previous attempt was already presented with the challenged
                     // request the upstream refused.
                     signingAttempt = replayed.Signing?.CreateAttempt();
-                    policy = SendPolicy(origins, limits, replayed.Signing, signingAttempt);
+                    policy = SendPolicy(origins, limits, replayed, signingAttempt);
 
                     response = await _transport.SendAsync(upstream, policy, exchange.Token).ConfigureAwait(false);
 
@@ -514,25 +572,35 @@ public sealed class ExecutionService
     /// <remarks>
     /// The closure captures one attempt for the whole chain. The transport re-applies it per hop
     /// because a redirect target is a different request that no signature has covered yet, while
-    /// a single timestamp and nonce keep the chain legible as one attempt.
+    /// a single timestamp and nonce keep the chain legible as one attempt. OAuth 1.0a signs
+    /// through its own closure instead: each hop mints its own nonce and timestamp over the
+    /// request that hop actually sends. The two closures are mutually exclusive by profile kind.
     /// </remarks>
     private static UpstreamSendPolicy SendPolicy(
         OriginAllowList origins,
         ExecutionLimits limits,
-        ResolvedRequestSigning? signing,
+        ResolvedAuthentication? authentication,
         RequestSigningAttempt? attempt)
     {
         var policy = new UpstreamSendPolicy(origins, OutboundLimits.From(limits));
 
-        if (signing is null || attempt is null)
+        if (authentication?.Signing is { } signing && attempt is not null)
         {
-            return policy;
+            return policy with
+            {
+                SignRequest = (request, _, token) => signing.SignAsync(request, attempt, token),
+            };
         }
 
-        return policy with
+        if (authentication?.OAuth1Signing is { } oauth1)
         {
-            SignRequest = (request, _, token) => signing.SignAsync(request, attempt, token),
-        };
+            return policy with
+            {
+                SignRequest = oauth1.SignAsync,
+            };
+        }
+
+        return policy;
     }
 
     /// <summary>Rebinds a compiled request onto a strategy-selected destination authority.</summary>

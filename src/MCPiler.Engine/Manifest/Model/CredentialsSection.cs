@@ -15,9 +15,10 @@ public sealed record CredentialsSection(IReadOnlyList<ManifestCredential> Creden
     /// <summary>The section format version this model represents.</summary>
     /// <remarks>
     /// Version 3 adds <c>fromProvider</c>, the managed-deployment reference that is resolved
-    /// only from the active generation's in-memory secret set.
+    /// only from the active generation's in-memory secret set. Version 4 adds the
+    /// <c>oauth1-authorization</c> scheme with its method-specific slots.
     /// </remarks>
-    public const int FormatVersion = 3;
+    public const int FormatVersion = 4;
 
     /// <summary>The declared credentials, never null.</summary>
     public IReadOnlyList<ManifestCredential> Credentials { get; init; } = Credentials ?? [];
@@ -131,6 +132,7 @@ public sealed record ManifestCredential(
         CredentialScheme.TokenSessionExchange => true,
         CredentialScheme.ChallengeSession => true,
         CredentialScheme.RequestSigning => true,
+        CredentialScheme.OAuth1Authorization => true,
         _ => false,
     };
 }
