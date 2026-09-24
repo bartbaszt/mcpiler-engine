@@ -8,7 +8,7 @@
   "testMaterial": "All credential strings and the Jira RSA key pair are synthetic, disposable test-only values; the private key is not a provider credential.",
   "declaredCounts": {
     "signatureVectors": 5,
-    "parameterCases": 8,
+    "parameterCases": 9,
     "signatureMethods": 4,
     "parameterTransports": 3,
     "providerScenarios": 3
@@ -250,6 +250,15 @@
       "uri": "https://EXAMPLE.COM:443",
       "expectedBaseStringUri": "https://example.com/",
       "covers": ["empty-path"]
+    },
+    {
+      "id": "extra-question-mark-in-query",
+      "source": "Independent golden: Uri.Query keeps the delimiter '?', so https://example.test/path??a=1 has query component \"?a=1\" (parameter name \"?a\"). Removing every leading '?' would incorrectly rename it to \"a\".",
+      "uri": "https://example.test/path??a=1&b=2",
+      "decodedPairs": [["?a", "1"], ["b", "2"]],
+      "expectedNormalizedParameters": "%3Fa=1&b=2",
+      "expectedBaseStringUri": "https://example.test/path",
+      "covers": ["delimiter-question-mark"]
     }
   ]
 }

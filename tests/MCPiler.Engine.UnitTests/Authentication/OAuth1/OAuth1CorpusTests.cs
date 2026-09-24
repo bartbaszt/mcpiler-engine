@@ -14,6 +14,7 @@ public sealed class OAuth1CorpusTests
     [
         "already-encoded-octets",
         "default-port",
+        "delimiter-question-mark",
         "duplicate-names",
         "empty-names",
         "empty-path",
@@ -132,12 +133,29 @@ public sealed class OAuth1CorpusTests
 
             if (item["uri"] is JsonValue uriValue)
             {
+                var uri = new Uri(uriValue.GetValue<string>(), UriKind.Absolute);
                 Assert.Equal(
                     item["expectedBaseStringUri"]!.GetValue<string>(),
-                    OAuth1ProductionReflectionSeam.InvokeString(
+                    OAuth1ProductionReflectionSeam.InvokeString(canonicalizer, "BaseStringUri", uri));
+
+                if (item["decodedPairs"] is JsonArray queryPairs)
+                {
+                    var parsedFromQuery = OAuth1ProductionReflectionSeam.InvokePairs(
                         canonicalizer,
-                        "BaseStringUri",
-                        new Uri(uriValue.GetValue<string>(), UriKind.Absolute)));
+                        "ParseQueryPairs",
+                        uri);
+                    Assert.Equal(ReadPairs(queryPairs), parsedFromQuery);
+
+                    if (item["expectedNormalizedParameters"] is JsonValue expectedNormalized)
+                    {
+                        Assert.Equal(
+                            expectedNormalized.GetValue<string>(),
+                            OAuth1ProductionReflectionSeam.InvokeString(
+                                canonicalizer,
+                                "NormalizeParameters",
+                                parsedFromQuery.ToArray()));
+                    }
+                }
             }
         }
     }

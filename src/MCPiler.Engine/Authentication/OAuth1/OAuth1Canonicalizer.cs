@@ -124,7 +124,10 @@ internal static class OAuth1Canonicalizer
         {
             return [];
         }
-        return ParseFormEncodedPairs(query.TrimStart('?'));
+
+        // Remove exactly the delimiter '?'. A query of "??a=1" has component "?a=1"
+        // (parameter name "?a"); stripping every leading '?' would rename it to "a".
+        return ParseFormEncodedPairs(query[1..]);
     }
 
     /// <summary>
