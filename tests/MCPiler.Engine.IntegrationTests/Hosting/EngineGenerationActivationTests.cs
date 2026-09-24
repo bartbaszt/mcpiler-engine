@@ -1035,6 +1035,62 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// An operator clear follows the generation it leases, not the address it was configured with.
+    /// </summary>
+    /// <remarks>
+    /// The operator names a mount prefix, and that prefix is resolved against the generation the
+    /// request leases. After an activation that replaced the mount set, a clear naming a prefix the
+    /// current generation no longer serves must be refused rather than reported as a successful
+    /// clear of a mount that is no longer there.
+    /// </remarks>
+    [Fact]
+    public async Task An_operator_clear_is_refused_for_a_mount_the_current_generation_stopped_serving()
+    {
+        await using ManagedListener listener = await StartAsync(
+            ServedManifests.OneSurface,
+            authorization: null,
+            fileStoreRoot: null,
+            operatorSecret: "operator-secret-for-tests");
+
+        using HttpClient client = OperatorClient();
+
+        // The initial generation serves /api.
+        using HttpResponseMessage served = await client.PostAsync(
+            listener.At(ResponseCacheOperatorEndpoints.ClearPath + "?mount=/api"),
+            null,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, served.StatusCode);
+
+        // Activate a generation mounted at a different prefix. The operator address is unchanged;
+        // only the mount set the generation resolves changed.
+        await listener.ActivateAsync(Load("/other", ServedManifests.OneSurface));
+
+        using HttpClient after = OperatorClient();
+        using HttpResponseMessage stale = await after.PostAsync(
+            listener.At(ResponseCacheOperatorEndpoints.ClearPath + "?mount=/api"),
+            null,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.NotFound, stale.StatusCode);
+
+        using HttpResponseMessage current = await after.PostAsync(
+            listener.At(ResponseCacheOperatorEndpoints.ClearPath + "?mount=/other"),
+            null,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(HttpStatusCode.OK, current.StatusCode);
+
+        static HttpClient OperatorClient()
+        {
+            HttpClient client = new();
+            client.DefaultRequestHeaders.Authorization =
+                new AuthenticationHeaderValue("Bearer", "operator-secret-for-tests");
+            return client;
+        }
+    }
+
     private Task<ManagedListener> StartAsync()
         => StartAsync(ServedManifests.ThreeSurfaces, authorization: null, fileStoreRoot: null);
 
@@ -1044,14 +1100,16 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
     private async Task<ManagedListener> StartAsync(
         string manifest,
         HostAuthorizationOptions? authorization = null,
-        string? fileStoreRoot = null)
+        string? fileStoreRoot = null,
+        string? operatorSecret = null)
     {
         string store = fileStoreRoot ?? Store();
         ManagedListener listener = await ManagedListener.StartAsync(
             Load("/api", manifest, store),
             store,
             TestContext.Current.CancellationToken,
-            authorization);
+            authorization,
+            operatorSecret);
 
         _listeners.Add(listener);
         return listener;
@@ -1309,7 +1367,8 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
             RuntimeStartResult initial,
             string fileStoreRoot,
             CancellationToken cancellationToken,
-            HostAuthorizationOptions? authorization = null)
+            HostAuthorizationOptions? authorization = null,
+            string? operatorSecret = null)
         {
             ArgumentNullException.ThrowIfNull(initial);
 
@@ -1324,7 +1383,10 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
                     new RuntimeOptions([new MountRequest("/managed", initial.Mounts[0].Path)], fileStoreRoot),
                     new HostListenOptions("http://127.0.0.1:0", HostTransport.Http),
                     Authorization: authorization,
-                    HostLifecycleOptions.Default),
+                    HostLifecycleOptions.Default)
+                {
+                    ResponseCacheOperatorSecret = operatorSecret,
+                },
                 drain,
                 manager);
 

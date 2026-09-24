@@ -170,6 +170,44 @@ public sealed class ReleaseMetadataTests
         Assert.Contains(":latest", release, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The deterministic metadata, licence and release-helper gates must run in ordinary CI, not
+    /// only in the release workflow. When they ran only at release time, a guard that cannot pass
+    /// where it actually executes (the executable-bit check on Linux) stayed latent until the first
+    /// stable release.
+    /// </summary>
+    [Fact]
+    public void Ordinary_ci_runs_the_deterministic_release_gates()
+    {
+        var ci = Read(".github/workflows/ci.yml");
+        foreach (var gate in new[]
+                 {
+                     "bash eng/check-release-metadata.sh",
+                     "bash eng/check-licenses.sh",
+                     "bash eng/test-release-helpers.sh"
+                 })
+        {
+            Assert.Contains(gate, ci, StringComparison.Ordinal);
+        }
+
+        // Ordinary CI must stay read-only; running the gates is verification, not mutation.
+        Assert.Contains("contents: read", ci, StringComparison.Ordinal);
+        Assert.DoesNotContain("contents: write", ci, StringComparison.Ordinal);
+        Assert.DoesNotContain("packages: write", ci, StringComparison.Ordinal);
+
+        // The release workflow keeps its own copy so a release never depends on ordinary CI having run.
+        var release = Read(".github/workflows/release.yml");
+        foreach (var gate in new[]
+                 {
+                     "bash eng/check-release-metadata.sh",
+                     "bash eng/check-licenses.sh",
+                     "bash eng/test-release-helpers.sh"
+                 })
+        {
+            Assert.Contains(gate, release, StringComparison.Ordinal);
+        }
+    }
+
     [Fact]
     public void Release_identity_is_the_documented_dco_bot_identity()
     {
@@ -178,6 +216,39 @@ public sealed class ReleaseMetadataTests
         Assert.Contains("41898282+github-actions[bot]@users.noreply.github.com", release, StringComparison.Ordinal);
         Assert.Contains("git commit -s", release, StringComparison.Ordinal);
         Assert.Contains("Signed-off-by", release, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An annotated tag records a tagger identity, and <c>--publish-git</c> runs in its own job on a
+    /// fresh runner where the prepare job's checkout-local identity does not exist. A bare
+    /// <c>git tag -a</c> therefore fails with <c>fatal: empty ident name ... not allowed</c> after the
+    /// candidate has already been built, published and smoked — observed on the first release run that
+    /// passed the visibility gate. The tag command must carry the documented bot identity explicitly.
+    /// </summary>
+    [Fact]
+    public void Annotated_release_tag_carries_the_bot_identity_explicitly()
+    {
+        var release = Read("eng/release.sh").Replace("\r\n", "\n");
+
+        // Join backslash continuations first so a multi-line invocation is one logical command;
+        // otherwise the identity on the first physical line would be invisible to a check that
+        // starts at the line containing `tag -a`.
+        var joined = release.Replace("\\\n", " ");
+        var tagCommands = joined
+            .Split('\n')
+            .Select(line => line.Trim())
+            .Where(line => line.Contains("tag -a", StringComparison.Ordinal))
+            .ToArray();
+
+        Assert.NotEmpty(tagCommands);
+
+        // Every annotated tag invocation must set both identity values in the same command, because
+        // the job has no configured identity and `-c` is scoped to that one invocation.
+        foreach (var command in tagCommands)
+        {
+            Assert.Contains("user.name=", command, StringComparison.Ordinal);
+            Assert.Contains("user.email=", command, StringComparison.Ordinal);
+        }
     }
 
     [Fact]
@@ -218,6 +289,160 @@ public sealed class ReleaseMetadataTests
         Assert.Contains("--file-store-root /data/files", verifier, StringComparison.Ordinal);
         Assert.Contains("--runtime-state-root /data/runtime-state", verifier, StringComparison.Ordinal);
         Assert.Contains("runtime-state-key-file", verifier, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The resume workflow branches into two mutually exclusive modes, so exactly one branch job is
+    /// always skipped, and GitHub Actions propagates a skip to every later job in the dependency chain.
+    /// Only <c>stable_promote</c> used to declare the accepting <c>always()</c> form, so
+    /// <c>latest_promote</c> and <c>github_release</c> were skipped with zero steps while the run still
+    /// reported success (hosted run 35845059978) - a resume could not repair the very artifacts it
+    /// exists to repair. Every job reachable after a conditional job must therefore declare its own
+    /// accepting <c>if:</c>.
+    /// </summary>
+    [Fact]
+    public void Every_resume_job_after_a_conditional_job_declares_an_accepting_if()
+    {
+        const string Workflow = ".github/workflows/release-resume.yml";
+        var text = Read(Workflow);
+
+        var jobs = ParseJobs(text);
+        Assert.True(jobs.Count >= 6, $"Expected the resume job graph, parsed only {jobs.Count} jobs.");
+
+        // The conditional jobs that always exist in exactly one mode: their sibling is always skipped.
+        Assert.Contains("git_publish", jobs.Keys);
+        Assert.Contains("resume_guard", jobs.Keys);
+
+        var stranded = new List<string>();
+        foreach (var (name, job) in jobs)
+        {
+            // A job is at risk when any transitive dependency declares an `if:` and this job does not.
+            var risky = TransitiveNeeds(jobs, name)
+                .Any(dep => jobs[dep].Condition is not null);
+            if (risky && job.Condition is null)
+            {
+                stranded.Add(name);
+            }
+        }
+
+        Assert.True(
+            stranded.Count == 0,
+            $"These resume jobs can be skipped by an ancestor's skip while the run reports success: {string.Join(", ", stranded)}.");
+
+        // The accepting form must actually neutralise a skip, not merely exist.
+        foreach (var tail in new[] { "stable_promote", "latest_promote", "github_release" })
+        {
+            var condition = jobs[tail].Condition;
+            Assert.NotNull(condition);
+            Assert.Contains("always()", condition, StringComparison.Ordinal);
+            Assert.Contains("success", condition, StringComparison.Ordinal);
+        }
+    }
+
+    private sealed record WorkflowJob(string Name, IReadOnlyList<string> Needs, string? Condition);
+
+    private static Dictionary<string, WorkflowJob> ParseJobs(string workflow)
+    {
+        var jobs = new Dictionary<string, WorkflowJob>(StringComparer.Ordinal);
+        // Job headers are two-space indented keys under the top-level `jobs:` block; the body runs to
+        // the next job header or the end of the file.
+        var headers = Regex.Matches(
+            workflow,
+            @"(?m)^  (?<name>[a-zA-Z0-9_-]+):\s*$",
+            RegexOptions.CultureInvariant,
+            TimeSpan.FromSeconds(5));
+
+        for (var i = 0; i < headers.Count; i++)
+        {
+            var name = headers[i].Groups["name"].Value;
+            if (name is "on" or "permissions" or "concurrency" or "env" or "jobs")
+            {
+                continue;
+            }
+
+            var start = headers[i].Index + headers[i].Length;
+            var end = i + 1 < headers.Count ? headers[i + 1].Index : workflow.Length;
+            var body = workflow[start..end];
+
+            // `on:`/`workflow_dispatch:`/`inputs:` live above the jobs block; skip non-job sections by
+            // requiring the body to declare a runner or a need.
+            if (!body.Contains("runs-on:", StringComparison.Ordinal)
+                && !body.Contains("needs:", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var needs = new List<string>();
+            var needsMatch = Regex.Match(
+                body,
+                @"(?m)^    needs:\s*(?<inline>\[[^\]]*\])\s*$",
+                RegexOptions.CultureInvariant,
+                TimeSpan.FromSeconds(5));
+            if (needsMatch.Success)
+            {
+                needs.AddRange(
+                    needsMatch.Groups["inline"].Value
+                        .Trim('[', ']')
+                        .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+            }
+            var needsListMatch = Regex.Match(
+                body,
+                @"(?m)^    needs:\s*$",
+                RegexOptions.CultureInvariant,
+                TimeSpan.FromSeconds(5));
+            if (needsListMatch.Success)
+            {
+                // Parse the YAML sequence without a nested-quantifier regex: each dependency is a
+                // six-space indented list item immediately following the `needs:` key.
+                foreach (var line in body[needsListMatch.Index..].Split('\n').Skip(1))
+                {
+                    var item = line.TrimEnd('\r');
+                    if (!item.StartsWith("      - ", StringComparison.Ordinal))
+                    {
+                        break;
+                    }
+
+                    needs.Add(item[8..].Trim());
+                }
+            }
+
+            var conditionMatch = Regex.Match(
+                body,
+                @"(?m)^    if:\s*(?<condition>.+)$",
+                RegexOptions.CultureInvariant,
+                TimeSpan.FromSeconds(5));
+            var condition = conditionMatch.Success ? conditionMatch.Groups["condition"].Value.Trim() : null;
+
+            jobs[name] = new WorkflowJob(name, needs, condition);
+        }
+
+        return jobs;
+    }
+
+    private static IEnumerable<string> TransitiveNeeds(Dictionary<string, WorkflowJob> jobs, string name)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var queue = new Queue<string>(jobs[name].Needs);
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            if (!seen.Add(current))
+            {
+                continue;
+            }
+
+            if (!jobs.TryGetValue(current, out var job))
+            {
+                continue;
+            }
+
+            foreach (var next in job.Needs)
+            {
+                queue.Enqueue(next);
+            }
+        }
+
+        return seen;
     }
 
     private static string Job(string workflow, string name)

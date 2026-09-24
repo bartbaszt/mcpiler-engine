@@ -137,6 +137,25 @@ public static class ManifestDiagnosticCodes
     /// <summary>A declared operation kind contradicts its binding shape.</summary>
     public const string KindBindingMismatch = "agent/kind-binding-mismatch";
 
+    /// <summary>
+    /// An operation's response-cache policy is malformed or unsupported for its effective
+    /// binding.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The policy is load-time valid or invalid; whether a request that could execute it is
+    /// served from cache is a runtime admission question answered from current caller authority,
+    /// upstream authentication state and response headers. Refusing at load keeps a manifest
+    /// that can never cache anything from being served with a silent no-op.
+    /// </para>
+    /// <para>
+    /// One code covers the whole policy: a TTL outside 1..86,400, a missing or non-integral TTL,
+    /// a compound binding, or an effective method other than GET/HEAD. The JSON Pointer names
+    /// the exact member, so the message does not have to carry the location.
+    /// </para>
+    /// </remarks>
+    public const string ResponseCachePolicyInvalid = "agent/response-cache-policy-invalid";
+
     /// <summary>A binding names an execution key the operations section does not declare.</summary>
     public const string BindingOperationKeyUnknown = "binding/operation-key-unknown";
 
@@ -570,6 +589,7 @@ public static class ManifestDiagnosticCodes
         DuplicateAgentSlug,
         UnknownGroup,
         KindBindingMismatch,
+        ResponseCachePolicyInvalid,
         BindingOperationKeyUnknown,
         CompoundStepUnknownOperation,
         CompoundNested,

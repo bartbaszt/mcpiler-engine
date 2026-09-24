@@ -221,8 +221,8 @@ public sealed class SectionFormatVersionMatrixTests
         Assert.Equal(1, PolicySection.FormatVersion);
         Assert.Equal(1, OperationsSection.FormatVersion);
         Assert.Equal(4, AgentSurfaceSection.FormatVersion);
-        Assert.Equal(3, CredentialsSection.FormatVersion);
-        Assert.Equal(1, AuthenticationSection.FormatVersion);
+        Assert.Equal(4, CredentialsSection.FormatVersion);
+        Assert.Equal(2, AuthenticationSection.FormatVersion);
         Assert.Equal(1, ToolsSection.FormatVersion);
         Assert.Equal(1, SearchSection.FormatVersion);
     }
@@ -238,10 +238,10 @@ public sealed class SectionFormatVersionMatrixTests
     [InlineData("agentSurface", 4, true)]
     [InlineData("agentSurface", 3, false)]
     [InlineData("agentSurface", 2, false)]
-    [InlineData("credentials", 3, true)]
-    [InlineData("credentials", 2, false)]
-    [InlineData("authentication", 1, true)]
-    [InlineData("authentication", 2, false)]
+    [InlineData("credentials", 4, true)]
+    [InlineData("credentials", 3, false)]
+    [InlineData("authentication", 2, true)]
+    [InlineData("authentication", 1, false)]
     [InlineData("tools", 1, true)]
     [InlineData("tools", 2, false)]
     [InlineData("search", 1, true)]

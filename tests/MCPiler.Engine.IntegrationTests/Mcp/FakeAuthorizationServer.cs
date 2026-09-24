@@ -280,6 +280,35 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
         return token;
     }
 
+    /// <summary>
+    /// Signs a bearer token that carries no optional identity claim.
+    /// </summary>
+    /// <remarks>
+    /// A standards-compliant issuer is free to omit <c>sub</c> and <c>client_id</c>, and the
+    /// authorization boundary must admit such a token: nothing in the protected-resource duties
+    /// depends on either claim, and a boundary that required one would reject tokens it has no
+    /// contract to reject. The audience and scopes are the facts the boundary is defined on.
+    /// </remarks>
+    /// <param name="audience">The resource the token is addressed to.</param>
+    /// <param name="scopes">The scopes the token carries.</param>
+    public string MintWithoutIdentityClaims(string audience, string scopes)
+    {
+        JsonWebTokenHandler handler = new();
+
+        return handler.CreateToken(new SecurityTokenDescriptor
+        {
+            Issuer = Address.AbsoluteUri,
+            Audience = audience,
+            Claims = new Dictionary<string, object>
+            {
+                ["scope"] = scopes,
+            },
+            NotBefore = DateTime.UtcNow.AddMinutes(-1),
+            Expires = DateTime.UtcNow.AddHours(1),
+            SigningCredentials = new SigningCredentials(SigningParameters, SecurityAlgorithms.RsaSha256),
+        });
+    }
+
     /// <summary>Serializes the public half of the signing key as a JWKS document.</summary>
     private static string Jwks(RsaSecurityKey parameters)
     {

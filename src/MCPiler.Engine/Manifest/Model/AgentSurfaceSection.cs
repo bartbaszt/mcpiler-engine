@@ -77,6 +77,7 @@ public sealed record AgentSurfaceSection(
 /// its legacy result shape. Absence is the compatibility contract: an operation without one
 /// returns exactly the bytes it returned before this format version existed.
 /// </param>
+/// <param name="ResponseCache">The opt-in upstream response-cache policy, or <c>null</c> when uncached.</param>
 public sealed record AgentOperationEntry(
     string Slug,
     string Name,
@@ -92,7 +93,8 @@ public sealed record AgentOperationEntry(
     ToolAnnotations? Annotations = null,
     string? Risk = null,
     SearchMetadataEntry? Search = null,
-    AgentOutputProjection? OutputProjection = null)
+    AgentOutputProjection? OutputProjection = null,
+    ResponseCachePolicySettings? ResponseCache = null)
 {
     /// <summary>The risk string meaning "no risk flags set".</summary>
     public const string NoRisk = "none";
@@ -154,6 +156,9 @@ public sealed record AgentOperationEntry(
         return ToolAnnotations.FromMethod(method);
     }
 }
+
+/// <summary>Optional per-operation upstream response cache policy.</summary>
+public sealed record ResponseCachePolicySettings(int TtlSeconds);
 
 /// <summary>A declared operation group.</summary>
 /// <param name="Name">The group name. The join key for an operation's group list.</param>

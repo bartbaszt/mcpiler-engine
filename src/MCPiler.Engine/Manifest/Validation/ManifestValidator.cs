@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json.Nodes;
 
+using MCPiler.Engine.Authentication.OAuth1;
 using MCPiler.Engine.Manifest.Loading;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Transform;
@@ -37,11 +38,13 @@ public static class ManifestValidator
         ValidateSurfaceOperations(manifest, diagnostics);
         ValidateCompoundExposure(manifest, diagnostics);
         ValidateBindingOperationKeys(manifest, diagnostics);
+        ValidateResponseCachePolicies(manifest, diagnostics);
         ValidateDestinations(manifest, diagnostics);
         ValidateCredentialIdentity(manifest, diagnostics);
         ValidateBindingCredentialScope(manifest, diagnostics);
         ValidateCredentialReachability(manifest, diagnostics);
         ValidateAuthenticationProfiles(manifest, diagnostics);
+        ValidateOAuth1SlotSets(manifest, diagnostics);
         ValidateAuthenticationReachability(manifest, diagnostics);
         ValidateSchemaReferences(manifest, diagnostics);
         ValidateDeclaredTools(manifest, diagnostics);
@@ -362,6 +365,77 @@ public static class ManifestValidator
     }
 
     /// <summary>
+    /// Enforces the method-specific OAuth 1.0a slot contract on referenced credentials: every
+    /// slot the profile's signature method requires must be referenced, and no referenced slot
+    /// may belong to another method. The reader owns member shape and the legal slot set; this
+    /// owns the method-exactness the reader cannot see without the profile configuration.
+    /// </summary>
+    private static void ValidateOAuth1SlotSets(ManifestDocument manifest, List<ManifestDiagnostic> diagnostics)
+    {
+        IReadOnlyList<AuthenticationProfile> profiles = manifest.EffectiveAuthentication.Profiles;
+        Dictionary<string, ManifestCredential> byId = new(StringComparer.Ordinal);
+        foreach (ManifestCredential credential in manifest.EffectiveCredentials.Credentials)
+        {
+            byId.TryAdd(credential.Id, credential);
+        }
+
+        for (int index = 0; index < profiles.Count; index++)
+        {
+            AuthenticationProfile profile = profiles[index];
+            if (profile.Kind != AuthenticationKind.OAuth1Authorization)
+            {
+                continue;
+            }
+
+            string pointer = JsonPointer.Build("profiles", Segment(index));
+            string? method = profile.Configuration["signatureMethod"] is JsonValue methodValue
+                && methodValue.TryGetValue<string>(out string? text)
+                    ? text
+                    : null;
+
+            if (!OAuth1Vocabulary.TryGetRequiredSlots(method, out string[] required))
+            {
+                continue;
+            }
+
+            List<string> referenced = [];
+            foreach (string reference in profile.CredentialRef)
+            {
+                if (byId.TryGetValue(reference, out ManifestCredential? credential)
+                    && credential.Scheme == CredentialScheme.OAuth1Authorization)
+                {
+                    referenced.Add(credential.Slot);
+                }
+            }
+
+            string? missing = required.FirstOrDefault(slot => !referenced.Contains(slot, StringComparer.Ordinal));
+            if (missing is not null)
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.AuthenticationCredentialIncompatible,
+                    $"Authentication profile '{DiagnosticText.Echo(profile.Id)}' uses signature method " +
+                    $"'{DiagnosticText.Echo(method)}', which requires the '{DiagnosticText.Echo(missing)}' " +
+                    "credential. The profile could never sign.",
+                    section: ManifestSectionName.Authentication,
+                    pointer: pointer + "/credentialRef"));
+                continue;
+            }
+
+            string? unexpected = referenced.FirstOrDefault(slot => !required.Contains(slot, StringComparer.Ordinal));
+            if (unexpected is not null)
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.AuthenticationCredentialIncompatible,
+                    $"Authentication profile '{DiagnosticText.Echo(profile.Id)}' uses signature method " +
+                    $"'{DiagnosticText.Echo(method)}', which must not receive the '{DiagnosticText.Echo(unexpected)}' " +
+                    "credential. A signer must never receive secret slots its method does not require.",
+                    section: ManifestSectionName.Authentication,
+                    pointer: pointer + "/credentialRef"));
+            }
+        }
+    }
+
+    /// <summary>
     /// Refuses an authentication profile no executing binding reaches.
     /// </summary>
     /// <remarks>
@@ -445,6 +519,7 @@ public static class ManifestValidator
         AuthenticationKind.ChallengeSession => credential.Scheme is CredentialScheme.ChallengeSession,
         AuthenticationKind.RequestSigning => credential.Scheme is CredentialScheme.RequestSigning
             && string.Equals(credential.Slot, "signingSecret", StringComparison.Ordinal),
+        AuthenticationKind.OAuth1Authorization => credential.Scheme is CredentialScheme.OAuth1Authorization,
         _ => false,
     };
 
@@ -456,6 +531,7 @@ public static class ManifestValidator
         AuthenticationKind.TokenSessionExchange => "Expected scheme 'token-session-exchange'.",
         AuthenticationKind.ChallengeSession => "Expected scheme 'challenge-session'.",
         AuthenticationKind.RequestSigning => "Expected scheme 'request-signing' with slot 'signingSecret'.",
+        AuthenticationKind.OAuth1Authorization => "Expected scheme 'oauth1-authorization' with exactly the slots the signature method requires.",
         _ => "This profile kind declares no credential references.",
     };
 
@@ -772,6 +848,74 @@ public static class ManifestValidator
                 "section does not declare.",
                 section: ManifestSectionName.AgentSurface,
                 pointer: pointer));
+        }
+    }
+
+    /// <summary>
+    /// Every declared response-cache policy must resolve to one supported HTTP GET/HEAD binding.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The binding is resolved through the same dispatcher every other inspection and the
+    /// runtime use, and the method comes from the operations section entry that binding names,
+    /// never from a re-derived key or a declared label. A policy whose operation cannot be
+    /// executed as a cacheable read is refused here rather than silently ignored at runtime,
+    /// because a manifest that advertises a cache that can never be used is a wrong
+    /// description of the deployment.
+    /// </para>
+    /// <para>
+    /// The TTL range is enforced by the section reader, which knows the exact member pointer.
+    /// What is left here is the cross-section half: whether the binding shape and the effective
+    /// method can carry a cache at all.
+    /// </para>
+    /// </remarks>
+    private static void ValidateResponseCachePolicies(
+        ManifestDocument manifest,
+        List<ManifestDiagnostic> diagnostics)
+    {
+        for (int index = 0; index < manifest.AgentSurface.Operations.Count; index++)
+        {
+            AgentOperationEntry operation = manifest.AgentSurface.Operations[index];
+
+            if (operation.ResponseCache is null)
+            {
+                continue;
+            }
+
+            string pointer = JsonPointer.Build("operations", Segment(index), "responseCache");
+
+            // A compound binding resolves to no single HTTP shape: it runs several operations,
+            // some of which may be writes, and there is no one response whose cache identity
+            // this policy could name.
+            if (ManifestBindingDispatcher.TryResolveHttp(operation.Binding) is not { } http)
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.ResponseCachePolicyInvalid,
+                    $"Operation '{DiagnosticText.Echo(operation.Slug)}' declares a response cache, " +
+                    "but its binding executes a workflow rather than one HTTP operation. Only a " +
+                    "single HTTP GET/HEAD operation can be cached.",
+                    section: ManifestSectionName.AgentSurface,
+                    pointer: pointer));
+                continue;
+            }
+
+            // An unresolvable key is reported by the binding validation above; reporting the
+            // same missing operation twice would bury the actionable diagnostic.
+            if (manifest.Operations.Operation(http.Operation) is not { } bound)
+            {
+                continue;
+            }
+
+            if (bound.Method is not ("GET" or "HEAD"))
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.ResponseCachePolicyInvalid,
+                    $"Operation '{DiagnosticText.Echo(operation.Slug)}' declares a response cache, " +
+                    $"but the operation it executes is '{DiagnosticText.Echo(bound.Method)}'. Only " +
+                    "GET and HEAD responses are cacheable.",
+                    section: ManifestSectionName.AgentSurface,
+                    pointer: pointer));
+            }
         }
     }
 

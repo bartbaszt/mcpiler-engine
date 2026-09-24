@@ -115,12 +115,16 @@ internal static class ToolBridge
 
         using (DrainCoordinator.InvocationLease lease = admitted!)
         {
+            // The partition the authorization middleware settled for this request. The admission
+            // always states one — public for an open mount — so the HTTP path never passes an
+            // absence that a cache would have to interpret.
             return await ExecuteResolvedAsync(
                 admission.Generation,
                 admission.Resolution,
                 admission.ResourceIdentity,
                 tool,
                 request,
+                admission.CallerPartition ?? CallerPartition.Public,
                 lease.CancellationToken).ConfigureAwait(false);
         }
     }
@@ -147,6 +151,11 @@ internal static class ToolBridge
             resourceIdentity,
             tool,
             request,
+
+            // A stdio session is not an HTTP-authorized caller: it is admitted by process
+            // ownership rather than by a presented token, so every stdio caller shares the one
+            // explicit public partition.
+            CallerPartition.Public,
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -156,6 +165,7 @@ internal static class ToolBridge
         string resourceIdentity,
         string tool,
         RequestContext<CallToolRequestParams> request,
+        CallerPartition callerPartition,
         CancellationToken cancellationToken)
     {
         ToolOutcome outcome = await generation.Execution
@@ -166,7 +176,8 @@ internal static class ToolBridge
                 tool,
                 Arguments(request.Params?.Arguments),
                 request.Server?.NegotiatedProtocolVersion,
-                cancellationToken)
+                cancellationToken,
+                callerPartition)
             .ConfigureAwait(false);
 
         return new CallToolResult

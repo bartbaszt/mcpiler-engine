@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 
 using MCPiler.Engine.Authentication;
 using MCPiler.Engine.Authentication.Caching;
+using MCPiler.Engine.Authentication.OAuth1;
 using MCPiler.Engine.Authentication.Signing;
 using MCPiler.Engine.Execution;
 using MCPiler.Engine.Manifest.Canonical;
@@ -155,6 +156,157 @@ public sealed class AuthenticationRuntimeTests : IDisposable
         Assert.Equal(9, AuthenticationRuntime.RuntimeRevision(profile));
     }
 
+    [Fact]
+    public async Task An_oauth1_hmac_profile_resolves_shared_secret_material_and_reveals_no_plain_credential()
+    {
+        var declared = new[]
+        {
+            OAuth1Declared("consumer-secret", "consumerSecret", "consumer-value"),
+            OAuth1Declared("token", "oauthToken", "token-value"),
+            OAuth1Declared("token-secret", "oauthTokenSecret", "token-secret-value"),
+        };
+
+        var resolved = await _runtime.ResolveAsync(
+            OAuth1Profile("HMAC-SHA1"),
+            declared,
+            CancellationToken.None);
+
+        Assert.Empty(resolved.Credentials);
+        Assert.Null(resolved.Signing);
+        var material = Assert.IsType<OAuth1SigningMaterial.SharedSecretMaterial>(resolved.OAuth1);
+        Assert.Equal("example-client", material.ConsumerKey);
+        Assert.Equal("token-value", material.Token);
+        Assert.Equal("consumer-value", material.ConsumerSecret);
+        Assert.Equal("token-secret-value", material.TokenSecret);
+    }
+
+    [Fact]
+    public async Task An_oauth1_rsa_profile_resolves_private_key_material_without_a_token_secret()
+    {
+        var declared = new[]
+        {
+            OAuth1Declared("private-key", "rsaPrivateKey", SecretCanary),
+            OAuth1Declared("token", "oauthToken", "token-value"),
+        };
+
+        var resolved = await _runtime.ResolveAsync(
+            OAuth1Profile("RSA-SHA1"),
+            declared,
+            CancellationToken.None);
+
+        var material = Assert.IsType<OAuth1SigningMaterial.RsaMaterial>(resolved.OAuth1);
+        Assert.Equal("example-client", material.ConsumerKey);
+        Assert.Equal("token-value", material.Token);
+        Assert.Equal(SecretCanary, material.PrivateKeyPem);
+        Assert.Empty(resolved.Credentials);
+    }
+
+    [Fact]
+    public async Task An_oauth1_profile_without_a_required_slot_is_refused_without_values()
+    {
+        var declared = new[]
+        {
+            OAuth1Declared("consumer-secret", "consumerSecret", SecretCanary),
+            OAuth1Declared("token", "oauthToken", "token-value"),
+        };
+
+        var failure = await Assert.ThrowsAsync<CredentialUnavailableException>(() => _runtime.ResolveAsync(
+            OAuth1Profile("HMAC-SHA1"),
+            declared,
+            CancellationToken.None).AsTask());
+
+        Assert.Contains("oauthTokenSecret", failure.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(SecretCanary, failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task An_oauth1_profile_with_an_unexpected_slot_is_refused()
+    {
+        var declared = new[]
+        {
+            OAuth1Declared("private-key", "rsaPrivateKey", SecretCanary),
+            OAuth1Declared("token", "oauthToken", "token-value"),
+            OAuth1Declared("token-secret", "oauthTokenSecret", "another-secret"),
+        };
+
+        var failure = await Assert.ThrowsAsync<AuthenticationPlanException>(() => _runtime.ResolveAsync(
+            OAuth1Profile("RSA-SHA1"),
+            declared,
+            CancellationToken.None).AsTask());
+
+        Assert.Contains("oauthTokenSecret", failure.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(SecretCanary, failure.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("another-secret", failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task An_oauth1_profile_with_an_unknown_method_is_refused_with_the_vocabulary()
+    {
+        var declared = new[]
+        {
+            OAuth1Declared("consumer-secret", "consumerSecret", SecretCanary),
+        };
+
+        var failure = await Assert.ThrowsAsync<UnsupportedAuthenticationStrategyException>(() => _runtime.ResolveAsync(
+            OAuth1Profile("HMAC-SHA9"),
+            declared,
+            CancellationToken.None).AsTask());
+
+        Assert.Contains("HMAC-SHA256", failure.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(SecretCanary, failure.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task An_oauth1_profile_without_a_consumer_key_is_refused()
+    {
+        var declared = new[]
+        {
+            OAuth1Declared("consumer-secret", "consumerSecret", SecretCanary),
+            OAuth1Declared("token", "oauthToken", "token-value"),
+            OAuth1Declared("token-secret", "oauthTokenSecret", "token-secret-value"),
+        };
+
+        await Assert.ThrowsAsync<AuthenticationPlanException>(() => _runtime.ResolveAsync(
+            OAuth1Profile("HMAC-SHA1", consumerKey: " "),
+            declared,
+            CancellationToken.None).AsTask());
+    }
+
+    [Fact]
+    public async Task An_oauth1_profile_resolves_per_hop_signing_and_no_plain_credential()
+    {
+        var declared = new[]
+        {
+            OAuth1Declared("consumer-secret", "consumerSecret", "consumer-value"),
+            OAuth1Declared("token", "oauthToken", "token-value"),
+            OAuth1Declared("token-secret", "oauthTokenSecret", "token-secret-value"),
+        };
+
+        var resolved = await _runtime.ResolveAsync(
+            OAuth1Profile("HMAC-SHA1"),
+            declared,
+            CancellationToken.None);
+
+        Assert.Empty(resolved.Credentials);
+        Assert.Null(resolved.Signing);
+        Assert.NotNull(resolved.OAuth1Signing);
+        Assert.NotNull(resolved.OAuth1);
+    }
+
+    [Fact]
+    public async Task An_oauth1_profile_with_an_unknown_transport_is_refused_before_any_request()
+    {
+        var transport = new RecordingTransport();
+        using var runtime = new AuthenticationRuntime(transport);
+
+        await Assert.ThrowsAsync<UnsupportedAuthenticationStrategyException>(() => runtime.ResolveAsync(
+            OAuth1Profile("HMAC-SHA1", transport: "cookie"),
+            [],
+            CancellationToken.None).AsTask());
+
+        Assert.Equal(0, transport.Arrivals);
+    }
+
     public void Dispose() => _runtime.Dispose();
 
     private static AuthenticationProfile Profile(
@@ -184,6 +336,25 @@ public sealed class AuthenticationRuntimeTests : IDisposable
         => [new ResolvedCredential(
             new ManifestCredential(id, scheme, slot, CredentialReference.Literal("placeholder")),
             value)];
+
+    private static AuthenticationProfile OAuth1Profile(
+        string method,
+        string consumerKey = "example-client",
+        string transport = "authorization-header")
+        => Profile(
+            AuthenticationKind.OAuth1Authorization,
+            $$"""
+            {
+              "consumerKey": "{{consumerKey}}",
+              "signatureMethod": "{{method}}",
+              "parameterTransport": "{{transport}}"
+            }
+            """);
+
+    private static ResolvedCredential OAuth1Declared(string id, string slot, string value)
+        => new(
+            new ManifestCredential(id, CredentialScheme.OAuth1Authorization, slot, CredentialReference.Literal("placeholder")),
+            value);
 
     private sealed class RecordingTransport : IUpstreamTransport
     {

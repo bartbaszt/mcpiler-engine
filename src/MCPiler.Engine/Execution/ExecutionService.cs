@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -5,13 +6,16 @@ using System.Text.Json.Nodes;
 using MCPiler.Engine.Authentication;
 using MCPiler.Engine.Authentication.Challenge;
 using MCPiler.Engine.Authentication.Exchange;
+using MCPiler.Engine.Authentication.OAuth1;
 using MCPiler.Engine.Execution.RuntimeState;
+using MCPiler.Engine.Execution.ResponseCaching;
 using MCPiler.Engine.Authentication.Signing;
 using MCPiler.Engine.Compound;
 using MCPiler.Engine.Execution.Files;
 using MCPiler.Engine.Execution.Projection;
 using MCPiler.Engine.Files;
 using MCPiler.Engine.Manifest.Model;
+using MCPiler.Engine.Runtime;
 using MCPiler.Engine.Transform;
 
 namespace MCPiler.Engine.Execution;
@@ -61,6 +65,22 @@ public sealed record ExecutionRequest(ManifestDocument Manifest, string Slug, Js
     /// and receive an <c>unavailable</c> continuation instead of a guessed one.
     /// </remarks>
     public IContinuationResolver? Continuations { get; init; }
+    /// The authorization scope the current request was admitted under, when the host proved one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A protected HTTP request supplies the digest of the presented token, the canonical resource
+    /// it was admitted for and the scopes it carried; an unauthenticated mount supplies
+    /// <see cref="CallerPartition.Public"/>; a stdio caller or a library caller that proves nothing
+    /// supplies nothing at all.
+    /// </para>
+    /// <para>
+    /// Absence is meaningful. It means no component established who this caller is, and a
+    /// response-cache decision must then bypass rather than choose a partition, because any
+    /// partition it chose would conflate callers the runtime cannot tell apart.
+    /// </para>
+    /// </remarks>
+    public CallerPartition? CallerPartition { get; init; }
 }
 
 /// <summary>
@@ -99,6 +119,18 @@ public sealed class ExecutionService
     private readonly IManifestSecretResolver _secrets;
     private readonly FileHandleStore? _files;
     private readonly AuthenticationRuntime? _authentication;
+    private readonly ResponseCache? _responseCache;
+
+    /// <summary>
+    /// The per-process key every cache-scoping identity is derived under.
+    /// </summary>
+    /// <remarks>
+    /// Random and never persisted, so an opaque identity that escapes into a diagnostic or a
+    /// telemetry event cannot be recomputed, correlated or replayed outside this process. One key
+    /// per service is also why two processes serving byte-identical manifests never produce
+    /// interchangeable identities.
+    /// </remarks>
+    private readonly byte[] _identityKey;
 
     /// <summary>Creates a service over the supplied ports.</summary>
     /// <param name="transport">How an exchange reaches an upstream.</param>
@@ -116,6 +148,18 @@ public sealed class ExecutionService
         IManifestSecretResolver secrets,
         FileHandleStore? files = null,
         AuthenticationRuntime? authentication = null)
+        : this(transport, secrets, files, authentication, responseCache: null, identityKey: null)
+    {
+    }
+
+    /// <summary>Creates a mount-scoped service sharing its graph identity key with its cache.</summary>
+    internal ExecutionService(
+        IUpstreamTransport transport,
+        IManifestSecretResolver secrets,
+        FileHandleStore? files,
+        AuthenticationRuntime? authentication,
+        ResponseCache? responseCache,
+        byte[]? identityKey)
     {
         ArgumentNullException.ThrowIfNull(transport);
         ArgumentNullException.ThrowIfNull(secrets);
@@ -124,7 +168,147 @@ public sealed class ExecutionService
         _secrets = secrets;
         _files = files;
         _authentication = authentication;
+        _responseCache = responseCache;
+        _identityKey = identityKey ?? CacheIdentity.NewKey();
     }
+
+    /// <summary>The optional mount cache; null means this library execution is uncached.</summary>
+    internal ResponseCache? ResponseCache => _responseCache;
+
+    /// <summary>
+    /// Mutable accumulator for one invocation's sanitized cache decision.
+    /// </summary>
+    /// <remarks>
+    /// The defaults describe the two cases a cache decision must keep apart: no policy at all
+    /// (a bypass because nothing opted in) and a policy whose lookup could not be attempted. The
+    /// invocation overwrites the reason as it learns more, and the accumulated value is turned
+    /// into one immutable decision at the end so the buffer never observes a partial record.
+    /// </remarks>
+    private sealed class CacheObservation
+    {
+        private CacheObservation(string operationSlug)
+        {
+            OperationSlug = operationSlug;
+        }
+
+        internal string OperationSlug { get; }
+
+        internal ResponseCacheDecisionKind Kind { get; set; } = ResponseCacheDecisionKind.Bypass;
+
+        internal ResponseCacheExecution Execution { get; set; } = ResponseCacheExecution.Upstream;
+
+        internal string Reason { get; set; } = ResponseCacheDecisionReason.Unavailable;
+
+        internal string? Fingerprint { get; set; }
+
+        internal int? TtlSeconds { get; set; }
+
+        internal int? AgeSeconds { get; set; }
+
+        internal int? RemainingSeconds { get; set; }
+
+        internal ResponseCacheFlightRole Role { get; set; } = ResponseCacheFlightRole.None;
+
+        internal long? EntryBytes { get; set; }
+
+        internal bool Stored { get; set; }
+
+        internal static CacheObservation Start(string operationSlug, ResponseCachePolicySettings? policy)
+            => new(operationSlug)
+            {
+                Reason = policy is null
+                    ? ResponseCacheDecisionReason.PolicyAbsent
+                    : ResponseCacheDecisionReason.Unavailable,
+            };
+
+        internal ResponseCacheDecision Finish(DateTimeOffset observedAtUtc)
+            => new(
+                observedAtUtc,
+                OperationSlug,
+                Kind,
+                Execution,
+                Reason,
+                Fingerprint,
+                TtlSeconds,
+                AgeSeconds,
+                RemainingSeconds,
+                Role,
+                EntryBytes,
+                Stored);
+    }
+
+    private static ResponseCacheDecisionKind MapKind(ResponseCacheLookupKind kind)
+        => kind switch
+        {
+            ResponseCacheLookupKind.Hit => ResponseCacheDecisionKind.Hit,
+            ResponseCacheLookupKind.Miss => ResponseCacheDecisionKind.Miss,
+            _ => ResponseCacheDecisionKind.Bypass,
+        };
+
+    private static string MapBypass(ResponseCacheBypassReason reason)
+        => reason switch
+        {
+            ResponseCacheBypassReason.Disabled => ResponseCacheDecisionReason.Disabled,
+            ResponseCacheBypassReason.FlightCapacity => ResponseCacheDecisionReason.FlightCapacity,
+            ResponseCacheBypassReason.Disposed => ResponseCacheDecisionReason.Disposed,
+            ResponseCacheBypassReason.UnknownDimension => ResponseCacheDecisionReason.UnknownDimension,
+            _ => ResponseCacheDecisionReason.Unavailable,
+        };
+
+    private static string MapRequestBypass(ResponseCacheRequestBypassReason reason)
+        => reason switch
+        {
+            ResponseCacheRequestBypassReason.UnsupportedMethod => ResponseCacheDecisionReason.UnsupportedMethod,
+            ResponseCacheRequestBypassReason.RangeOrConditional => ResponseCacheDecisionReason.RangeOrConditional,
+            ResponseCacheRequestBypassReason.RequestDirective => ResponseCacheDecisionReason.RequestDirective,
+            ResponseCacheRequestBypassReason.MalformedHeader => ResponseCacheDecisionReason.MalformedRequestHeader,
+            _ => ResponseCacheDecisionReason.Unavailable,
+        };
+
+    private static string MapAdmission(ResponseCacheAdmissionReason reason)
+        => reason switch
+        {
+            ResponseCacheAdmissionReason.InvalidPolicy => ResponseCacheDecisionReason.InvalidPolicy,
+            ResponseCacheAdmissionReason.UnsupportedMethod => ResponseCacheDecisionReason.UnsupportedMethod,
+            ResponseCacheAdmissionReason.UnsuccessfulStatus => ResponseCacheDecisionReason.UnsuccessfulStatus,
+            ResponseCacheAdmissionReason.PartialResponse => ResponseCacheDecisionReason.PartialResponse,
+            ResponseCacheAdmissionReason.Redirected => ResponseCacheDecisionReason.Redirected,
+            ResponseCacheAdmissionReason.FileResponse => ResponseCacheDecisionReason.FileResponse,
+            ResponseCacheAdmissionReason.UnsupportedMediaType => ResponseCacheDecisionReason.UnsupportedMediaType,
+            ResponseCacheAdmissionReason.ConditionalRequest => ResponseCacheDecisionReason.ConditionalRequest,
+            ResponseCacheAdmissionReason.RequestDirective => ResponseCacheDecisionReason.RequestDirective,
+            ResponseCacheAdmissionReason.MalformedRequestHeader => ResponseCacheDecisionReason.MalformedRequestHeader,
+            ResponseCacheAdmissionReason.AuthenticationMetadata => ResponseCacheDecisionReason.AuthenticationMetadata,
+            ResponseCacheAdmissionReason.ResponseDirective => ResponseCacheDecisionReason.ResponseDirective,
+            ResponseCacheAdmissionReason.UnsupportedVary => ResponseCacheDecisionReason.UnsupportedVary,
+            ResponseCacheAdmissionReason.PublicPrivateResponse => ResponseCacheDecisionReason.PublicPrivateResponse,
+            ResponseCacheAdmissionReason.MalformedFreshness => ResponseCacheDecisionReason.MalformedFreshness,
+            ResponseCacheAdmissionReason.FreshnessExpired => ResponseCacheDecisionReason.FreshnessExpired,
+            ResponseCacheAdmissionReason.AuthorityExpired => ResponseCacheDecisionReason.AuthorityExpired,
+            _ => ResponseCacheDecisionReason.AdmissionRefused,
+        };
+
+    private static int SecondsBetween(long from, long to, ResponseCache cache)
+    {
+        if (to <= from || cache.TimestampFrequency <= 0)
+        {
+            return 0;
+        }
+
+        return checked((int)((to - from) / cache.TimestampFrequency));
+    }
+
+    private static string ReasonForRejectedShared(
+        ResponseCacheEnvelope shared,
+        ExecutionRequest request,
+        ExecutionLimits limits,
+        IUpstreamTransport transport)
+        => !ResponseIsWithinInvocationLimit(shared, request, limits)
+            ? ResponseCacheDecisionReason.ResponseSizeExceeded
+            : transport is IResponseCacheTransportState { HasUnrepresentedRequestState: false }
+                ? ResponseCacheDecisionReason.Unavailable
+                : ResponseCacheDecisionReason.TransportState;
+
 
     /// <summary>Executes <paramref name="request"/> and returns what happened.</summary>
     public async Task<EngineExecutionResult> ExecuteAsync(
@@ -245,6 +429,53 @@ public sealed class ExecutionService
             ? profile.CredentialRef
             : ManifestBindingDispatcher.CredentialRefsOf(entry.Binding);
 
+        // OAuth1 request-shape refusals must happen before resolving any credential references.
+        // Compilation is independent of signer material, so retain this ordinary request and
+        // reuse it below after the method/transport and parameter locations are validated.
+        CompiledRequest? precompiledOAuth1 = null;
+        UpstreamRequest? prevalidatedOAuth1 = null;
+        if (profile is { Kind: AuthenticationKind.OAuth1Authorization })
+        {
+            try
+            {
+                ResolvedOAuth1Signing.ValidateConfiguration(profile);
+                ResolvedOAuth1Signing.ValidateDestinationScope(profile, baseUri);
+                precompiledOAuth1 = RequestCompiler.Compile(
+                    operation,
+                    baseUri,
+                    arguments,
+                    request.Files);
+                prevalidatedOAuth1 = CredentialApplier.Apply(precompiledOAuth1, []);
+                await ResolvedOAuth1Signing.ValidateRequestShapeAsync(
+                    profile,
+                    prevalidatedOAuth1,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (CredentialUnavailableException ex)
+            {
+                return Failed(ExecutionFailureKind.Authentication, ex.Message);
+            }
+            catch (UnsupportedAuthenticationStrategyException ex)
+            {
+                return Failed(ExecutionFailureKind.Authentication, ex.Message);
+            }
+            catch (AuthenticationPlanException ex)
+            {
+                return Failed(ExecutionFailureKind.Authentication, ex.Message);
+            }
+            catch (FileRuntimeException ex)
+            {
+                return Failed(ExecutionFailureKind.FileRuntime, ex.Message);
+            }
+            catch (Exception ex) when (ex is ArgumentValidationException
+                or InvalidBaseUrlException
+                or UnsupportedSerializationException
+                or UnsupportedBodyMediaTypeException)
+            {
+                return Failed(ExecutionFailureKind.Compilation, ex.Message);
+            }
+        }
+
         IReadOnlyList<ResolvedCredential> credentials;
         try
         {
@@ -258,8 +489,9 @@ public sealed class ExecutionService
             return Failed(ExecutionFailureKind.Authentication, ex.Message);
         }
 
-        // Resolution happens before compilation so a token endpoint failure is reported without
-        // ever building the downstream request.
+        // Other dynamic profiles resolve before compilation so a token endpoint failure is
+        // reported without building the downstream request. OAuth1 is the deliberate exception:
+        // its compiled unsigned request was shape-checked above before its credentials resolve.
         ResolvedAuthentication? authentication = null;
         if (profile is not null)
         {
@@ -289,7 +521,7 @@ public sealed class ExecutionService
         UpstreamRequest upstream;
         try
         {
-            compiled = RequestCompiler.Compile(
+            compiled = precompiledOAuth1 ?? RequestCompiler.Compile(
                 operation,
                 baseUri,
                 arguments,
@@ -300,7 +532,20 @@ public sealed class ExecutionService
                 compiled = Rebind(compiled, destination);
             }
 
-            upstream = CredentialApplier.Apply(compiled, authentication?.Credentials ?? credentials);
+            // The initial binding was checked before authentication resolution, but a dynamic
+            // strategy may select a different authority. A cache hit skips UpstreamSender's
+            // final perimeter check, so the resolved destination must be refused before either
+            // credential application or cache lookup when it is outside the governing policy.
+            if (!origins.IsAllowed(compiled.Uri))
+            {
+                return Failed(
+                    ExecutionFailureKind.OriginPolicy,
+                    $"The resolved destination '{compiled.Uri}' is not inside the governing allowed-origin set.");
+            }
+
+            upstream = prevalidatedOAuth1 ?? CredentialApplier.Apply(
+                compiled,
+                authentication?.Credentials ?? credentials);
         }
         catch (CredentialUnavailableException ex)
         {
@@ -314,45 +559,301 @@ public sealed class ExecutionService
             return Failed(ExecutionFailureKind.Compilation, ex.Message);
         }
 
-        EngineExecutionResult outcome = await SendAsync(
-                request, entry, operation, compiled, upstream, origins, limits, profile, authentication, cancellationToken)
-            .ConfigureAwait(false);
+        ResponseCache? responseCache = _responseCache;
+        ResponseCachePolicySettings? cachePolicy = entry.ResponseCache;
+        ResponseCacheIdentity? lookupIdentity = null;
+        ResponseCacheKey? cacheKey = null;
+        ResponseCacheEnvelope? cachedEnvelope = null;
+        ResponseFlightLease? producerFlight = null;
+        ExecutionAuthorityIdentity? requestedAuthority = null;
 
-        // After the exchange, and only for a response that arrived whole and inside the
-        // ceiling. A failed exchange has no body to map, and a body that breached the response
-        // limit was refused before it was ever materialized — transforming it here would hand
-        // back the bytes the ceiling exists to stop.
-        if (!outcome.Succeeded)
+        // Sanitized observation state, accumulated as the invocation decides and emitted once per
+        // invocation. Nothing here is a preimage, a body or a header value: the fingerprint is a
+        // derivative of the fixed key digest.
+        CacheObservation observation = CacheObservation.Start(entry.Slug, cachePolicy);
+
+        ResponseCache? cache = responseCache;
+        ResponseCachePolicySettings? settings = cachePolicy;
+        bool caching = cache is not null
+            && settings is { TtlSeconds: >= ResponseCacheOptions.MinimumTtlSeconds };
+
+        if (caching && _transport is not IResponseCacheTransportState { HasUnrepresentedRequestState: false })
         {
-            return outcome;
+            observation.Reason = ResponseCacheDecisionReason.TransportState;
+            caching = false;
         }
 
-        // Captured before the output transformation runs. A declared body extraction reads what
-        // the upstream sent, and a presentation transform that removes a field from the agent
-        // body must not remove the continuation the upstream put there.
-        byte[]? rawBody = outcome.ResponseBody;
-
-        if (!TransformStage.TryOutput(manifest, entry, outcome, out byte[]? body, out transformFailure))
+        if (caching)
         {
-            return outcome with
+            ResponseCache activeCache = cache!;
+            ResponseCachePolicySettings activePolicy = settings!;
+
+            requestedAuthority = DeriveAuthority(profile, authentication, credentials, compiled);
+
+            if (requestedAuthority is not null)
             {
-                Failure = ExecutionFailureKind.Transformation,
-                FailureReason = transformFailure,
-            };
+                ResponseCacheRequestHeaderSnapshot requestHeaders = ResponseCacheRequestHeaders.Create(upstream);
+                ResponseCacheRequestDecision requestDecision = ResponseCacheAdmissionParser.CheckRequest(
+                    upstream.Method,
+                    requestHeaders.Headers);
+
+                if (requestDecision.CanLookup)
+                {
+                    lookupIdentity = CreateResponseCacheIdentity(
+                        entry,
+                        operation,
+                        upstream,
+                        requestHeaders,
+                        requestedAuthority,
+                        request.CallerPartition,
+                        activePolicy);
+
+                    ResponseCacheLookup lookup = activeCache.Acquire(lookupIdentity, activePolicy.TtlSeconds);
+                    cacheKey = lookup.Key;
+                    observation.Kind = MapKind(lookup.Kind);
+                    observation.Fingerprint = lookup.Key?.Fingerprint;
+
+                    if (lookup.Kind == ResponseCacheLookupKind.Hit
+                        && lookup.Envelope is { } hit
+                        && ResponseIsWithinInvocationLimit(hit, request, limits)
+                        && _transport is IResponseCacheTransportState { HasUnrepresentedRequestState: false })
+                    {
+                        cachedEnvelope = hit;
+                        observation.Execution = ResponseCacheExecution.Cached;
+                        observation.Reason = ResponseCacheDecisionReason.Hit;
+                        observation.TtlSeconds = hit.EffectiveTtlSeconds;
+                        observation.AgeSeconds = SecondsBetween(
+                            hit.StoredAtTimestamp,
+                            activeCache.GetTimestamp(),
+                            activeCache);
+                        observation.RemainingSeconds = SecondsBetween(
+                            activeCache.GetTimestamp(),
+                            hit.ExpiresAtTimestamp,
+                            activeCache);
+                    }
+                    else if (lookup.Kind == ResponseCacheLookupKind.Bypass)
+                    {
+                        observation.Reason = MapBypass(lookup.BypassReason);
+                    }
+                    else if (lookup.Flight is { IsProducer: true } producer)
+                    {
+                        producerFlight = producer;
+                        observation.Reason = ResponseCacheDecisionReason.LiveSend;
+                        observation.Role = ResponseCacheFlightRole.Producer;
+                    }
+                    else if (lookup.Flight is { IsProducer: false } waiter)
+                    {
+                        observation.Role = ResponseCacheFlightRole.Joined;
+
+                        using (waiter)
+                        {
+                            ResponseCacheEnvelope? shared = await waiter.WaitAsync(cancellationToken)
+                                .ConfigureAwait(false);
+
+                            if (shared is not null
+                                && ResponseIsWithinInvocationLimit(shared, request, limits)
+                                && _transport is IResponseCacheTransportState { HasUnrepresentedRequestState: false })
+                            {
+                                cachedEnvelope = shared;
+                                observation.Execution = ResponseCacheExecution.Cached;
+                                observation.Reason = ResponseCacheDecisionReason.Joined;
+                                observation.TtlSeconds = shared.EffectiveTtlSeconds;
+                                observation.AgeSeconds = SecondsBetween(
+                                    shared.StoredAtTimestamp,
+                                    activeCache.GetTimestamp(),
+                                    activeCache);
+                                observation.RemainingSeconds = SecondsBetween(
+                                    activeCache.GetTimestamp(),
+                                    shared.ExpiresAtTimestamp,
+                                    activeCache);
+                            }
+                            else
+                            {
+                                observation.Reason = shared is null
+                                    ? ResponseCacheDecisionReason.LiveSend
+                                    : ReasonForRejectedShared(shared, request, limits, _transport);
+                            }
+                        }
+                    }
+                    else if (lookup.Kind == ResponseCacheLookupKind.Hit)
+                    {
+                        // A hit whose envelope was unusable. The invocation falls through to a
+                        // live send, so the reason names the ceiling that rejected it.
+                        observation.Reason = lookup.Envelope is { } rejected
+                                && !ResponseIsWithinInvocationLimit(rejected, request, limits)
+                            ? ResponseCacheDecisionReason.ResponseSizeExceeded
+                            : ResponseCacheDecisionReason.TransportState;
+                    }
+                }
+                else
+                {
+                    observation.Reason = MapRequestBypass(requestDecision.Reason);
+                }
+            }
+            else
+            {
+                observation.Reason = ResponseCacheDecisionReason.UnknownDimension;
+            }
         }
 
-        EngineExecutionResult shaped = ReferenceEquals(body, outcome.ResponseBody)
-            ? outcome
-            : outcome with { ResponseBody = body };
+        try
+        {
+            // Lookup authority is known before cache lookup. Re-derive after the exchange as
+            // response-driven negotiation can replace it; a challenge replay never admits a
+            // candidate under the pre-challenge key.
+            var used = new UsedAuthentication
+            {
+                Value = authentication,
+                Compiled = compiled,
+                Request = upstream,
+            };
 
-        // A stored binary response is never projected: its bytes were deliberately not
-        // materialized, and an envelope around a file handle would advertise structured content
-        // the caller cannot receive. The projection's own contract is a JSON envelope over a
-        // materialized body.
-        return entry.OutputProjection is { } projection && shaped.ResponseFile is null
-            ? Project(projection, shaped, arguments, rawBody, credentials, request)
-            : shaped;
+            EngineExecutionResult outcome = cachedEnvelope is not null
+                ? FromCache(cachedEnvelope, compiled, requestedAuthority!, request.CallerPartition)
+                : await SendAsync(
+                        request,
+                        entry,
+                        operation,
+                        compiled,
+                        upstream,
+                        origins,
+                        limits,
+                        profile,
+                        authentication,
+                        used,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+            ExecutionAuthorityIdentity? authority = cachedEnvelope is not null
+                ? requestedAuthority
+                : DeriveAuthority(profile, used.Value, credentials, used.Compiled ?? outcome.Request ?? compiled);
+
+            // The identity travels with every outcome the exchange reached, including a failed
+            // one. These fingerprints are opaque display aids, never cache preimages.
+            outcome = WithIdentityMetadata(outcome, request.CallerPartition, authority);
+
+            // The same post-response processing runs on hits and live responses. Candidate
+            // retention occurs only after this succeeds, and the raw result remains unchanged
+            // until the transformed copy is assigned below.
+            if (!outcome.Succeeded)
+            {
+                observation.Reason = ResponseCacheDecisionReason.Failed;
+                return outcome;
+            }
+
+            byte[]? projectionRawBody = outcome.ResponseBody;
+            if (!TransformStage.TryOutput(manifest, entry, outcome, out byte[]? body, out transformFailure))
+            {
+                observation.Reason = ResponseCacheDecisionReason.Failed;
+                return outcome with
+                {
+                    Failure = ExecutionFailureKind.Transformation,
+                    FailureReason = transformFailure,
+                };
+            }
+
+            EngineExecutionResult transformed = ReferenceEquals(body, outcome.ResponseBody)
+                ? outcome
+                : outcome with { ResponseBody = body };
+
+            ResponseCacheEnvelope? admitted = null;
+            if (cachedEnvelope is null
+                && cache is not null
+                && cachePolicy is { TtlSeconds: >= ResponseCacheOptions.MinimumTtlSeconds } admissionPolicy
+                && cacheKey is { } expectedKey
+                && lookupIdentity is not null
+                && requestedAuthority is not null
+                && authority is not null
+                && string.Equals(requestedAuthority.OpaqueValue, authority.OpaqueValue, StringComparison.Ordinal)
+                && !used.WasReplayed
+                && !outcome.ResponseWasRedirected
+                && outcome.StatusCode is { } statusCode
+                && outcome.ResponseHeaders is { } responseHeaders
+                && outcome.ResponseBody is { } rawBody
+                && _transport is IResponseCacheTransportState { HasUnrepresentedRequestState: false })
+            {
+                ResponseCacheRequestHeaderSnapshot actualRequestHeaders = ResponseCacheRequestHeaders.Create(
+                    used.Request ?? upstream);
+                ResponseCacheIdentity actualIdentity = CreateResponseCacheIdentity(
+                    entry,
+                    operation,
+                    used.Request ?? upstream,
+                    actualRequestHeaders,
+                    authority,
+                    request.CallerPartition,
+                    admissionPolicy);
+
+                if (cache.HasSameKey(expectedKey, actualIdentity, admissionPolicy.TtlSeconds))
+                {
+                    ResponseCacheAdmissionDecision admission = ResponseCacheAdmissionParser.Evaluate(
+                        new ResponseCacheAdmissionInput(
+                            Method: (used.Request ?? upstream).Method,
+                            StatusCode: statusCode,
+                            MediaType: outcome.ResponseMediaType,
+                            BodyLength: rawBody.LongLength,
+                            RequestHeaders: actualRequestHeaders.Headers,
+                            ResponseHeaders: responseHeaders,
+                            WasRedirected: outcome.ResponseWasRedirected,
+                            HasFile: outcome.ResponseFile is not null || outcome.ResponseFileHandle is not null,
+                            CallerIsSpecific: request.CallerPartition?.IsCallerSpecific == true,
+                            AuthorityExpiresAtUtc: authority.ExpiresAtUtc,
+                            AuthoredTtlSeconds: admissionPolicy.TtlSeconds,
+                            HostMaxTtlSeconds: cache.Options.MaxTtlSeconds,
+                            NowUtc: cache.GetUtcNow()));
+
+                    if (admission.CanStore
+                        && rawBody.LongLength <= cache.Options.MaxBodyBytes
+                        && ResponseCacheEnvelope.TryCapture(
+                            statusCode,
+                            outcome.ResponseMediaType,
+                            responseHeaders,
+                            rawBody,
+                            ResponseCacheOptions.HardMaxRetainedHeaderBytesPerEntry,
+                            out ResponseCacheEnvelope? candidate))
+                    {
+                        admitted = cache.TryStore(expectedKey, candidate, admission.EffectiveTtlSeconds);
+                    }
+
+                    if (admitted is { } stored)
+                    {
+                        observation.Stored = true;
+                        observation.TtlSeconds = stored.EffectiveTtlSeconds;
+                        observation.EntryBytes = stored.AccountedBytes;
+                        observation.Reason = ResponseCacheDecisionReason.Stored;
+                    }
+                    else
+                    {
+                        observation.Reason = MapAdmission(admission.Reason);
+                    }
+                }
+                else
+                {
+                    observation.Reason = ResponseCacheDecisionReason.NotStored;
+                }
+            }
+
+            producerFlight?.Publish(admitted);
+            // A stored binary response is never projected: its bytes were deliberately not
+            // materialized, and an envelope around a file handle would advertise structured content
+            // the caller cannot receive. Apply projection after cache admission so cache entries
+            // remain raw upstream responses and both hits and live responses share one result path.
+            return entry.OutputProjection is { } projection && transformed.ResponseFile is null
+                ? Project(projection, transformed, arguments, projectionRawBody, credentials, request)
+                : transformed;
+        }
+        finally
+        {
+            if (responseCache is not null)
+            {
+                responseCache.RecordObservation(observation.Finish(responseCache.GetUtcNow()));
+            }
+
+            // Publish wakes joined callers with null after an error/ineligible response if the
+            // live path exited before its successful admission point.
+            producerFlight?.Dispose();
+        }
     }
+
 
     /// <summary>
     /// Builds the agent-facing projection envelope over one completed response.
@@ -375,7 +876,7 @@ public sealed class ExecutionService
             projection,
             shaped.StatusCode ?? 0,
             shaped.ResponseHeaders ?? new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase),
-            shaped.ResponseEffectiveUri,
+            shaped.ResponseEffectiveUri ?? shaped.Request?.Uri,
             Parse(shaped.ResponseBody),
             Parse(rawBody),
             currentArguments,
@@ -424,6 +925,7 @@ public sealed class ExecutionService
         ExecutionLimits limits,
         AuthenticationProfile? profile,
         ResolvedAuthentication? authentication,
+        UsedAuthentication used,
         CancellationToken cancellationToken)
     {
         using var exchange = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -436,9 +938,16 @@ public sealed class ExecutionService
         // One attempt per exchange, preserved across redirect hops. A provider signature carries
         // its own timestamp and nonce, and re-deriving them per hop would make two hops of one
         // chain look like two independent attempts to a nonce-rejecting upstream.
+        // OAuth 1.0a is the deliberate exception: every hop is a new authenticated request, so
+        // its closure mints fresh hop values instead of reusing an exchange-wide attempt.
         var signingAttempt = authentication?.Signing?.CreateAttempt();
 
-        var policy = SendPolicy(origins, limits, authentication?.Signing, signingAttempt);
+        IReadOnlyCollection<string> sensitiveQueryParameters = authentication?.OAuth1Signing is { } oauth1
+            ? ResolvedOAuth1Signing.SensitiveQueryParameters
+            : authentication?.Signing?.SensitiveQueryParameters ?? upstream.SensitiveQueryParameters;
+        upstream = upstream with { SensitiveQueryParameters = sensitiveQueryParameters };
+
+        var policy = SendPolicy(origins, limits, authentication, signingAttempt);
         var effective = compiled;
 
         UpstreamResponse response;
@@ -496,12 +1005,16 @@ public sealed class ExecutionService
                     }
 
                     upstream = CredentialApplier.Apply(effective, replayed.Credentials);
+                    used.Value = replayed;
+                    used.Compiled = effective;
+                    used.Request = upstream;
+                    used.WasReplayed = true;
 
                     // A replay is a new exchange. The provider sees a fresh nonce and timestamp
                     // because the previous attempt was already presented with the challenged
                     // request the upstream refused.
                     signingAttempt = replayed.Signing?.CreateAttempt();
-                    policy = SendPolicy(origins, limits, replayed.Signing, signingAttempt);
+                    policy = SendPolicy(origins, limits, replayed, signingAttempt);
 
                     response = await _transport.SendAsync(upstream, policy, exchange.Token).ConfigureAwait(false);
 
@@ -559,6 +1072,7 @@ public sealed class ExecutionService
                 ResponseHeaders = response.Headers,
                 ResponseMediaType = response.MediaType,
                 ResponseEffectiveUri = response.EffectiveUri,
+                ResponseWasRedirected = response.WasRedirected,
             };
 
             try
@@ -598,31 +1112,125 @@ public sealed class ExecutionService
         }
     }
 
+    private static ResponseCacheIdentity CreateResponseCacheIdentity(
+        AgentOperationEntry entry,
+        ManifestOperation operation,
+        UpstreamRequest upstream,
+        ResponseCacheRequestHeaderSnapshot requestHeaders,
+        ExecutionAuthorityIdentity authority,
+        CallerPartition? callerPartition,
+        ResponseCachePolicySettings policy)
+        => new()
+        {
+            // The cache itself is owned by one immutable mounted generation and its activation
+            // token is part of every key. Managed generation ids are included by ResponseCache.
+            ManifestGeneration = null,
+            OperationSlug = entry.Slug,
+            ResolvedBindingSemantics = entry.Binding.BindingId ?? entry.Slug,
+            EffectiveHttpOperationKey = operation.Key,
+            Method = upstream.Method,
+            EffectiveUri = (upstream.CacheIdentityUri ?? upstream.Uri).AbsoluteUri,
+            Headers = requestHeaders.Headers,
+            SensitiveHeaders = requestHeaders.SensitiveHeaders,
+            AuthorityRepresentedSensitiveHeaders = requestHeaders.AuthorityRepresentedSensitiveHeaders,
+            Body = upstream.Body,
+            HasStreamingBody = upstream.BodySource is not null,
+            UpstreamAuthority = authority.OpaqueValue,
+            CallerPartition = callerPartition?.OpaqueValue,
+            PolicyFingerprint = string.Create(
+                CultureInfo.InvariantCulture,
+                $"response-cache-policy-1;ttl={policy.TtlSeconds}"),
+        };
+
+    private static bool ResponseIsWithinInvocationLimit(
+        ResponseCacheEnvelope envelope,
+        ExecutionRequest request,
+        ExecutionLimits limits)
+    {
+        long maximumBytes = request.ResponseSizeLimitBytes is { } requested
+            ? Math.Min(limits.UpstreamResponseSizeLimitBytes, requested)
+            : limits.UpstreamResponseSizeLimitBytes;
+
+        return envelope.Body.Length <= maximumBytes;
+    }
+
+    private static EngineExecutionResult FromCache(
+        ResponseCacheEnvelope envelope,
+        CompiledRequest compiled,
+        ExecutionAuthorityIdentity authority,
+        CallerPartition? callerPartition)
+    {
+        Dictionary<string, string[]> headers = new(StringComparer.OrdinalIgnoreCase);
+        foreach ((string name, System.Collections.Immutable.ImmutableArray<string> values) in envelope.Headers)
+        {
+            headers[name] = values.ToArray();
+        }
+
+        return new EngineExecutionResult
+        {
+            Request = compiled,
+            StatusCode = envelope.StatusCode,
+            ResponseHeaders = headers,
+            ResponseMediaType = envelope.MediaType,
+            ResponseBody = envelope.Body.ToArray(),
+            CallerPartitionFingerprint = callerPartition is { } partition
+                ? CacheIdentity.Fingerprint(partition.OpaqueValue)
+                : null,
+            AuthorityFingerprint = CacheIdentity.Fingerprint(authority.OpaqueValue),
+            AuthorityExpiresAtUtc = authority.ExpiresAtUtc,
+        };
+    }
+
+    private static EngineExecutionResult WithIdentityMetadata(
+        EngineExecutionResult outcome,
+        CallerPartition? callerPartition,
+        ExecutionAuthorityIdentity? authority)
+        => outcome with
+        {
+            CallerPartitionFingerprint = callerPartition is { } partition
+                ? CacheIdentity.Fingerprint(partition.OpaqueValue)
+                : null,
+            AuthorityFingerprint = authority is null
+                ? null
+                : CacheIdentity.Fingerprint(authority.OpaqueValue),
+            AuthorityExpiresAtUtc = authority?.ExpiresAtUtc,
+        };
+
     /// <summary>
     /// The send policy, carrying the per-hop signing closure when the profile signs.
     /// </summary>
     /// <remarks>
     /// The closure captures one attempt for the whole chain. The transport re-applies it per hop
     /// because a redirect target is a different request that no signature has covered yet, while
-    /// a single timestamp and nonce keep the chain legible as one attempt.
+    /// a single timestamp and nonce keep the chain legible as one attempt. OAuth 1.0a signs
+    /// through its own closure instead: each hop mints its own nonce and timestamp over the
+    /// request that hop actually sends. The two closures are mutually exclusive by profile kind.
     /// </remarks>
     private static UpstreamSendPolicy SendPolicy(
         OriginAllowList origins,
         ExecutionLimits limits,
-        ResolvedRequestSigning? signing,
+        ResolvedAuthentication? authentication,
         RequestSigningAttempt? attempt)
     {
         var policy = new UpstreamSendPolicy(origins, OutboundLimits.From(limits));
 
-        if (signing is null || attempt is null)
+        if (authentication?.Signing is { } signing && attempt is not null)
         {
-            return policy;
+            return policy with
+            {
+                SignRequest = (request, _, token) => signing.SignAsync(request, attempt, token),
+            };
         }
 
-        return policy with
+        if (authentication?.OAuth1Signing is { } oauth1)
         {
-            SignRequest = (request, _, token) => signing.SignAsync(request, attempt, token),
-        };
+            return policy with
+            {
+                SignRequest = oauth1.SignAsync,
+            };
+        }
+
+        return policy;
     }
 
     /// <summary>Rebinds a compiled request onto a strategy-selected destination authority.</summary>
@@ -635,6 +1243,150 @@ public sealed class ExecutionService
             Uri = uri,
             ExactUrl = uri.ToString(),
         };
+    }
+
+    /// <summary>
+    /// The authentication an exchange actually used, which negotiation can replace mid-flight.
+    /// </summary>
+    /// <remarks>
+    /// A challenge replay re-resolves the profile and can rebind the destination, so the
+    /// authentication handed to the first send is no longer what the returned response belongs
+    /// to. The reference is carried through the exchange and read once it completes, which keeps
+    /// the authority identity describing the request that produced the response rather than the
+    /// one that was refused.
+    /// </remarks>
+    private sealed class UsedAuthentication
+    {
+        internal ResolvedAuthentication? Value { get; set; }
+
+        internal CompiledRequest? Compiled { get; set; }
+
+        internal UpstreamRequest? Request { get; set; }
+
+        internal bool WasReplayed { get; set; }
+    }
+
+    /// <summary>
+    /// The upstream authority this execution runs under, or null when it cannot be proven.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Derived after every component that decides authority has resolved: the profile's declared
+    /// material, the dynamic strategy's acquired session or destination, and the final compiled
+    /// destination. The acquired token itself is deliberately not digested. An OAuth access token
+    /// is derived from the declared material under the profile's authority epoch, and digesting
+    /// the token would make a refresh produce a new identity for the same authority — a rotation a
+    /// caller cannot observe, turning every token renewal into a cache miss.
+    /// </para>
+    /// <para>
+    /// A signing profile returns null. Its per-attempt nonce and timestamp are part of the wire
+    /// request and are not representable in any stable identity, so the honest answer is that the
+    /// authority is unprovable and caching must bypass.
+    /// </para>
+    /// <para>
+    /// A request with no profile is still an authority, and a distinct one: it runs under exactly
+    /// the declared credentials the binding resolved, and two requests with different such
+    /// material must not share a response even though neither names a profile.
+    /// </para>
+    /// </remarks>
+    private ExecutionAuthorityIdentity? DeriveAuthority(
+        AuthenticationProfile? profile,
+        ResolvedAuthentication? authentication,
+        IReadOnlyList<ResolvedCredential> declared,
+        CompiledRequest compiled)
+    {
+        // Signing material never reaches a stable value: the signature covers a fresh nonce and
+        // timestamp per attempt, so an identity derived now would not describe the request that
+        // is actually sent.
+        if (authentication?.Signing is not null || profile?.Kind == AuthenticationKind.RequestSigning)
+        {
+            return null;
+        }
+
+        List<string?> parts =
+        [
+            // A version tag, so a future change to what contributes to authority cannot produce
+            // the same digest for a different meaning.
+            "authority-1",
+            profile?.Id,
+            profile is null ? null : profile.Kind.ToString(),
+            profile?.ScopeFingerprint,
+            profile?.Kind is AuthenticationKind.OAuth2ClientCredentials
+                or AuthenticationKind.OAuth2AuthorizationCodePkceRefresh
+                or AuthenticationKind.ChallengeSession
+                    ? AuthenticationRuntime.AuthorityEpoch(profile).ToString(CultureInfo.InvariantCulture)
+                    : null,
+            profile?.Kind is AuthenticationKind.OAuth2ClientCredentials
+                or AuthenticationKind.OAuth2AuthorizationCodePkceRefresh
+                or AuthenticationKind.ChallengeSession
+                    ? AuthenticationRuntime.RuntimeRevision(profile).ToString(CultureInfo.InvariantCulture)
+                    : null,
+
+            // The destination the request actually goes to, after a strategy rebind. Two
+            // profiles that acquire the same session for different destinations must not share.
+            compiled.Uri.GetLeftPart(UriPartial.Authority),
+
+            // Credential material by declaration identity and value digest. The identity of each
+            // declaration keeps a scheme, placement or slot change visible even when the value
+            // is unchanged, which is exactly the case a rotation-less configuration change
+            // produces.
+            .. DeclaredMaterial(declared),
+
+            // Resolved session material, only for the kinds whose session is the authority and
+            // is not already represented by the declared material. An OAuth access token is
+            // deliberately excluded: it is derived from the declared material under the profile's
+            // epoch, so digesting it would turn every routine token refresh into an unobservable
+            // cache miss. A static credential is excluded because it is the declared material.
+            .. (profile?.Kind is AuthenticationKind.TokenSessionExchange
+                    or AuthenticationKind.ChallengeSession
+                ? ResolvedMaterial(authentication?.Credentials)
+                : []),
+        ];
+
+        return new ExecutionAuthorityIdentity(
+            CacheIdentity.Derive(_identityKey, [.. parts]),
+            authentication?.ExpiresAtUtc);
+    }
+
+    /// <summary>
+    /// Declared credential material as digestable parts: the declaration identity followed by
+    /// the digest of the value.
+    /// </summary>
+    /// <remarks>
+    /// The value is digested rather than used directly, so no raw secret can enter an identity.
+    /// The declaration's scheme, placement and slot are included by their own members because
+    /// moving a credential to another header is an authority change even when the value did not
+    /// change.
+    /// </remarks>
+    private IEnumerable<string?> DeclaredMaterial(IReadOnlyList<ResolvedCredential> credentials)
+    {
+        foreach (ResolvedCredential credential in credentials)
+        {
+            yield return credential.Declaration.Scheme.ToString();
+            yield return credential.Declaration.Slot;
+            yield return credential.Declaration.EffectiveLocation.ToString();
+            yield return CacheIdentity.DeriveValue(_identityKey, credential.Value);
+        }
+    }
+
+    /// <summary>
+    /// Resolved dynamic material as digestable parts, so a session change the declared material
+    /// does not show still separates entries.
+    /// </summary>
+    private IEnumerable<string?> ResolvedMaterial(IReadOnlyList<ResolvedCredential>? credentials)
+    {
+        if (credentials is null)
+        {
+            yield break;
+        }
+
+        foreach (ResolvedCredential credential in credentials)
+        {
+            yield return "resolved";
+            yield return credential.Declaration.Scheme.ToString();
+            yield return credential.Declaration.Slot;
+            yield return CacheIdentity.DeriveValue(_identityKey, credential.Value);
+        }
     }
 
     private async Task<EngineExecutionResult> ReadBodyAsync(

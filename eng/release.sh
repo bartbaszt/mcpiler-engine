@@ -205,7 +205,11 @@ case "$mode" in
     assert_origin_unchanged "$base_sha" "$origin_main" || { echo 'RESULT: ORIGIN_RACE'; exit 1; }
     existing="$(remote_tag_commit "$release_tag")"
     assert_release_tag_absent "$existing" || { echo "FAIL: immutable Engine tag $release_tag already exists." >&2; exit 1; }
-    git -C "$ROOT" tag -a "$release_tag" "$release_commit" -m "MCPiler Engine $release_tag"
+    # An annotated tag records a tagger identity, and this job runs on a fresh runner with no Git
+    # identity configured (the prepare job configured its own checkout, which is a different
+    # machine). Pass the documented bot identity explicitly instead of relying on ambient config.
+    git -C "$ROOT" -c user.name="$BOT_NAME" -c user.email="$BOT_EMAIL" \
+      tag -a "$release_tag" "$release_commit" -m "MCPiler Engine $release_tag"
     if ! git -C "$ROOT" push --atomic origin "$release_commit:refs/heads/main" "refs/tags/$release_tag"; then
       git -C "$ROOT" tag -d "$release_tag" >/dev/null 2>&1 || true
       echo 'RESULT: GIT_PUBLICATION_FAILED'

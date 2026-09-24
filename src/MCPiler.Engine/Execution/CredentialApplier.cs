@@ -24,6 +24,8 @@ namespace MCPiler.Engine.Execution;
 /// </remarks>
 public static class CredentialApplier
 {
+    private const string CredentialIdentityMarker = "<credential-value-represented-by-authority>";
+
     /// <summary>
     /// Returns <paramref name="request"/> with <paramref name="credentials"/> applied and every
     /// credential-bearing header marked sensitive for redirects.
@@ -38,10 +40,14 @@ public static class CredentialApplier
         ArgumentNullException.ThrowIfNull(credentials);
 
         var headers = new Dictionary<string, string[]>(request.Headers, StringComparer.OrdinalIgnoreCase);
+        var cacheIdentityHeaders = new Dictionary<string, string[]>(request.Headers, StringComparer.OrdinalIgnoreCase);
         var sensitive = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var authorityRepresentedHeaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var writtenBy = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var cookies = new List<string>();
+        var cacheIdentityCookies = new List<string>();
         var query = new List<KeyValuePair<string, string>>();
+        var cacheIdentityQuery = new List<KeyValuePair<string, string>>();
 
         string? basicUser = null;
         string? basicPassword = null;
@@ -91,11 +97,13 @@ public static class CredentialApplier
                     {
                         case CredentialLocation.Query:
                             query.Add(new KeyValuePair<string, string>(declaration.Slot, credential.Value));
+                            cacheIdentityQuery.Add(new KeyValuePair<string, string>(declaration.Slot, CredentialIdentityMarker));
                             break;
 
                         case CredentialLocation.Cookie:
                             Reserve($"cookie:{declaration.Slot}", declaration.Id);
                             cookies.Add($"{declaration.Slot}={credential.Value}");
+                            cacheIdentityCookies.Add($"{declaration.Slot}={CredentialIdentityMarker}");
                             break;
 
                         default:
@@ -128,13 +136,22 @@ public static class CredentialApplier
             // declared parameters, and a credential cookie is an addition to them.
             var existing = headers.TryGetValue(ManifestCredential.CookieHeader, out var current) ? current : [];
             headers[ManifestCredential.CookieHeader] = [string.Join("; ", existing.Concat(cookies))];
+
+            var identityExisting = cacheIdentityHeaders.TryGetValue(ManifestCredential.CookieHeader, out var identityCurrent)
+                ? identityCurrent
+                : [];
+            cacheIdentityHeaders[ManifestCredential.CookieHeader] =
+                [string.Join("; ", identityExisting.Concat(cacheIdentityCookies))];
         }
 
         return new UpstreamRequest
         {
             Method = request.Method,
             Uri = AppendQuery(request.ExactUrl, query),
+            CacheIdentityUri = AppendQuery(request.ExactUrl, cacheIdentityQuery),
             Headers = headers,
+            CacheIdentityHeaders = cacheIdentityHeaders,
+            AuthorityRepresentedSensitiveHeaders = authorityRepresentedHeaders.ToArray(),
             Body = request.Body,
             BodySource = request.BodySource,
             BodyMediaType = request.BodyMediaType,
@@ -145,6 +162,8 @@ public static class CredentialApplier
         {
             Reserve($"header:{name}", declaration.Id);
             headers[name] = [value];
+            cacheIdentityHeaders[name] = [CredentialIdentityMarker];
+            authorityRepresentedHeaders.Add(name);
         }
 
         void Reserve(string destination, string credentialId)
@@ -180,6 +199,8 @@ public static class CredentialApplier
 
             headers[ManifestCredential.AuthorizationHeader] =
                 [$"Basic {Convert.ToBase64String(Encoding.UTF8.GetBytes($"{user}:{password}"))}"];
+            cacheIdentityHeaders[ManifestCredential.AuthorizationHeader] = [CredentialIdentityMarker];
+            authorityRepresentedHeaders.Add(ManifestCredential.AuthorizationHeader);
 
             sensitive.Add(ManifestCredential.AuthorizationHeader);
         }

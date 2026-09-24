@@ -264,6 +264,9 @@ public sealed class RuntimeStartResult
     /// </remarks>
     internal RuntimeStateLocation? RuntimeState { get; private init; }
 
+    /// <summary>The effective host-only response-cache ceilings reported at startup.</summary>
+    public ResponseCacheOptions ResponseCache { get; private init; } = ResponseCacheOptions.Default;
+
     /// <summary>Every mount, in configuration order. Empty when the process is refused.</summary>
     public IReadOnlyList<MountedManifest> Mounts { get; }
 
@@ -292,12 +295,14 @@ public sealed class RuntimeStartResult
         IReadOnlyList<StartupRefusal> warnings,
         FileHandleStore files,
         bool allowInlineSecrets,
-        RuntimeStateLocation? runtimeState)
+        RuntimeStateLocation? runtimeState,
+        ResponseCacheOptions responseCache)
         => new(mounts, [], warnings)
         {
             Files = files,
             AllowInlineSecrets = allowInlineSecrets,
             RuntimeState = runtimeState,
+            ResponseCache = responseCache,
         };
 
     internal static RuntimeStartResult Refused(IReadOnlyList<StartupRefusal> refusals, IReadOnlyList<StartupRefusal> warnings)

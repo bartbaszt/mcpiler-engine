@@ -181,7 +181,7 @@
     },
     "credentials": {
       "inline": {
-        "formatVersion": 3,
+        "formatVersion": 4,
         "credentials": [
           {
             "id": "bearer-token",

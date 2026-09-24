@@ -12,6 +12,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using MCPiler.Engine.Host.Configuration;
+using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Runtime;
 
 using Microsoft.Extensions.Logging;
@@ -620,6 +621,75 @@ public sealed class AuthorizationTests : IDisposable
         return await client.SendAsync(request, Token);
     }
 
+    /// <summary>
+    /// A token with no optional identity claim is admitted, because none is a prerequisite.
+    /// </summary>
+    /// <remarks>
+    /// The boundary's duties are stated over the audience and the scopes. Requiring <c>sub</c> or
+    /// <c>client_id</c> would reject tokens from a conforming issuer, and a deployment that
+    /// introduced such a requirement while partitioning response caches would turn a standards
+    /// fact into an intermittent refusal. The caller partition is derived without them.
+    /// </remarks>
+    [Fact]
+    public async Task A_token_without_optional_identity_claims_is_admitted()
+    {
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(active: true, Token);
+        await using UpstreamCounter upstream = await Recorder(Token);
+        await using ServedEngine engine = await ServeScopedAsync(upstream.Host.Address, authorization.Address);
+
+        using HttpClient client = new();
+        string full = $"{engine.Address.Scheme}://{engine.Address.Authority}/api/full";
+
+        using HttpResponseMessage admitted = await Authorized(
+            client,
+            engine.At("/api/full"),
+            authorization.MintWithoutIdentityClaims(full, "tools.invoke"));
+
+        AssertAdmitted(admitted);
+
+        // The boundary is reached, and nothing about the missing claims made the request cost
+        // an upstream call the boundary had already authorized: this is a tools/list.
+        Assert.Equal(0, upstream.Arrivals);
+    }
+
+    [Fact]
+    public async Task Protected_cache_entries_are_isolated_between_bearer_tokens_at_the_mcp_boundary()
+    {
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(active: true, Token);
+        int upstreamArrivals = 0;
+        await using LoopbackHost upstream = await LoopbackHost.StartAsync(
+            async context =>
+            {
+                Interlocked.Increment(ref upstreamArrivals);
+                context.Response.StatusCode = 200;
+                context.Response.ContentType = "application/json";
+                await context.Response.Body.WriteAsync("\"ok\""u8.ToArray(), context.RequestAborted);
+            },
+            Token);
+        await using ServedEngine engine = await ServeScopedAsync(
+            upstream.Address,
+            authorization.Address,
+            responseCache: new ResponseCachePolicySettings(300));
+
+        Uri endpoint = engine.At("/api/full");
+        string audience = $"{endpoint.Scheme}://{endpoint.Authority}{endpoint.AbsolutePath}";
+        string firstToken = authorization.Mint(audience, "tools.invoke", DateTime.UtcNow.AddMinutes(30));
+        string secondToken = authorization.Mint(audience, "tools.invoke", DateTime.UtcNow.AddMinutes(31));
+        Assert.NotEqual(firstToken, secondToken);
+
+        using McpHttpSession firstCaller = await McpHttpSession.OpenAsync(endpoint, Token, bearerToken: firstToken);
+        using McpHttpSession secondCaller = await McpHttpSession.OpenAsync(endpoint, Token, bearerToken: secondToken);
+
+        McpExchange first = await firstCaller.CallAsync("read-value", "{}", 2, Token);
+        McpExchange second = await secondCaller.CallAsync("read-value", "{}", 2, Token);
+        McpExchange firstAgain = await firstCaller.CallAsync("read-value", "{}", 3, Token);
+
+        Assert.Equal(HttpStatusCode.OK, first.Status);
+        Assert.Equal(HttpStatusCode.OK, second.Status);
+        Assert.Equal(HttpStatusCode.OK, firstAgain.Status);
+        Assert.Equal(2, upstreamArrivals);
+    }
+
     /// <summary>An upstream that records arrivals, so a test can assert a refused request cost nothing.</summary>
     /// <remarks>
     /// The counter is read through the host the test keeps, because an <c>out</c> parameter
@@ -696,7 +766,11 @@ public sealed class AuthorizationTests : IDisposable
     /// <param name="authenticationRequired">
     /// The protection the mount declares, or <c>null</c> to declare nothing and take the default.
     /// </param>
-    private static string Manifest(Uri upstream, bool scoped, bool? authenticationRequired = null)
+    private static string Manifest(
+        Uri upstream,
+        bool scoped,
+        bool? authenticationRequired = null,
+        ResponseCachePolicySettings? responseCache = null)
     {
         string scopesOnFull = scoped ? ", \"requiredScopes\": [\"tools.invoke\"]" : string.Empty;
         string scopesOnOther = scoped ? ", \"requiredScopes\": [\"tools.invoke\", \"tools.admin\"]" : string.Empty;
@@ -715,6 +789,9 @@ public sealed class AuthorizationTests : IDisposable
             false => "\"authenticationRequired\": false,",
             null => string.Empty,
         };
+        string responseCacheMember = responseCache is { } cache
+            ? $", \"responseCache\": {{\"ttlSeconds\": {cache.TtlSeconds}}}"
+            : string.Empty;
 
         return $$"""
             {
@@ -742,7 +819,7 @@ public sealed class AuthorizationTests : IDisposable
                         "slug": "read-value",
                         "name": "Read value",
                         "inputSchema": { "type": "object" },
-                        "binding": { "type": "http", "operation": "GET /value" }
+                        "binding": { "type": "http", "operation": "GET /value" }{{responseCacheMember}}
                       }
                     ]
                   }
@@ -941,12 +1018,13 @@ public sealed class AuthorizationTests : IDisposable
         HostTokenValidation validation = HostTokenValidation.Introspection,
         string? introspectionClientId = null,
         string? introspectionClientSecretFile = null,
-        ILoggerProvider? loggerProvider = null)
+        ILoggerProvider? loggerProvider = null,
+        ResponseCachePolicySettings? responseCache = null)
     {
         string manifest = ServedManifests.Write(
             _root,
             "scoped-" + Guid.NewGuid().ToString("N"),
-            Manifest(upstream, scoped: true));
+            Manifest(upstream, scoped: true, responseCache: responseCache));
 
         return await ServedEngine.StartAsync(
             RuntimeOptionsFor("/api", manifest),

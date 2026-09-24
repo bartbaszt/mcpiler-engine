@@ -116,6 +116,39 @@ expect_success "metadata gate reads an LF changelog (control)" bash "$crlf_root/
 # The attribute is the durable half, so a fresh checkout does not materialize CRLF at all.
 expect_success "Git attributes force LF for the changelog" grep -Fq 'CHANGELOG.md text eol=lf' "$ROOT/.gitattributes"
 
+# An annotated stable tag records a tagger identity. `git tag -a` runs in the git_publish job on a
+# fresh runner whose checkout has no configured identity (the prepare job configured its own
+# checkout on a different machine), so the release must pass the documented bot identity
+# explicitly. A bare `git tag -a` fails there with `fatal: empty ident name ... not allowed` after
+# the candidate is already published. Reproduce the fresh-runner condition deterministically by
+# disabling every ambient identity source rather than relying on the workstation's own config.
+tag_probe_root="$tmp/tag-identity"
+mkdir -p "$tag_probe_root"
+git -C "$tag_probe_root" init -q .
+git -C "$tag_probe_root" -c user.name='probe' -c user.email='probe@example.invalid' \
+  commit -q --allow-empty -m init
+# `-c` is a one-shot override, so the probe repository still has no configured identity; the
+# unset calls are defensive and must not abort the suite when the keys are already absent.
+git -C "$tag_probe_root" config --unset user.name 2>/dev/null || true
+git -C "$tag_probe_root" config --unset user.email 2>/dev/null || true
+tag_without_identity() {
+  env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    git -C "$tag_probe_root" tag -a "$1" -m probe
+}
+tag_with_bot_identity() {
+  env -u GIT_AUTHOR_NAME -u GIT_AUTHOR_EMAIL -u GIT_COMMITTER_NAME -u GIT_COMMITTER_EMAIL \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    git -C "$tag_probe_root" -c user.name='github-actions[bot]' \
+      -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+      tag -a "$1" -m probe
+}
+expect_failure "annotated tag without a configured identity fails on a fresh runner" tag_without_identity v0.9.9
+expect_success "annotated tag with the documented bot identity succeeds" tag_with_bot_identity v0.1.0
+expect_eq 'tagger github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>' \
+  "$(git -C "$tag_probe_root" cat-file -p refs/tags/v0.1.0 | sed -n '4p' | sed 's/ [0-9][0-9]* [+-][0-9][0-9]*$//')" \
+  "annotated tag records the documented bot identity"
+
 expect_success "new immutable tag" assert_release_tag_absent ""
 expect_failure "existing immutable tag" assert_release_tag_absent "0123456789abcdef"
 expect_success "origin race unchanged" assert_origin_unchanged "abc" "abc"

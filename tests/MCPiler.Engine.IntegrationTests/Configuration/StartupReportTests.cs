@@ -95,6 +95,40 @@ public sealed class StartupReportTests : IDisposable
         string report = StartupReport.Render(started);
         Assert.Contains("mounted /api", report, StringComparison.Ordinal);
         Assert.Contains("Example API", report, StringComparison.Ordinal);
+        Assert.Contains("8 MiB/item", report, StringComparison.Ordinal);
+        Assert.Contains("256 MiB/mount", report, StringComparison.Ordinal);
+        Assert.Contains("4,096 entries/mount", report, StringComparison.Ordinal);
+        Assert.Contains("24 h maximum TTL", report, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_started_report_states_narrowed_response_cache_ceilings()
+    {
+        RuntimeStartResult started = StartMinimal(ResponseCacheOptions.Default with
+        {
+            MaxBodyBytes = 1024 * 1024,
+            MaxRetainedBytesPerMount = 16 * 1024 * 1024,
+            MaxEntriesPerMount = 100,
+            MaxTtlSeconds = 3600,
+        });
+
+        string report = StartupReport.Render(started);
+
+        Assert.Contains("1 MiB/item", report, StringComparison.Ordinal);
+        Assert.Contains("16 MiB/mount", report, StringComparison.Ordinal);
+        Assert.Contains("100 entries/mount", report, StringComparison.Ordinal);
+        Assert.Contains("1 h maximum TTL", report, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_started_report_states_when_response_caching_is_disabled_by_zero_ceiling()
+    {
+        RuntimeStartResult started = StartMinimal(ResponseCacheOptions.Default with { MaxTtlSeconds = 0 });
+
+        Assert.Contains(
+            "response cache: disabled (an effective capacity or TTL ceiling is zero)",
+            StartupReport.Render(started),
+            StringComparison.Ordinal);
     }
 
     [Theory]
@@ -174,7 +208,7 @@ public sealed class StartupReportTests : IDisposable
             StringComparison.Ordinal);
     }
 
-    private RuntimeStartResult StartMinimal()
+    private RuntimeStartResult StartMinimal(ResponseCacheOptions? responseCache = null)
     {
         string manifest = Path.Combine(_root, "policy-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(manifest);
@@ -184,7 +218,10 @@ public sealed class StartupReportTests : IDisposable
         Directory.CreateDirectory(store);
 
         RuntimeStartResult started = EngineRuntime.Start(
-            new RuntimeOptions([new MountRequest("/api", manifest)], store));
+            new RuntimeOptions([new MountRequest("/api", manifest)], store)
+            {
+                ResponseCache = responseCache ?? ResponseCacheOptions.Default,
+            });
 
         Assert.True(started.Started, StartupReport.Render(started));
         return started;
@@ -314,7 +351,7 @@ public sealed class StartupReportTests : IDisposable
             },
             "credentials": {
               "inline": {
-                "formatVersion": 3,
+                "formatVersion": 4,
                 "credentials": [
                   {
                     "id": "oauth2-authorization-refresh-token",
@@ -327,7 +364,7 @@ public sealed class StartupReportTests : IDisposable
             },
             "authentication": {
               "inline": {
-                "formatVersion": 1,
+                "formatVersion": 2,
                 "profiles": [
                   {
                     "id": "oauth2-authorization-code-pkce-refresh",

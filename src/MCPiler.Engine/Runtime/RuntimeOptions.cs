@@ -85,4 +85,9 @@ public sealed record RuntimeOptions(IReadOnlyList<MountRequest> Mounts, string F
     /// silently produce a deployment that cannot read what it wrote.
     /// </remarks>
     public string? RuntimeStateKeyFile { get; init; }
+
+    /// <summary>
+    /// Host-only response-cache ceilings. These never enter a Manifest or managed desired state.
+    /// </summary>
+    public ResponseCacheOptions ResponseCache { get; init; } = ResponseCacheOptions.Default;
 }

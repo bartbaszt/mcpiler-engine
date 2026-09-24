@@ -26,7 +26,8 @@ internal static class ExecutionManifests
         IReadOnlyList<string>? allowedOrigins = null,
         ManifestOperation? operation = null,
         ManifestBinding? binding = null,
-        CredentialsSection? credentials = null)
+        CredentialsSection? credentials = null,
+        ResponseCachePolicySettings? responseCache = null)
     {
         var declared = operation ?? Operation();
 
@@ -40,7 +41,8 @@ internal static class ExecutionManifests
                 new AgentOperationEntry(
                     Slug,
                     "Get thing",
-                    binding ?? new HttpBinding(declared.Key)),
+                    binding ?? new HttpBinding(declared.Key),
+                    ResponseCache: responseCache),
             ]),
             credentials);
     }
@@ -49,13 +51,15 @@ internal static class ExecutionManifests
         string method = "GET",
         string path = "/thing",
         IReadOnlyList<ManifestParameter>? parameters = null,
-        IReadOnlyDictionary<string, ManifestResponse>? responses = null)
+        IReadOnlyDictionary<string, ManifestResponse>? responses = null,
+        ManifestRequestBody? requestBody = null)
         => new(
             ManifestOperation.BuildKey(method, path),
             method,
             path,
             UpstreamId: "getThing",
             Parameters: parameters!,
+            RequestBody: requestBody,
             Responses: responses!);
 
     /// <summary>A response declaration naming one media type under one status.</summary>

@@ -64,3 +64,15 @@ jobs:
         env:
           CI: 'true'
         run: bash eng/verify-source.sh
+
+      # The deterministic metadata, licence and release-helper gates used to run only in the release
+      # workflow. A defect in any of them (for example a guard that cannot pass on Linux because
+      # eng/*.sh lost its executable bit) could therefore stay latent until the first stable release,
+      # when it is expensive and disruptive. Run them on every push/PR so ordinary CI is the first
+      # place such a defect appears.
+      - name: Verify release metadata, licences and release helpers
+        run: |
+          set -euo pipefail
+          bash eng/check-release-metadata.sh
+          bash eng/check-licenses.sh
+          bash eng/test-release-helpers.sh

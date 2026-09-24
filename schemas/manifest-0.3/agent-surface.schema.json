@@ -79,7 +79,15 @@
           }
         },
         "binding": { "$ref": "#/$defs/binding" },
-        "outputProjection": { "$ref": "#/$defs/outputProjection" }
+        "outputProjection": { "$ref": "#/$defs/outputProjection" },
+        "responseCache": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ttlSeconds"],
+          "properties": {
+            "ttlSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 }
+          }
+        }
       }
     },
     "outputProjection": {

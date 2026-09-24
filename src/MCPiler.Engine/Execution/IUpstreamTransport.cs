@@ -41,6 +41,24 @@ public sealed record UpstreamRequest
     /// collection is what makes a configured one sensitive too.
     /// </remarks>
     public IReadOnlyCollection<string> SensitiveHeaders { get; init; } = [];
+
+    /// <summary>
+    /// Query parameter names carrying credential or signature material. Transport diagnostics
+    /// redact these values while preserving ordinary request structure.
+    /// </summary>
+    public IReadOnlyCollection<string> SensitiveQueryParameters { get; init; } = [];
+
+    /// <summary>
+    /// Optional header values for keyed identity after credential values have been replaced by
+    /// stable authority markers. Never passed to the transport.
+    /// </summary>
+    internal IReadOnlyDictionary<string, string[]>? CacheIdentityHeaders { get; init; }
+
+    /// <summary>Header names whose cache-identity values are wholly represented by authority.</summary>
+    internal IReadOnlyCollection<string> AuthorityRepresentedSensitiveHeaders { get; init; } = [];
+
+    /// <summary>The credential-normalized URI used only for opaque cache identity derivation.</summary>
+    internal Uri? CacheIdentityUri { get; init; }
 }
 
 /// <summary>The governing outbound policy for one exchange.</summary>
@@ -103,7 +121,8 @@ public sealed class UpstreamResponse : IAsyncDisposable
         string? mediaType,
         Stream body,
         IAsyncDisposable? owner = null,
-        Uri? effectiveUri = null)
+        Uri? effectiveUri = null,
+        bool wasRedirected = false)
     {
         ArgumentNullException.ThrowIfNull(headers);
         ArgumentNullException.ThrowIfNull(body);
@@ -114,6 +133,7 @@ public sealed class UpstreamResponse : IAsyncDisposable
         Body = body;
         _owner = owner;
         EffectiveUri = effectiveUri;
+        WasRedirected = wasRedirected;
     }
 
     /// <summary>The observed status code.</summary>
@@ -137,6 +157,9 @@ public sealed class UpstreamResponse : IAsyncDisposable
     /// making every consumer re-derive it from the request it happened to send.
     /// </remarks>
     public Uri? EffectiveUri { get; }
+
+    /// <summary>Whether the transport followed one or more redirects before this response.</summary>
+    public bool WasRedirected { get; }
 
     /// <inheritdoc />
     public async ValueTask DisposeAsync()

@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using MCPiler.Engine.Authentication.OAuth1;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Manifest.Validation;
 
@@ -40,7 +41,10 @@ internal static class CredentialsSectionReader
         }
 
         context.RejectUnknownMembers(root, SectionMembers, string.Empty);
-        context.VerifySectionFormatVersion(root, CredentialsSection.FormatVersion);
+        context.VerifySectionFormatVersionRange(
+            root,
+            ManifestFormatSupport.CredentialsFormatVersionMinimum,
+            ManifestFormatSupport.CredentialsFormatVersionMaximum);
 
         var elements = context.ObjectArray(root, "credentials", string.Empty);
         var credentials = new List<ManifestCredential>(elements.Count);
@@ -127,23 +131,36 @@ internal static class CredentialsSectionReader
         string pointer,
         SectionReadContext context)
     {
-        if (scheme is not CredentialScheme.Basic)
+        if (scheme is CredentialScheme.Basic)
         {
-            return true;
+            if (string.Equals(slot, ManifestCredential.BasicUsernameSlot, StringComparison.Ordinal)
+                || string.Equals(slot, ManifestCredential.BasicPasswordSlot, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            context.Error(
+                ManifestDiagnosticCodes.CredentialSlotInvalid,
+                $"The basic scheme accepts only the slots '{ManifestCredential.BasicUsernameSlot}' and '{ManifestCredential.BasicPasswordSlot}', but '{DiagnosticText.Echo(slot)}' was declared.",
+                SectionReadContext.Child(pointer, "slot"));
+            return false;
         }
 
-        if (string.Equals(slot, ManifestCredential.BasicUsernameSlot, StringComparison.Ordinal)
-            || string.Equals(slot, ManifestCredential.BasicPasswordSlot, StringComparison.Ordinal))
+        if (scheme is CredentialScheme.OAuth1Authorization)
         {
-            return true;
+            if (OAuth1Vocabulary.CredentialSlots.Contains(slot, StringComparer.Ordinal))
+            {
+                return true;
+            }
+
+            context.Error(
+                ManifestDiagnosticCodes.CredentialSlotInvalid,
+                $"The oauth1-authorization scheme accepts only the slots {DiagnosticText.List(OAuth1Vocabulary.CredentialSlots)}, but '{DiagnosticText.Echo(slot)}' was declared.",
+                SectionReadContext.Child(pointer, "slot"));
+            return false;
         }
 
-        context.Error(
-            ManifestDiagnosticCodes.CredentialSlotInvalid,
-            $"The basic scheme accepts only the slots '{ManifestCredential.BasicUsernameSlot}' and '{ManifestCredential.BasicPasswordSlot}', but '{DiagnosticText.Echo(slot)}' was declared.",
-            SectionReadContext.Child(pointer, "slot"));
-
-        return false;
+        return true;
     }
 
     private static (CredentialLocation Value, bool Valid)? ReadLocation(

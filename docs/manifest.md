@@ -422,7 +422,17 @@ Each entry carries `slug` (unique, and the reference key used by surface exposur
 lists, compound steps and the derivable sections), `name`, and `binding`.
 Optionally `kind`, `summary`, `description`, `groups`, `tags`, `inputSchema`,
 `outputSchema`, `outputSchemaPolicy`, `annotations`, `risk`, `search`,
-`outputProjection`.
+`outputProjection`, `responseCache`.
+
+`responseCache` is the explicit opt-in to caching the operation's upstream response.
+When present it is an object containing exactly one member, `ttlSeconds`, a whole
+number from 1 through 86,400. Presence is the opt-in; there is no GET-based default,
+and absence means uncached. The policy is refused at load unless the operation
+resolves to one supported HTTP-backed effective `GET`/`HEAD` binding
+(`agent/response-cache-policy-invalid`), because a compound workflow executes several
+requests and a write method has no cacheable response. Whether a given request is
+actually served from cache remains a runtime admission decision rather than a
+property of the manifest.
 
 **The slug is the manifest's identity for an operation.** No producer-side
 identifier is required at runtime. That is what makes a manifest hand-writable
@@ -752,8 +762,8 @@ described.
 
 **Engine declares an explicit supported range.** This Engine supports manifest
 format `0.3`. Section versions are not uniform, because they move
-independently: `agentSurface` is at `4`, `credentials` is at `3`, `authentication`
-is at `1`, while `server`, `policy`, `operations`, `tools` and `search` are still
+independently: `agentSurface` is at `4`, `credentials` is at `4`, `authentication`
+is at `2`, while `server`, `policy`, `operations`, `tools` and `search` are still
 at `1`. A section that omits `formatVersion` is accepted at whatever version this
 Engine supports for it. A refusal always names the version observed and the range
 supported. Hostile input echoed for context is truncated.
@@ -865,6 +875,7 @@ The following codes are always warnings; every other code is an error:
 | `agent/projection-mapping-invalid` | A mapped next-argument target is absent from the target operation's input schema. |
 | `agent/projection-mapping-incomplete` | The mappings cannot supply every required input of the resolved target operation. |
 | `agent/projection-output-schema-invalid` | The declared output schema cannot accept the final projected envelope or one of its valid pagination states. |
+| `agent/response-cache-policy-invalid` | A response-cache TTL is missing, malformed or outside 1..86,400, or the operation resolves to a compound or non-`GET`/`HEAD` binding. |
 
 ### `binding` — execution bindings
 

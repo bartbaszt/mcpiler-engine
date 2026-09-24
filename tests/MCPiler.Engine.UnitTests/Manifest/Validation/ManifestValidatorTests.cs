@@ -18,8 +18,25 @@ public sealed class ManifestValidatorTests
     private static ManifestOperation ListShops()
         => new(Key: "GET /shops", Method: "GET", Path: "/shops");
 
+    private static ManifestOperation CreatePet()
+        => new(Key: "POST /pets", Method: "POST", Path: "/pets");
+
     private static AgentOperationEntry Agent(string slug, ManifestBinding binding)
         => new(Slug: slug, Name: slug, Binding: binding);
+
+    private static AgentOperationEntry Cached(string slug, ManifestBinding binding, int ttlSeconds)
+        => new(Slug: slug, Name: slug, Binding: binding, ResponseCache: new ResponseCachePolicySettings(ttlSeconds));
+
+    private static ServerSection ServerExposing(params string[] slugs)
+        => new(
+            Name: "Example API",
+            Surfaces:
+            [
+                new ManifestSurface(
+                    "default",
+                    [.. slugs.Select(static slug => new SurfaceOperation(slug, OperationExposure.Direct))],
+                    IsDefault: true),
+            ]);
 
     private static ManifestDocument Build(
         ServerSection? server = null,
@@ -1091,6 +1108,97 @@ public sealed class ManifestValidatorTests
 
         Assert.NotEmpty(diagnostics);
         Assert.All(diagnostics, d => Assert.Contains(d.Code, ManifestDiagnosticCodes.All));
+    }
+
+    // ---- response cache policies --------------------------------------------------------
+
+    [Fact]
+    public void A_GET_backed_response_cache_is_accepted()
+    {
+        ManifestDocument manifest = Build(
+            agentSurface: new AgentSurfaceSection(
+                [Cached("list-pets", new HttpBinding("GET /pets"), 300)]));
+
+        Assert.Empty(ManifestValidator.Validate(manifest));
+    }
+
+    [Fact]
+    public void A_HEAD_backed_response_cache_is_accepted()
+    {
+        ManifestDocument manifest = Build(
+            server: ServerExposing("probe-pets"),
+            operations: new OperationsSection([new ManifestOperation(Key: "HEAD /pets", Method: "HEAD", Path: "/pets")]),
+            agentSurface: new AgentSurfaceSection(
+                [Cached("probe-pets", new HttpBinding("HEAD /pets"), 60)]));
+
+        Assert.Empty(ManifestValidator.Validate(manifest));
+    }
+
+    [Fact]
+    public void An_absent_response_cache_is_not_validated()
+    {
+        ManifestDocument manifest = Build(
+            server: ServerExposing("create-pet"),
+            operations: new OperationsSection([ListPets(), CreatePet()]),
+            agentSurface: new AgentSurfaceSection(
+                [Agent("create-pet", new HttpBinding("POST /pets"))]));
+
+        Assert.Empty(ManifestValidator.Validate(manifest));
+    }
+
+    [Fact]
+    public void A_non_GET_effective_operation_is_refused()
+    {
+        ManifestDocument manifest = Build(
+            server: ServerExposing("create-pet"),
+            operations: new OperationsSection([ListPets(), CreatePet()]),
+            agentSurface: new AgentSurfaceSection(
+                [Cached("create-pet", new HttpBinding("POST /pets"), 60)]));
+
+        ManifestDiagnostic diagnostic = Assert.Single(ManifestValidator.Validate(manifest));
+
+        Assert.Equal(ManifestDiagnosticCodes.ResponseCachePolicyInvalid, diagnostic.Code);
+        Assert.Equal("/operations/0/responseCache", diagnostic.Pointer);
+        Assert.Equal(ManifestSectionName.AgentSurface, diagnostic.Section);
+        Assert.Contains("POST", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A transformation is resolved through its base, so the cache decision follows the
+    /// operation that actually executes rather than the agent-facing key.
+    /// </summary>
+    [Fact]
+    public void A_transformed_bindings_effective_method_governs_the_policy()
+    {
+        ManifestDocument manifest = Build(
+            server: ServerExposing("create-pet"),
+            operations: new OperationsSection([ListPets(), CreatePet()]),
+            agentSurface: new AgentSurfaceSection(
+                [Cached("create-pet", new TransformedHttpBinding(new HttpBinding("POST /pets")), 60)]));
+
+        ManifestDiagnostic diagnostic = Assert.Single(ManifestValidator.Validate(manifest));
+
+        Assert.Equal(ManifestDiagnosticCodes.ResponseCachePolicyInvalid, diagnostic.Code);
+        Assert.Equal("/operations/0/responseCache", diagnostic.Pointer);
+    }
+
+    [Fact]
+    public void A_compound_binding_is_refused()
+    {
+        ManifestDocument manifest = Build(
+            server: ServerExposing("fetch", "bundle"),
+            agentSurface: new AgentSurfaceSection(
+            [
+                Agent("fetch", new HttpBinding("GET /pets")),
+                Cached("bundle", new CompoundBinding([new CompoundStepEntry("one", "fetch")]), 60),
+            ]));
+
+        ManifestDiagnostic diagnostic = Assert.Single(
+            ManifestValidator.Validate(manifest),
+            static d => d.Code == ManifestDiagnosticCodes.ResponseCachePolicyInvalid);
+
+        Assert.Equal("/operations/1/responseCache", diagnostic.Pointer);
+        Assert.Contains("bundle", diagnostic.Message, StringComparison.Ordinal);
     }
 
     /// <summary>

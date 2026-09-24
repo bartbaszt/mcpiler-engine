@@ -194,6 +194,28 @@ public sealed class ToolInvocationTests
     }
 
     [Fact]
+    public void Cache_identity_metadata_does_not_change_the_ordinary_tool_result_shape()
+    {
+        EngineExecutionResult cached = new()
+        {
+            StatusCode = 200,
+            ResponseHeaders = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["X-Page"] = ["page-1"],
+            },
+            ResponseBody = "{\"value\":1}"u8.ToArray(),
+            CallerPartitionFingerprint = "caller-fingerprint",
+            AuthorityFingerprint = "authority-fingerprint",
+            AuthorityExpiresAtUtc = new DateTimeOffset(2026, 9, 23, 12, 1, 0, TimeSpan.Zero),
+        };
+
+        ToolOutcome outcome = ToolInvocation.Shape(cached);
+
+        Assert.False(outcome.IsError);
+        Assert.Equal("{\"value\":1}", outcome.Text);
+    }
+
+    [Fact]
     public void An_empty_body_is_stated_rather_than_returned_as_nothing()
     {
         var outcome = ToolInvocation.Shape(new EngineExecutionResult { StatusCode = 204 });

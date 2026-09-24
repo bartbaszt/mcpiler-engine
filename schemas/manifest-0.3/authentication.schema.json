@@ -6,7 +6,7 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "formatVersion": { "const": 1 },
+    "formatVersion": { "const": 2 },
     "profiles": {
       "type": "array",
       "items": { "$ref": "#/$defs/profile" }
@@ -34,6 +34,7 @@
             "token-session-exchange",
             "challenge-session",
             "request-signing",
+            "oauth1-authorization",
             "reviewed-composite"
           ]
         },

@@ -224,6 +224,10 @@ jobs:
 
   latest_promote:
     needs: [resolve, stable_promote]
+    # The two resume modes are mutually exclusive, so exactly one branch job is always skipped and a skip
+    # taints every later job in the dependency chain. Each tail job therefore declares its own accepting
+    # form; a bare `needs:` would be silently skipped while the run still reported success.
+    if: ${{ always() && needs.resolve.result == 'success' && needs.stable_promote.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -250,6 +254,9 @@ jobs:
 
   github_release:
     needs: [resolve, latest_promote]
+    # Same accepting form as the other tail job: resume must be able to repair a missing GitHub Release
+    # even though the unrelated sibling branch was skipped.
+    if: ${{ always() && needs.resolve.result == 'success' && needs.latest_promote.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -273,3 +280,54 @@ jobs:
             gh release create "$RELEASE_TAG" --verify-tag --title "MCPiler Engine $RELEASE_TAG" --notes-file release-body.md
             echo 'RESULT: GITHUB_RELEASE_PUBLISHED'
           fi
+
+  resume_complete:
+    # Terminal completeness gate. A skipped job taints the downstream chain, so without an explicit
+    # assertion a resume could leave the run green while the artifacts it exists to repair are still
+    # missing. This job always runs and fails the workflow unless every required resume stage either
+    # succeeded or was the mode-exclusive sibling of the stage that did.
+    if: ${{ always() }}
+    needs: [resolve, verify_candidate, git_publish, resume_guard, stable_promote, latest_promote, github_release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Refuse success when a required resume stage did not run
+        env:
+          RESOLVE: ${{ needs.resolve.result }}
+          VERIFY_CANDIDATE: ${{ needs.verify_candidate.result }}
+          GIT_PUBLISH: ${{ needs.git_publish.result }}
+          RESUME_GUARD: ${{ needs.resume_guard.result }}
+          STABLE_PROMOTE: ${{ needs.stable_promote.result }}
+          LATEST_PROMOTE: ${{ needs.latest_promote.result }}
+          GITHUB_RELEASE: ${{ needs.github_release.result }}
+        run: |
+          set -euo pipefail
+          failed=0
+
+          for stage in \
+            "resolve=$RESOLVE" \
+            "verify_candidate=$VERIFY_CANDIDATE" \
+            "stable_promote=$STABLE_PROMOTE" \
+            "latest_promote=$LATEST_PROMOTE" \
+            "github_release=$GITHUB_RELEASE"
+          do
+            name="${stage%%=*}"
+            result="${stage#*=}"
+            if [[ "$result" != 'success' ]]; then
+              echo "FAIL: resume stage '$name' did not succeed (result: $result)." >&2
+              failed=1
+            fi
+          done
+
+          # The two publication modes are mutually exclusive: exactly one of these must have run.
+          mode_successes=0
+          [[ "$GIT_PUBLISH" == 'success' ]] && mode_successes=$((mode_successes + 1))
+          [[ "$RESUME_GUARD" == 'success' ]] && mode_successes=$((mode_successes + 1))
+          if [[ "$mode_successes" -ne 1 ]]; then
+            echo "FAIL: expected exactly one of git_publish/resume_guard to succeed, got $mode_successes." >&2
+            failed=1
+          fi
+
+          ((failed == 0)) || { echo 'RESULT: RESUME_INCOMPLETE'; exit 1; }
+          echo 'RESULT: RESUME_COMPLETE'

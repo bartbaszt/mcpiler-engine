@@ -172,6 +172,34 @@ public sealed class UpstreamSenderTests
     }
 
     [Fact]
+    public async Task A_request_with_both_body_representations_is_rejected_before_signing_or_send()
+    {
+        var source = new TrackingSource("streamed"u8.ToArray());
+        var handler = new RecordingHandler(_ => Ok("unexpected"));
+        using var clients = new UpstreamClientFactory(_ => handler);
+        var sender = new UpstreamSender(clients);
+        var request = new UpstreamRequest
+        {
+            Method = "POST",
+            Uri = new Uri("https://api.example.com/write"),
+            Body = "materialized"u8.ToArray(),
+            BodySource = source,
+            BodyMediaType = "application/octet-stream",
+        };
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => sender.SendAsync(
+            request,
+            Policy(AllowApi) with
+            {
+                SignRequest = (_, _, _) => throw new InvalidOperationException("signer must not run"),
+            },
+            TestContext.Current.CancellationToken));
+
+        Assert.Empty(handler.Requests);
+        Assert.Equal(0, source.Copies);
+    }
+
+    [Fact]
     public async Task See_other_rewrites_a_post_to_a_get_and_drops_the_body()
     {
         var handler = new RecordingHandler(request => request.RequestUri!.PathAndQuery == "/start"

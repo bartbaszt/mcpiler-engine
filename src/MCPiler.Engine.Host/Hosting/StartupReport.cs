@@ -53,9 +53,14 @@ public static class StartupReport
 {
     /// <summary>Renders every refusal and warning, in the order the runtime reported them.</summary>
     /// <param name="authorization">The bound authorization policy, when serving is configured to validate tokens.</param>
+    /// <param name="operatorChannelConfigured">
+    /// Whether the dedicated response-cache operator channel is configured, or null to say nothing
+    /// about it. The line states presence and never the secret.
+    /// </param>
     public static string Render(
         RuntimeStartResult result,
-        HostAuthorizationOptions? authorization = null)
+        HostAuthorizationOptions? authorization = null,
+        bool? operatorChannelConfigured = null)
     {
         ArgumentNullException.ThrowIfNull(result);
 
@@ -90,6 +95,10 @@ public static class StartupReport
             text.AppendLine(result.DurableRuntimeState
                 ? "runtime state: durable (rotated authentication state survives a restart)"
                 : "runtime state: memory-only (a rotated refresh token is lost on restart)");
+
+            AppendResponseCache(text, result.ResponseCache);
+
+            AppendOperatorChannel(text, operatorChannelConfigured);
 
             AppendAuthorizationPolicy(text, authorization);
 
@@ -165,7 +174,8 @@ public static class StartupReport
         string endpoint,
         string generationId,
         bool durableRuntimeState,
-        HostAuthorizationOptions? authorization = null)
+        HostAuthorizationOptions? authorization = null,
+        ResponseCacheOptions? responseCache = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(endpoint);
         ArgumentException.ThrowIfNullOrEmpty(generationId);
@@ -180,9 +190,58 @@ public static class StartupReport
             ? "runtime state: durable (rotated authentication state survives a restart)"
             : "runtime state: memory-only (a rotated refresh token is lost on restart)");
 
+        AppendResponseCache(text, responseCache ?? ResponseCacheOptions.Default);
+
         AppendAuthorizationPolicy(text, authorization);
 
         return text.ToString();
+    }
+
+    private static void AppendResponseCache(StringBuilder text, ResponseCacheOptions options)
+    {
+        if (!options.Enabled)
+        {
+            text.AppendLine("response cache: disabled (an effective capacity or TTL ceiling is zero)");
+            return;
+        }
+
+        string line = string.Create(
+            CultureInfo.InvariantCulture,
+            $"response cache: {Bytes(options.MaxBodyBytes)}/item, {Bytes(options.MaxRetainedBytesPerMount)}/mount, {options.MaxEntriesPerMount:N0} entries/mount, {Ttl(options.MaxTtlSeconds)} maximum TTL");
+        text.AppendLine(line);
+    }
+
+    private static string Bytes(long bytes)
+    {
+        const long Kilobyte = 1024;
+        const long Megabyte = 1024 * Kilobyte;
+
+        if (bytes % Megabyte == 0)
+        {
+            return string.Create(CultureInfo.InvariantCulture, $"{bytes / Megabyte} MiB");
+        }
+
+        if (bytes % Kilobyte == 0)
+        {
+            return string.Create(CultureInfo.InvariantCulture, $"{bytes / Kilobyte} KiB");
+        }
+
+        return string.Create(CultureInfo.InvariantCulture, $"{bytes} bytes");
+    }
+
+    private static string Ttl(int seconds)
+    {
+        if (seconds % 3600 == 0)
+        {
+            return string.Create(CultureInfo.InvariantCulture, $"{seconds / 3600} h");
+        }
+
+        if (seconds % 60 == 0)
+        {
+            return string.Create(CultureInfo.InvariantCulture, $"{seconds / 60} min");
+        }
+
+        return string.Create(CultureInfo.InvariantCulture, $"{seconds} s");
     }
 
     /// <summary>
@@ -208,8 +267,28 @@ public static class StartupReport
             : "introspection revalidation bound: caching disabled (fresh issuer validation per request)";
     }
 
-    private static void AppendAuthorizationPolicy(
-        StringBuilder text,
+    /// <summary>
+    /// States whether the dedicated response-cache operator channel is configured.
+    /// </summary>
+    /// <remarks>
+    /// Presence only. The channel is opt-in, and its absence is the safe default an operator needs
+    /// to be able to read: without a line they cannot tell "no operator route exists" from "the
+    /// line was forgotten". The secret itself is never rendered.
+    /// </remarks>
+    internal static string RenderOperatorChannel(bool configured)
+        => configured
+            ? "response-cache operator channel: configured (dedicated secret file)"
+            : "response-cache operator channel: absent (no dedicated secret file)";
+
+    private static void AppendOperatorChannel(StringBuilder text, bool? configured)
+    {
+        if (configured is { } present)
+        {
+            text.AppendLine(RenderOperatorChannel(present));
+        }
+    }
+
+    private static void AppendAuthorizationPolicy(        StringBuilder text,
         HostAuthorizationOptions? authorization)
     {
         string policy = RenderAuthorizationPolicy(authorization);

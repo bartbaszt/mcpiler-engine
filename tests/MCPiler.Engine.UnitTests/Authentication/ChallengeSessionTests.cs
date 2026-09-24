@@ -244,9 +244,13 @@ public sealed class ChallengeSessionTests
         var credential = service.ResolveCredential(Profile(Configured()), runtimeRevision: 0, authorityEpoch: 1);
 
         Assert.NotNull(credential);
-        Assert.Equal(CredentialScheme.Header, credential!.Declaration.Scheme);
-        Assert.Equal("Authorization", credential.Declaration.Slot);
-        Assert.Equal("Bearer " + SessionCanary, credential.Value);
+        Assert.Equal(CredentialScheme.Header, credential!.Credential.Declaration.Scheme);
+        Assert.Equal("Authorization", credential.Credential.Declaration.Slot);
+        Assert.Equal("Bearer " + SessionCanary, credential.Credential.Value);
+
+        // The capture's own expiry travels with it: a response obtained under this session must
+        // not outlive the upstream authority that granted it.
+        Assert.Equal(Now.AddMinutes(5), credential.ExpiresAtUtc);
     }
 
     [Fact]

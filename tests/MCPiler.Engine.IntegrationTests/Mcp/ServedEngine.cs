@@ -69,6 +69,14 @@ internal sealed class ServedEngine : IAsyncDisposable
     /// <summary>The same drain coordinator the running listener uses.</summary>
     public DrainCoordinator Drain => _drain;
 
+    /// <summary>The execution graph the running listener invokes through.</summary>
+    /// <remarks>
+    /// Exposed so a test can warm cache state through the same seam a serving request uses, rather
+    /// than by reaching into the cache directly: a test that populated the cache by hand would be
+    /// asserting its own setup rather than the product's admission path.
+    /// </remarks>
+    public EngineExecution Execution => _execution;
+
     /// <summary>
     /// An outbound policy that judges no address.
     /// </summary>
@@ -94,6 +102,10 @@ internal sealed class ServedEngine : IAsyncDisposable
     /// Browser origins allowed to call an MCP address. Empty accepts no browser origin, which is the
     /// right default for a listener reached only by non-browser clients.
     /// </param>
+    /// <param name="operatorSecret">
+    /// The dedicated response-cache operator secret. Null leaves the operator channel unmapped, which
+    /// is the safe default; a test that exercises read/clear supplies one.
+    /// </param>
     public static async Task<ServedEngine> StartAsync(
         RuntimeOptions options,
         CancellationToken cancellationToken,
@@ -102,7 +114,8 @@ internal sealed class ServedEngine : IAsyncDisposable
         HostAuthorizationOptions? authorization = null,
         ILoggerProvider? loggerProvider = null,
         IReadOnlyList<string>? trustedProxies = null,
-        IReadOnlyList<string>? allowedOrigins = null)
+        IReadOnlyList<string>? allowedOrigins = null,
+        string? operatorSecret = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -130,6 +143,7 @@ internal sealed class ServedEngine : IAsyncDisposable
             {
                 TrustedProxies = trustedProxies ?? [],
                 AllowedOrigins = allowedOrigins ?? [],
+                ResponseCacheOperatorSecret = operatorSecret,
             },
             execution,
             drain);

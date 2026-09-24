@@ -1,6 +1,9 @@
 using System.Net.Http.Headers;
 using System.Net;
 
+using MCPiler.Engine.Execution;
+using MCPiler.Engine.Execution.ResponseCaching;
+
 namespace MCPiler.Engine.Execution.Outbound;
 
 /// <summary>
@@ -23,9 +26,10 @@ namespace MCPiler.Engine.Execution.Outbound;
 /// exactly one classification.
 /// </para>
 /// </remarks>
-public sealed class UpstreamSender : IUpstreamTransport
+public sealed class UpstreamSender : IUpstreamTransport, IResponseCacheTransportState
 {
     private readonly UpstreamClientFactory _clients;
+    private int _hasObservedSetCookie;
 
     /// <summary>Creates a sender over <paramref name="clients"/>.</summary>
     public UpstreamSender(UpstreamClientFactory clients)
@@ -33,6 +37,9 @@ public sealed class UpstreamSender : IUpstreamTransport
         ArgumentNullException.ThrowIfNull(clients);
         _clients = clients;
     }
+
+    bool IResponseCacheTransportState.HasUnrepresentedRequestState
+        => !_clients.CookieStateObservable || Volatile.Read(ref _hasObservedSetCookie) != 0;
 
     /// <inheritdoc />
     public async Task<UpstreamResponse> SendAsync(
@@ -43,19 +50,28 @@ public sealed class UpstreamSender : IUpstreamTransport
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(policy);
 
+        if (request.Body is not null && request.BodySource is not null)
+        {
+            throw new InvalidOperationException(
+                "An upstream request cannot declare both materialized and replayable body sources.");
+        }
+
         var client = _clients.Client(policy.Limits);
         var hopLimit = policy.Limits.RedirectHopLimit;
 
         var method = request.Method;
         var uri = request.Uri;
         var headers = request.Headers;
+        var sensitiveQueryParameters = request.SensitiveQueryParameters;
         var preserveBody = true;
+        bool followedRedirect = false;
 
         for (var hop = 0; ; hop++)
         {
             if (!policy.AllowedOrigins.IsAllowed(uri))
             {
-                throw new OriginPolicyViolationException(uri);
+                throw new OriginPolicyViolationException(
+                    UpstreamUriRedactor.Redact(uri, sensitiveQueryParameters));
             }
 
             if (hop > hopLimit)
@@ -76,6 +92,7 @@ public sealed class UpstreamSender : IUpstreamTransport
                 Body = preserveBody ? request.Body : null,
                 BodySource = preserveBody ? request.BodySource : null,
                 BodyMediaType = preserveBody ? request.BodyMediaType : null,
+                SensitiveQueryParameters = sensitiveQueryParameters,
             };
 
             if (policy.SignRequest is { } sign)
@@ -84,6 +101,7 @@ public sealed class UpstreamSender : IUpstreamTransport
                 method = hopRequest.Method;
                 uri = hopRequest.Uri;
                 headers = hopRequest.Headers;
+                sensitiveQueryParameters = hopRequest.SensitiveQueryParameters;
             }
 
             using var message = Build(method, uri, headers, hopRequest);
@@ -103,19 +121,29 @@ public sealed class UpstreamSender : IUpstreamTransport
             }
             catch (Exception ex)
             {
-                throw Translate(ex, uri);
+                throw Translate(ex, uri, hopRequest.SensitiveQueryParameters);
+            }
+
+            // SocketsHttpHandler's default CookieContainer is mutable state that does not appear
+            // on UpstreamRequest. Once a response has supplied cookies, cache identity can no
+            // longer be proven from the request model alone, so the service bypasses this
+            // transport's cache path rather than merging callers under an incomplete key.
+            if (response.Headers.Contains("Set-Cookie"))
+            {
+                Interlocked.Exchange(ref _hasObservedSetCookie, 1);
             }
 
             if (!RedirectRules.IsRedirect((int)response.StatusCode))
             {
-                return await CaptureAsync(response, uri, cancellationToken).ConfigureAwait(false);
+                return await CaptureAsync(response, uri, followedRedirect, cancellationToken).ConfigureAwait(false);
             }
 
             var location = response.Headers.Location;
             if (location is null)
             {
                 response.Dispose();
-                throw new MalformedRedirectException(uri);
+                throw new MalformedRedirectException(
+                    UpstreamUriRedactor.Redact(uri, hopRequest.SensitiveQueryParameters));
             }
 
             var next = RedirectRules.ResolveLocation(uri, location);
@@ -124,10 +152,11 @@ public sealed class UpstreamSender : IUpstreamTransport
 
             response.Dispose();
 
-            headers = Carry(headers, sameOrigin, request.SensitiveHeaders);
+            headers = Carry(headers, sameOrigin, hopRequest.SensitiveHeaders);
             method = nextMethod;
             preserveBody = preserveBody && nextPreservesBody;
             uri = next;
+            followedRedirect = true;
         }
     }
 
@@ -149,6 +178,14 @@ public sealed class UpstreamSender : IUpstreamTransport
             // Adding without validation keeps a compiled header byte-identical rather than
             // letting the framework reformat it.
             message.Headers.TryAddWithoutValidation(name, values);
+        }
+
+        if (!headers.Keys.Any(static name => string.Equals(name, "Accept-Encoding", StringComparison.OrdinalIgnoreCase)))
+        {
+            // Keep automatic decompression's implicit request dimension visible to cache-key
+            // construction. SocketsHttpHandler does not add a second default when this header is
+            // already present.
+            message.Headers.TryAddWithoutValidation("Accept-Encoding", UpstreamRequestDefaults.AcceptEncoding);
         }
 
         if (body?.BodySource is { } source)
@@ -209,6 +246,7 @@ public sealed class UpstreamSender : IUpstreamTransport
     private static async Task<UpstreamResponse> CaptureAsync(
         HttpResponseMessage response,
         Uri effectiveUri,
+        bool wasRedirected,
         CancellationToken cancellationToken)
     {
         try
@@ -237,7 +275,8 @@ public sealed class UpstreamSender : IUpstreamTransport
                 mediaType,
                 body,
                 new ResponseOwner(response),
-                effectiveUri);
+                effectiveUri,
+                wasRedirected);
         }
         catch
         {
@@ -257,7 +296,10 @@ public sealed class UpstreamSender : IUpstreamTransport
     /// instead of a policy. Unwrapping first is what keeps the address-containment
     /// classification reachable at all.
     /// </remarks>
-    private static Exception Translate(Exception exception, Uri uri)
+    private static Exception Translate(
+        Exception exception,
+        Uri uri,
+        IReadOnlyCollection<string> sensitiveQueryParameters)
     {
         for (var current = exception; current is not null; current = current.InnerException)
         {
@@ -267,9 +309,14 @@ public sealed class UpstreamSender : IUpstreamTransport
             }
         }
 
-        return new UpstreamTransportException(
-            $"The exchange with '{uri}' failed before a response was observed.",
-            exception);
+        string message =
+            $"The exchange with '{UpstreamUriRedactor.Redact(uri, sensitiveQueryParameters)}' failed before a response was observed.";
+
+        // Framework exception trees can retain the original request URI. When a signer marked
+        // query values sensitive, keep the public diagnostic useful but do not preserve an
+        // unreviewed inner message that could reintroduce those values through logging.
+        Exception? safeInner = sensitiveQueryParameters.Count == 0 ? exception : null;
+        return new UpstreamTransportException(message, safeInner);
     }
 
     private sealed class ResponseOwner(HttpResponseMessage response) : IAsyncDisposable

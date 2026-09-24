@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using MCPiler.Engine.Authentication.OAuth1;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Manifest.Validation;
 
@@ -106,7 +107,10 @@ internal static class AuthenticationSectionReader
         }
 
         context.RejectUnknownMembers(root, SectionMembers, string.Empty);
-        context.VerifySectionFormatVersion(root, AuthenticationSection.FormatVersion);
+        context.VerifySectionFormatVersionRange(
+            root,
+            ManifestFormatSupport.AuthenticationFormatVersionMinimum,
+            ManifestFormatSupport.AuthenticationFormatVersionMaximum);
 
         var elements = context.ObjectArray(root, "profiles", string.Empty);
 
@@ -635,6 +639,10 @@ internal static class AuthenticationSectionReader
                     ValidateRequestSigning(configuration);
                     break;
 
+                case AuthenticationKind.OAuth1Authorization:
+                    ValidateOAuth1(configuration);
+                    break;
+
                 default:
                     Error(
                         ManifestDiagnosticCodes.AuthenticationConfigurationInvalid,
@@ -921,6 +929,50 @@ internal static class AuthenticationSectionReader
             }
 
             ValidateOptionalInt(configuration, "sessionLifetimeSeconds", 1, 2_592_000);
+        }
+
+        private void ValidateOAuth1(JsonObject configuration)
+        {
+            // The runtime configuration carries only execution-effective fields. Platform-only
+            // authorization endpoints, callback state, and stage extras are not members here,
+            // so a document carrying them is refused as unknown rather than ignored.
+            RequireKnownMembers(configuration, ["consumerKey", "signatureMethod", "parameterTransport"]);
+
+            if (ReadRequiredBoundedString(configuration, "consumerKey", 500) is null)
+            {
+                return;
+            }
+
+            var method = ReadRequiredBoundedString(configuration, "signatureMethod", 20);
+
+            if (method is null)
+            {
+                return;
+            }
+
+            if (!OAuth1Vocabulary.SignatureMethods.Contains(method, StringComparer.Ordinal))
+            {
+                Error(
+                    ManifestDiagnosticCodes.AuthenticationConfigurationInvalid,
+                    $"'{DiagnosticText.Echo(method)}' is not a signature method. Expected one of: {DiagnosticText.List(OAuth1Vocabulary.SignatureMethods)}.",
+                    Child(pointer, "signatureMethod"));
+                return;
+            }
+
+            var transport = ReadRequiredBoundedString(configuration, "parameterTransport", 30);
+
+            if (transport is null)
+            {
+                return;
+            }
+
+            if (!OAuth1Vocabulary.ParameterTransports.Contains(transport, StringComparer.Ordinal))
+            {
+                Error(
+                    ManifestDiagnosticCodes.AuthenticationConfigurationInvalid,
+                    $"'{DiagnosticText.Echo(transport)}' is not a parameter transport. Expected one of: {DiagnosticText.List(OAuth1Vocabulary.ParameterTransports)}.",
+                    Child(pointer, "parameterTransport"));
+            }
         }
 
         private void ValidateRequestSigning(JsonObject configuration)

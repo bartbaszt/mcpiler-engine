@@ -29,9 +29,12 @@ internal static class AgentSurfaceSectionReader
         "annotations",
         "risk",
         "search",
+        "responseCache",
         "binding",
         "outputProjection",
     ];
+
+    internal static readonly string[] ResponseCacheMembers = ["ttlSeconds"];
 
     internal static readonly string[] PolicyMembers = ["generate", "advertise", "useInternally"];
 
@@ -207,10 +210,56 @@ internal static class AgentSurfaceSectionReader
                 ReadAnnotations(element, pointer, context),
                 context.Text(element, "risk", pointer),
                 ReadSearchMetadata(element, pointer, context),
-                AgentOutputProjectionReader.Read(element, pointer, context)));
+                AgentOutputProjectionReader.Read(element, pointer, context),
+                ReadResponseCache(element, pointer, context)));
         }
 
         return operations;
+    }
+
+    private static ResponseCachePolicySettings? ReadResponseCache(
+        JsonObject element,
+        string pointer,
+        SectionReadContext context)
+    {
+        var policy = context.Object(element, "responseCache", pointer);
+
+        if (policy is null)
+        {
+            return null;
+        }
+
+        var policyPointer = SectionReadContext.Child(pointer, "responseCache");
+        context.RejectUnknownMembers(policy, ResponseCacheMembers, policyPointer);
+
+        // Malformed, missing and out-of-range all report the same code, because they are one
+        // authoring question - "is this a usable TTL?" - and the pointer already says which
+        // member. A type mismatch is deliberately not deferred to the generic 'wrong JSON
+        // type' diagnostic: the policy has exactly one member, so the TTL's shape *is* the
+        // policy's shape.
+        var ttlPointer = SectionReadContext.Child(policyPointer, "ttlSeconds");
+
+        if (policy["ttlSeconds"] is not JsonValue value || !value.TryGetValue<int>(out var ttl))
+        {
+            context.Error(
+                ManifestDiagnosticCodes.ResponseCachePolicyInvalid,
+                "responseCache requires 'ttlSeconds' as a whole number from 1 through 86,400 inclusive.",
+                ttlPointer);
+            return null;
+        }
+
+        if (ttl is < 1 or > 86400)
+        {
+            context.Error(
+                ManifestDiagnosticCodes.ResponseCachePolicyInvalid,
+                string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"'ttlSeconds' must be from 1 through 86,400 inclusive, but {ttl} was declared."),
+                ttlPointer);
+            return null;
+        }
+
+        return new ResponseCachePolicySettings(ttl);
     }
 
     private static (AgentOperationKind Value, bool Valid)? ReadKind(

@@ -1,4 +1,5 @@
 using System.Globalization;
+using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Manifest.Validation;
 
 namespace MCPiler.Engine.Manifest;
@@ -61,6 +62,25 @@ public static class ManifestFormatSupport
         Minimum == Maximum
             ? Minimum.ToString()
             : string.Create(CultureInfo.InvariantCulture, $"{Minimum} to {Maximum}");
+
+    /// <summary>Oldest authentication section version this Engine build accepts.</summary>
+    /// <remarks>
+    /// Section versions are independent of the root: a section gains a version when its
+    /// closed vocabulary grows. While the format is pre-1.0, a superseded section version
+    /// is refused rather than migrated: producers re-export. The supported range is exactly
+    /// the current version, pinned by the section-version matrix tests so widening it stays
+    /// a decision rather than an accident.
+    /// </remarks>
+    public static int AuthenticationFormatVersionMinimum => Model.AuthenticationSection.FormatVersion;
+
+    /// <summary>Newest authentication section version this Engine build accepts.</summary>
+    public static int AuthenticationFormatVersionMaximum => Model.AuthenticationSection.FormatVersion;
+
+    /// <summary>Oldest credentials section version this Engine build accepts.</summary>
+    public static int CredentialsFormatVersionMinimum => Model.CredentialsSection.FormatVersion;
+
+    /// <summary>Newest credentials section version this Engine build accepts.</summary>
+    public static int CredentialsFormatVersionMaximum => Model.CredentialsSection.FormatVersion;
 
     /// <summary>Returns true when <paramref name="version"/> is inside the supported range.</summary>
     public static bool IsSupported(ManifestFormatVersion version)

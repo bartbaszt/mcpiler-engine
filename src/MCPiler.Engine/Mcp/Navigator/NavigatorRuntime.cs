@@ -89,7 +89,8 @@ internal static class NavigatorRuntime
         string tool,
         JsonObject arguments,
         string? negotiatedProtocolRevision,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        CallerPartition? callerPartition = null)
         => tool switch
         {
             ManifestTool.NavigatorDiscover => Task.FromResult(Discover(mount, surface, arguments)),
@@ -101,6 +102,7 @@ internal static class NavigatorRuntime
                 invocationScope,
                 arguments,
                 negotiatedProtocolRevision,
+                callerPartition,
                 cancellationToken),
 
             // The trio is closed and every member is handled above. A fourth name reaching
@@ -224,6 +226,7 @@ internal static class NavigatorRuntime
         string invocationScope,
         JsonObject arguments,
         string? negotiatedProtocolRevision,
+        CallerPartition? callerPartition,
         CancellationToken cancellationToken)
     {
         string named = Text(arguments, OperationArgument) ?? string.Empty;
@@ -245,7 +248,8 @@ internal static class NavigatorRuntime
             operation,
             supplied,
             negotiatedProtocolRevision,
-            cancellationToken);
+            cancellationToken,
+            callerPartition);
     }
 
     /// <summary>

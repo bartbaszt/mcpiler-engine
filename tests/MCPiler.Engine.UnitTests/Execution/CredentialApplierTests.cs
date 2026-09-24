@@ -28,6 +28,8 @@ public sealed class CredentialApplierTests
         var applied = Apply(Resolved("api", CredentialScheme.Bearer, "Authorization", Canary));
 
         Assert.Equal($"Bearer {Canary}", Assert.Single(applied.Headers["Authorization"]));
+        Assert.DoesNotContain(Canary, Assert.Single(applied.CacheIdentityHeaders!["Authorization"]), StringComparison.Ordinal);
+        Assert.Contains("Authorization", applied.AuthorityRepresentedSensitiveHeaders);
 
         // The deployment supplies the token, not a token plus a scheme word it has to remember.
         Assert.DoesNotContain("Bearer Bearer", applied.Headers["Authorization"][0], StringComparison.Ordinal);
@@ -92,6 +94,12 @@ public sealed class CredentialApplierTests
         Assert.Equal(
             "https://api.example.com/v1/items?page=2&access%20token=a%20b%26c",
             applied.Uri.AbsoluteUri);
+        Assert.DoesNotContain("a%20b%26c", applied.CacheIdentityUri!.AbsoluteUri, StringComparison.Ordinal);
+        Assert.Equal(
+            applied.CacheIdentityUri,
+            Apply(
+                Compiled("https://api.example.com/v1/items?page=2"),
+                Resolved("key", CredentialScheme.ApiKey, "access token", "rotated", CredentialLocation.Query)).CacheIdentityUri);
 
         // Nothing in the query makes a header sensitive, and the applier must not invent one.
         Assert.Empty(applied.SensitiveHeaders);
@@ -124,6 +132,7 @@ public sealed class CredentialApplierTests
         // Merged rather than replacing: the compiled request's cookies come from declared
         // parameters and a credential cookie is an addition to them.
         Assert.Equal($"locale=en; session={Canary}", Assert.Single(applied.Headers["Cookie"]));
+        Assert.DoesNotContain(Canary, Assert.Single(applied.CacheIdentityHeaders!["Cookie"]), StringComparison.Ordinal);
         Assert.Contains("Cookie", applied.SensitiveHeaders);
     }
 

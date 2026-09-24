@@ -2,6 +2,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 
 using MCPiler.Engine.Host.Authorization;
+using MCPiler.Engine.Host.Hosting;
 using MCPiler.Engine.Host.Managed;
 using MCPiler.Engine.Runtime;
 
@@ -110,6 +111,16 @@ public sealed record HostBinding(
     /// </para>
     /// </remarks>
     public IReadOnlyList<string> AllowedOrigins { get; init; } = [];
+
+    /// <summary>
+    /// The dedicated response-cache operator secret, or null when the operator channel is absent.
+    /// </summary>
+    /// <remarks>
+    /// Read once at bind time so a missing or unusable file is a startup refusal rather than a
+    /// failure at the first operator request, and so the secret is held for the process lifetime
+    /// rather than re-read per request. Null means the operator channel is not mapped at all.
+    /// </remarks>
+    public string? ResponseCacheOperatorSecret { get; init; }
 }
 
 /// <summary>How a process decides which Manifests it serves.</summary>
@@ -280,6 +291,37 @@ public static class HostConfiguration
     /// <summary>Host-only shutdown drain window, in positive whole seconds.</summary>
     public const string DrainTimeoutSecondsKey = "drain-timeout-seconds";
 
+    /// <summary>Host-only response-cache body ceiling, in bytes; zero disables caching.</summary>
+    public const string ResponseCacheMaxBodyBytesKey = "response-cache-max-body-bytes";
+
+    /// <summary>Host-only response-cache accounting ceiling per mount, in bytes; zero disables caching.</summary>
+    public const string ResponseCacheMaxRetainedBytesKey = "response-cache-max-retained-bytes";
+
+    /// <summary>Host-only response-cache entry ceiling per mount; zero disables caching.</summary>
+    public const string ResponseCacheMaxEntriesKey = "response-cache-max-entries";
+
+    /// <summary>Host-only effective response-cache TTL ceiling, in seconds; zero disables caching.</summary>
+    public const string ResponseCacheMaxTtlSecondsKey = "response-cache-max-ttl-seconds";
+
+    /// <summary>
+    /// Key naming the file holding the dedicated response-cache operator secret.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The response-cache operator channel is opt-in: without this file the channel is not mapped
+    /// at all, so there is no unauthenticated read or clear route to reach. The secret is Engine's
+    /// own and is deliberately distinct from every MCP caller token, the introspection client
+    /// secret and the managed-deployment secret, because a disclosure of any of those must not
+    /// also grant live cache control.
+    /// </para>
+    /// <para>
+    /// A file rather than a value for the same reason the other secrets are files: a secret on a
+    /// command line is visible to every process listing on the host.
+    /// </para>
+    /// </remarks>
+    public const string ResponseCacheOperatorSecretFileKey = "response-cache-operator-secret-file";
+
+
     /// <summary>Key naming the directory runtime-owned mutable authentication state is kept in.</summary>
     /// <remarks>
     /// A rotating refresh token must survive a restart, and its replacement is provider-
@@ -370,6 +412,11 @@ public static class HostConfiguration
         IntrospectionClientIdKey,
         IntrospectionClientSecretFileKey,
         DrainTimeoutSecondsKey,
+        ResponseCacheMaxBodyBytesKey,
+        ResponseCacheMaxRetainedBytesKey,
+        ResponseCacheMaxEntriesKey,
+        ResponseCacheMaxTtlSecondsKey,
+        ResponseCacheOperatorSecretFileKey,
         RuntimeStateRootKey,
         RuntimeStateKeyFileKey,
         ModeKey,
@@ -441,8 +488,13 @@ public static class HostConfiguration
         string? introspectionClientId = null;
         string? introspectionClientSecretFile = null;
         TimeSpan drainTimeout = HostLifecycleOptions.DefaultDrainTimeout;
+        long? responseCacheBodyBytes = null;
+        long? responseCacheRetainedBytes = null;
+        long? responseCacheEntries = null;
+        long? responseCacheTtlSeconds = null;
         string? runtimeStateRoot = null;
         string? runtimeStateKeyFile = null;
+        string? responseCacheOperatorSecretFile = null;
         HostDeploymentMode mode = HostDeploymentMode.File;
         bool modeExplicit = false;
         string? managementEndpoint = null;
@@ -509,11 +561,46 @@ public static class HostConfiguration
                 case DrainTimeoutSecondsKey:
                     drainTimeout = PositiveWholeSeconds(key, value, rejected);
                     break;
+                case ResponseCacheMaxBodyBytesKey:
+                    responseCacheBodyBytes = NonNegativeCacheCeiling(
+                        key,
+                        value,
+                        ResponseCacheOptions.HardMaxBodyBytes,
+                        "bytes",
+                        rejected);
+                    break;
+                case ResponseCacheMaxRetainedBytesKey:
+                    responseCacheRetainedBytes = NonNegativeCacheCeiling(
+                        key,
+                        value,
+                        ResponseCacheOptions.HardMaxRetainedBytesPerMount,
+                        "bytes per mount",
+                        rejected);
+                    break;
+                case ResponseCacheMaxEntriesKey:
+                    responseCacheEntries = NonNegativeCacheCeiling(
+                        key,
+                        value,
+                        ResponseCacheOptions.HardMaxEntriesPerMount,
+                        "entries per mount",
+                        rejected);
+                    break;
+                case ResponseCacheMaxTtlSecondsKey:
+                    responseCacheTtlSeconds = NonNegativeCacheCeiling(
+                        key,
+                        value,
+                        ResponseCacheOptions.HardMaxTtlSeconds,
+                        "seconds",
+                        rejected);
+                    break;
                 case RuntimeStateRootKey:
                     runtimeStateRoot = value;
                     break;
                 case RuntimeStateKeyFileKey:
                     runtimeStateKeyFile = value;
+                    break;
+                case ResponseCacheOperatorSecretFileKey:
+                    responseCacheOperatorSecretFile = value;
                     break;
                 case ModeKey:
                     if (DeploymentMode(key, value, rejected) is { } parsed)
@@ -569,6 +656,24 @@ public static class HostConfiguration
 
         BindRuntimeState(runtimeStateRoot, runtimeStateKeyFile, rejected);
 
+        // Read now, so an unusable operator secret is a startup refusal rather than a surprise at
+        // the first operator request. An absent setting is not a refusal: it is the opt-out.
+        string? responseCacheOperatorSecret = null;
+        if (responseCacheOperatorSecretFile is not null)
+        {
+            if (ResponseCacheOperatorSecret.TryRead(
+                    responseCacheOperatorSecretFile,
+                    out string readSecret,
+                    out string? operatorSecretRefusal))
+            {
+                responseCacheOperatorSecret = readSecret;
+            }
+            else
+            {
+                rejected.Add(operatorSecretRefusal!);
+            }
+        }
+
         BindDeploymentMode(mode, modeExplicit, mounts.Count, rejected);
 
         ManagedSyncOptions? managed = BindManaged(
@@ -596,6 +701,17 @@ public static class HostConfiguration
             ServedContentRoots = served,
             RuntimeStateRoot = runtimeStateRoot,
             RuntimeStateKeyFile = runtimeStateKeyFile,
+            ResponseCache = ResponseCacheOptions.Default with
+            {
+                MaxBodyBytes = responseCacheBodyBytes ?? ResponseCacheOptions.Default.MaxBodyBytes,
+                MaxRetainedBytesPerMount = responseCacheRetainedBytes ?? ResponseCacheOptions.Default.MaxRetainedBytesPerMount,
+                MaxEntriesPerMount = responseCacheEntries is { } entries
+                    ? checked((int)entries)
+                    : ResponseCacheOptions.Default.MaxEntriesPerMount,
+                MaxTtlSeconds = responseCacheTtlSeconds is { } ttl
+                    ? checked((int)ttl)
+                    : ResponseCacheOptions.Default.MaxTtlSeconds,
+            },
         };
 
         binding = new HostBinding(
@@ -608,6 +724,7 @@ public static class HostConfiguration
             Managed = managed,
             TrustedProxies = trustedProxies,
             AllowedOrigins = allowedOrigins,
+            ResponseCacheOperatorSecret = responseCacheOperatorSecret,
         };
         refusals = [];
         return true;
@@ -1112,5 +1229,30 @@ public static class HostConfiguration
 
         rejected.Add($"'{key}' was given '{value}', which is not a non-negative whole number of seconds.");
         return null;
+    }
+
+    private static long? NonNegativeCacheCeiling(
+        string key,
+        string value,
+        long hardMaximum,
+        string unit,
+        List<string> rejected)
+    {
+        if (!long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out long requested)
+            || requested < 0)
+        {
+            rejected.Add($"'{key}' was given '{value}', which is not a non-negative whole number of {unit}.");
+            return null;
+        }
+
+        if (requested > hardMaximum)
+        {
+            rejected.Add(
+                $"'{key}' was given '{value}', which exceeds the hard response-cache ceiling of "
+                + $"{hardMaximum.ToString(CultureInfo.InvariantCulture)} {unit}. Host configuration may only narrow this ceiling.");
+            return null;
+        }
+
+        return requested;
     }
 }
