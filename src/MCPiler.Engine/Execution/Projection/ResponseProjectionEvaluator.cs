@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text;
 using System.Text.Json.Nodes;
 
@@ -38,7 +37,8 @@ public sealed record ContinuationTarget(
     string Slug,
     string Tool,
     bool NavigatorOnly,
-    string? PathTemplate = null);
+    string? PathTemplate = null,
+    JsonNode? InputSchema = null);
 
 /// <summary>
 /// The serving layer's continuation resolution over one addressed surface.
@@ -153,7 +153,8 @@ internal static class ResponseProjectionEvaluator
         JsonNode? rawBody,
         JsonObject currentArguments,
         IReadOnlySet<string> sensitiveHeaderNames,
-        IContinuationResolver? resolveTarget)
+        IContinuationResolver? resolveTarget,
+        bool? hasFinalBody = null)
     {
         ArgumentNullException.ThrowIfNull(projection);
         ArgumentNullException.ThrowIfNull(headers);
@@ -180,19 +181,29 @@ internal static class ResponseProjectionEvaluator
         }
 
         var envelope = new JsonObject();
-        Assign(envelope, projection.BodyTarget, finalBody?.DeepClone());
+        if ((hasFinalBody ?? (finalBody is not null))
+            && !TryAssign(envelope, projection.BodyTarget, finalBody?.DeepClone()))
+        {
+            diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.ArgumentUnmappable, projection.BodyTarget));
+        }
 
         if (metadata is { Count: > 0 })
         {
             foreach ((string target, JsonNode? value) in metadata)
             {
-                Assign(envelope, target, value);
+                if (!TryAssign(envelope, target, value))
+                {
+                    diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.ArgumentUnmappable, target));
+                }
             }
         }
 
         if (pagination is not null && projection.Pagination is { } paginationPolicy)
         {
-            Assign(envelope, paginationPolicy.Target, pagination);
+            if (!TryAssign(envelope, paginationPolicy.Target, pagination))
+            {
+                diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.ArgumentUnmappable, paginationPolicy.Target));
+            }
         }
 
         return new ResponseProjectionOutcome(envelope, diagnostics);
@@ -706,7 +717,14 @@ internal static class ResponseProjectionEvaluator
             return false;
         }
 
-        Assign(arguments, mapping.Target, converted);
+        if (!TryAssign(arguments, mapping.Target, converted, target.InputSchema))
+        {
+            diagnostics.Add(new ExecutionDiagnostic(
+                ResponseProjectionCodes.ArgumentUnmappable,
+                paginationTarget));
+            return false;
+        }
+
         return true;
     }
 
@@ -800,24 +818,25 @@ internal static class ResponseProjectionEvaluator
         switch (conversion)
         {
             case PaginationConversion.String:
-                return scalar.TryGetValue(out string? text) ? JsonValue.Create(text)
-                    : scalar.TryGetValue(out long integerText)
-                        ? JsonValue.Create(integerText.ToString(CultureInfo.InvariantCulture))
+                return scalar.TryGetValue(out string? text)
+                    ? JsonValue.Create(text)
+                    : JsonNumberConversion.TryGetLexeme(scalar, out var numberText)
+                        ? JsonValue.Create(numberText)
                         : null;
 
             case PaginationConversion.Integer:
-                return scalar.TryGetValue(out long integer) ? JsonValue.Create(integer)
-                    : scalar.TryGetValue(out string? integerLexeme)
-                        && long.TryParse(integerLexeme, NumberStyles.Integer, CultureInfo.InvariantCulture, out long parsedInteger)
-                            ? JsonValue.Create(parsedInteger)
-                            : null;
+                return JsonNumberConversion.TryGetLexeme(scalar, out var integerLexeme)
+                    ? JsonNumberConversion.ParseInteger(integerLexeme)
+                    : scalar.TryGetValue(out string? integerText)
+                        ? JsonNumberConversion.ParseInteger(integerText)
+                        : null;
 
             case PaginationConversion.Number:
-                return scalar.TryGetValue(out double number) ? JsonValue.Create(number)
-                    : scalar.TryGetValue(out string? numberLexeme)
-                        && double.TryParse(numberLexeme, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsedNumber)
-                            ? JsonValue.Create(parsedNumber)
-                            : null;
+                return JsonNumberConversion.TryGetLexeme(scalar, out var numberLexeme)
+                    ? JsonNumberConversion.ParseNumber(numberLexeme)
+                    : scalar.TryGetValue(out string? numberString)
+                        ? JsonNumberConversion.ParseNumber(numberString)
+                        : null;
 
             case PaginationConversion.Boolean:
                 return scalar.TryGetValue(out bool boolean) ? JsonValue.Create(boolean)
@@ -842,13 +861,11 @@ internal static class ResponseProjectionEvaluator
             case PaginationScalarType.String:
                 return ExtractedValue.Of(JsonValue.Create(value), url: null, currentArguments: null);
 
-            case PaginationScalarType.Integer when long.TryParse(
-                value, NumberStyles.Integer, CultureInfo.InvariantCulture, out long integer):
-                return ExtractedValue.Of(JsonValue.Create(integer), url: null, currentArguments: null);
+            case PaginationScalarType.Integer when JsonNumberConversion.ParseInteger(value) is { } integer:
+                return ExtractedValue.Of(integer, url: null, currentArguments: null);
 
-            case PaginationScalarType.Number when double.TryParse(
-                value, NumberStyles.Float, CultureInfo.InvariantCulture, out double number):
-                return ExtractedValue.Of(JsonValue.Create(number), url: null, currentArguments: null);
+            case PaginationScalarType.Number when JsonNumberConversion.ParseNumber(value) is { } number:
+                return ExtractedValue.Of(number, url: null, currentArguments: null);
 
             case PaginationScalarType.Boolean when bool.TryParse(value, out bool boolean):
                 return ExtractedValue.Of(JsonValue.Create(boolean), url: null, currentArguments: null);
@@ -972,7 +989,7 @@ internal static class ResponseProjectionEvaluator
 
         foreach ((string target, JsonNode? value) in produced)
         {
-            Assign(holder, target, value?.DeepClone());
+            _ = TryAssign(holder, target, value?.DeepClone());
         }
 
         return Encoding.UTF8.GetByteCount(holder.ToJsonString());
@@ -981,31 +998,201 @@ internal static class ResponseProjectionEvaluator
     private static int SerializedBytes(JsonNode node)
         => Encoding.UTF8.GetByteCount(node.ToJsonString());
 
-    /// <summary>Writes one value at a non-root RFC 6901 pointer, creating objects on the way.</summary>
-    private static void Assign(JsonObject root, string pointer, JsonNode? value)
+    private static bool TryAssign(
+        JsonObject root,
+        string pointer,
+        JsonNode? value,
+        JsonNode? inputSchema = null)
     {
         string[] tokens = [.. pointer.Split('/').Skip(1).Select(JsonPointer.Unescape)];
-
         if (tokens.Length == 0)
         {
-            return;
+            return false;
         }
 
-        JsonObject current = root;
-
+        JsonNode current = root;
+        JsonNode? currentSchema = inputSchema;
         for (var index = 0; index < tokens.Length - 1; index++)
         {
-            if (current[tokens[index]] is JsonObject existing)
+            string token = tokens[index];
+            if (current is JsonObject currentObject)
             {
-                current = existing;
+                if (currentObject.TryGetPropertyValue(token, out var existing) && existing is not null)
+                {
+                    current = existing;
+                    if (!TryGetChildSchema(currentSchema, token, isArrayToken: false, out currentSchema))
+                    {
+                        return false;
+                    }
+
+                    continue;
+                }
+
+                if (!TryGetChildSchema(currentSchema, token, isArrayToken: false, out var childSchema))
+                {
+                    return false;
+                }
+
+                JsonNode created = IsArraySchema(childSchema)
+                    || childSchema is null && IsArrayIndex(tokens[index + 1])
+                        ? new JsonArray()
+                        : new JsonObject();
+                currentObject[token] = created;
+                current = created;
+                currentSchema = childSchema;
                 continue;
             }
 
-            var created = new JsonObject();
-            current[tokens[index]] = created;
-            current = created;
+            if (current is JsonArray currentArray
+                && TryArrayIndex(token, out var arrayIndex))
+            {
+                while (currentArray.Count <= arrayIndex)
+                {
+                    currentArray.Add(null);
+                }
+
+                if (currentArray[arrayIndex] is not null and not JsonObject and not JsonArray)
+                {
+                    return false;
+                }
+
+                if (!TryGetChildSchema(currentSchema, token, isArrayToken: true, out var itemSchema))
+                {
+                    return false;
+                }
+
+                if (currentArray[arrayIndex] is null)
+                {
+                    currentArray[arrayIndex] = IsArraySchema(itemSchema)
+                        || itemSchema is null && IsArrayIndex(tokens[index + 1])
+                            ? (JsonNode)new JsonArray()
+                            : new JsonObject();
+                }
+
+                current = currentArray[arrayIndex] ?? throw new InvalidOperationException();
+                currentSchema = itemSchema;
+                continue;
+            }
+
+            return false;
         }
 
-        current[tokens[^1]] = value;
+        if (current is JsonObject finalObject)
+        {
+            finalObject[tokens[^1]] = value;
+            return true;
+        }
+
+        if (current is JsonArray finalArray && TryArrayIndex(tokens[^1], out var finalIndex))
+        {
+            while (finalArray.Count <= finalIndex)
+            {
+                finalArray.Add(null);
+            }
+
+            finalArray[finalIndex] = value;
+            return true;
+        }
+
+        return false;
     }
+
+    private static bool TryGetChildSchema(
+        JsonNode? schema,
+        string token,
+        bool isArrayToken,
+        out JsonNode? childSchema)
+    {
+        childSchema = null;
+        if (schema is JsonValue booleanSchema)
+        {
+            return !booleanSchema.TryGetValue<bool>(out var accepts) || accepts;
+        }
+
+        if (schema is not JsonObject schemaObject)
+        {
+            return true;
+        }
+
+        if (isArrayToken)
+        {
+            if (!TryArrayIndex(token, out var index))
+            {
+                return false;
+            }
+
+            if (schemaObject["prefixItems"] is JsonArray prefixItems && index < prefixItems.Count)
+            {
+                childSchema = prefixItems[index];
+            }
+            else if (schemaObject["items"] is JsonValue itemBoolean)
+            {
+                return !itemBoolean.TryGetValue<bool>(out var acceptsItems) || acceptsItems;
+            }
+            else if (schemaObject["items"] is { } items)
+            {
+                childSchema = items;
+            }
+
+            return true;
+        }
+
+        if (schemaObject["properties"] is JsonObject properties
+            && properties.TryGetPropertyValue(token, out var declared))
+        {
+            childSchema = declared;
+            return childSchema is not JsonValue value || !value.TryGetValue<bool>(out var accepts) || accepts;
+        }
+
+        if (schemaObject["additionalProperties"] is JsonValue additional)
+        {
+            return !additional.TryGetValue<bool>(out var allowed) || allowed;
+        }
+
+        if (schemaObject["additionalProperties"] is { } additionalSchema)
+        {
+            childSchema = additionalSchema;
+        }
+
+        return true;
+    }
+
+    private static bool IsArraySchema(JsonNode? schema)
+    {
+        if (schema is not JsonObject schemaObject)
+        {
+            return false;
+        }
+
+        if (schemaObject["type"] is JsonValue typeValue
+            && typeValue.TryGetValue<string>(out var type))
+        {
+            return string.Equals(type, "array", StringComparison.Ordinal)
+                && !string.Equals(type, "object", StringComparison.Ordinal);
+        }
+
+        if (schemaObject["type"] is JsonArray types)
+        {
+            bool acceptsArray = types.OfType<JsonValue>()
+                .Any(value => value.TryGetValue<string>(out var type)
+                    && string.Equals(type, "array", StringComparison.Ordinal));
+            bool acceptsObject = types.OfType<JsonValue>()
+                .Any(value => value.TryGetValue<string>(out var type)
+                    && string.Equals(type, "object", StringComparison.Ordinal));
+            if (acceptsArray || acceptsObject)
+            {
+                return acceptsArray && !acceptsObject;
+            }
+        }
+
+        return schemaObject["items"] is not null || schemaObject["prefixItems"] is JsonArray;
+    }
+
+    private static bool IsArrayIndex(string token)
+        => TryArrayIndex(token, out _);
+
+    private static bool TryArrayIndex(string token, out int index)
+        => int.TryParse(token, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out index)
+            && index >= 0
+            && index.ToString(System.Globalization.CultureInfo.InvariantCulture) == token;
 }

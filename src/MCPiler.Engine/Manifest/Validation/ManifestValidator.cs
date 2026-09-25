@@ -67,10 +67,6 @@ public static class ManifestValidator
     /// hand-authorable, and a defect here would serve a continuation naming a tool the caller
     /// cannot invoke.
     /// </para>
-    /// <para>
-    /// A self-continuation needs none of this: the target is the invoking operation, and the
-    /// caller's own surface grant is what admitted it.
-    /// </para>
     /// </remarks>
     private static void ValidateOutputProjections(ManifestDocument manifest, List<ManifestDiagnostic> diagnostics)
     {
@@ -140,7 +136,7 @@ public static class ManifestValidator
                 continue;
             }
 
-            ValidateProjectionMappings(operation, target, pagination, index, diagnostics);
+            ValidateProjectionMappings(operation, target, pagination, index, schemaResolver, diagnostics);
             ValidateProjectionReachability(manifest, operation, nextSlug, index, diagnostics);
         }
     }
@@ -155,17 +151,25 @@ public static class ManifestValidator
         string nextSlug,
         int operationIndex,
         List<ManifestDiagnostic> diagnostics)
-    {        for (int surfaceIndex = 0; surfaceIndex < manifest.Server.Surfaces.Count; surfaceIndex++)
+    {
+        for (int surfaceIndex = 0; surfaceIndex < manifest.Server.Surfaces.Count; surfaceIndex++)
         {
             ManifestSurface surface = manifest.Server.Surfaces[surfaceIndex];
 
-            if (!surface.Enabled
-                || surface.ExposureOf(operation.Slug) is not (OperationExposure.Direct or OperationExposure.Navigator))
+            OperationExposure? sourceExposure = surface.ExposureOf(operation.Slug);
+            bool sourceReachable = sourceExposure is OperationExposure.Direct
+                || sourceExposure is OperationExposure.Navigator && surface.EffectiveNavigator.Enabled;
+
+            if (!surface.Enabled || !sourceReachable)
             {
                 continue;
             }
 
-            if (surface.InvocationAllowed(nextSlug))
+            OperationExposure? targetExposure = surface.ExposureOf(nextSlug);
+            bool targetReachable = targetExposure is OperationExposure.Direct
+                || targetExposure is OperationExposure.Navigator && surface.EffectiveNavigator.Enabled;
+
+            if (targetReachable)
             {
                 continue;
             }
@@ -180,12 +184,12 @@ public static class ManifestValidator
                 pointer: JsonPointer.Build("surfaces", Segment(surfaceIndex), "operations")));
         }
     }
-
     private static void ValidateProjectionMappings(
         AgentOperationEntry operation,
         AgentOperationEntry target,
         PaginationPolicy pagination,
         int operationIndex,
+        SchemaReferenceResolver? schemaResolver,
         List<ManifestDiagnostic> diagnostics)
     {
         string pointer = JsonPointer.Build(
@@ -195,92 +199,259 @@ public static class ManifestValidator
             "pagination",
             "nextArguments");
 
-        HashSet<string> mapped = new(StringComparer.Ordinal);
-        HashSet<string> properties = InputProperties(target);
+        HashSet<string> mappedPaths = new(StringComparer.Ordinal);
+        HashSet<string> requiredPaths = new(StringComparer.Ordinal);
 
         foreach (PaginationArgumentMapping mapping in pagination.NextArguments)
         {
-            if (mapping.Target.Length == 0 || mapping.Target[0] != '/'
-                || mapping.Target[1..].Contains('/', StringComparison.Ordinal))
+            if (TryResolveInputPath(
+                target.InputSchema,
+                mapping.Target,
+                schemaResolver,
+                requiredPaths,
+                out string error))
+            {
+                mappedPaths.Add(mapping.Target);
+            }
+            else
             {
                 diagnostics.Add(ManifestDiagnostic.Error(
                     ManifestDiagnosticCodes.ProjectionMappingInvalid,
-                    $"Mapping target '{DiagnosticText.Echo(mapping.Target)}' does not name one " +
-                    $"top-level input of '{DiagnosticText.Echo(target.Slug)}'.",
+                    $"Mapping target '{DiagnosticText.Echo(mapping.Target)}' is not representable in "
+                    + $"the input schema of '{DiagnosticText.Echo(target.Slug)}': {DiagnosticText.Echo(error)}",
                     section: ManifestSectionName.AgentSurface,
                     pointer: pointer));
+            }
+        }
+
+        foreach (string requiredPath in requiredPaths.OrderBy(path => path, StringComparer.Ordinal))
+        {
+            if (mappedPaths.Any(path =>
+                string.Equals(path, requiredPath, StringComparison.Ordinal)
+                || path.StartsWith(requiredPath + "/", StringComparison.Ordinal)))
+            {
                 continue;
             }
 
-            string name = JsonPointer.Unescape(mapping.Target[1..]);
-            mapped.Add(name);
+            diagnostics.Add(ManifestDiagnostic.Error(
+                ManifestDiagnosticCodes.ProjectionMappingIncomplete,
+                $"The policy does not map required input '{DiagnosticText.Echo(requiredPath)}' of "
+                + $"'{DiagnosticText.Echo(target.Slug)}'. A continuation that omits it is not callable.",
+                section: ManifestSectionName.AgentSurface,
+                pointer: pointer));
+        }
+    }
 
-            if (!properties.Contains(name))
-            {
-                diagnostics.Add(ManifestDiagnostic.Error(
-                    ManifestDiagnosticCodes.ProjectionMappingInvalid,
-                    $"Mapping target '{DiagnosticText.Echo(mapping.Target)}' is absent from the " +
-                    $"input schema of '{DiagnosticText.Echo(target.Slug)}'.",
-                    section: ManifestSectionName.AgentSurface,
-                    pointer: pointer));
-            }
+    private static bool TryResolveInputPath(
+        ManifestSchema? root,
+        string pointer,
+        SchemaReferenceResolver? resolver,
+        HashSet<string> requiredPaths,
+        out string error)
+    {
+        error = string.Empty;
+        if (root is null || !JsonPointer.IsSyntacticallyValid(pointer) || pointer.Length == 0)
+        {
+            error = "the mapping target must be a non-root RFC 6901 pointer.";
+            return false;
         }
 
-        if (RequiredInputs(target) is not { Count: > 0 } required)
+        if (!TryResolveSchema(root, resolver, out ManifestSchema current))
+        {
+            error = "the input schema reference cannot be resolved.";
+            return false;
+        }
+
+        string currentPath = string.Empty;
+        CollectRequiredPaths(current, currentPath, resolver, requiredPaths);
+        foreach (string raw in pointer[1..].Split('/'))
+        {
+            string token = JsonPointer.Unescape(raw);
+            if (current.IsBoolean)
+            {
+                error = "an intermediate boolean schema cannot be traversed.";
+                return false;
+            }
+
+            if (AcceptsType(current, "array") && !AcceptsType(current, "object"))
+            {
+                if (!int.TryParse(token, NumberStyles.None, CultureInfo.InvariantCulture, out int index)
+                    || index < 0
+                    || index.ToString(CultureInfo.InvariantCulture) != token)
+                {
+                    error = "an array path segment is not a canonical non-negative index.";
+                    return false;
+                }
+
+                ManifestSchema? item = null;
+                if (current.Object?["prefixItems"] is JsonArray prefixItems && index < prefixItems.Count)
+                {
+                    item = ManifestSchema.FromOrNull(prefixItems[index]);
+                }
+                else if (current.Object?["items"] is JsonValue itemBoolean
+                    && itemBoolean.TryGetValue<bool>(out bool acceptsItems))
+                {
+                    if (!acceptsItems)
+                    {
+                        error = "the array does not contain this index.";
+                        return false;
+                    }
+
+                    item = ManifestSchema.From(new JsonObject());
+                }
+                else if (current.Object?["items"] is { } items && items is not JsonValue)
+                {
+                    item = ManifestSchema.FromOrNull(items);
+                }
+                else
+                {
+                    item = ManifestSchema.From(new JsonObject());
+                }
+
+                if (item is null || !TryResolveSchema(item, resolver, out current))
+                {
+                    error = "the array item schema is not statically representable at this index.";
+                    return false;
+                }
+
+                if (current.IsBoolean)
+                {
+                    if (current.Node is JsonValue booleanValue
+                        && booleanValue.TryGetValue<bool>(out var accepts)
+                        && !accepts)
+                    {
+                        error = "the array item schema is explicitly rejected.";
+                        return false;
+                    }
+
+                    current = ManifestSchema.From(new JsonObject());
+                }
+
+                currentPath += "/" + token;
+                CollectRequiredPaths(current, currentPath, resolver, requiredPaths);
+                continue;
+            }
+
+            if (current.Object?["properties"] is JsonObject properties
+                && properties.TryGetPropertyValue(token, out var declared))
+            {
+                if (declared is null)
+                {
+                    error = "the declared child schema is null.";
+                    return false;
+                }
+
+                current = ManifestSchema.From(declared);
+            }
+            else if (current.Object?["additionalProperties"] is JsonValue additional
+                && additional.TryGetValue<bool>(out bool allowed)
+                && !allowed)
+            {
+                error = $"'{token}' is not declared and additional properties are closed.";
+                return false;
+            }
+            else if (current.Object?["additionalProperties"] is { } additionalSchema
+                && additionalSchema is not JsonValue)
+            {
+                current = ManifestSchema.From(additionalSchema);
+            }
+            else if (current.Object?["additionalProperties"] is JsonValue open
+                && open.TryGetValue<bool>(out bool openAllowed)
+                && openAllowed)
+            {
+                current = ManifestSchema.From(new JsonObject());
+            }
+            else
+            {
+                error = $"'{token}' is not declared in the target schema.";
+                return false;
+            }
+
+            if (current.IsBoolean)
+            {
+                if (current.Node is JsonValue booleanValue
+                    && booleanValue.TryGetValue<bool>(out var accepts)
+                    && !accepts)
+                {
+                    error = $"'{token}' is explicitly rejected.";
+                    return false;
+                }
+
+                current = ManifestSchema.From(new JsonObject());
+            }
+
+            if (!TryResolveSchema(current, resolver, out current))
+            {
+                error = "the child schema reference cannot be resolved.";
+                return false;
+            }
+
+            currentPath += "/" + JsonPointer.Escape(token);
+            CollectRequiredPaths(current, currentPath, resolver, requiredPaths);
+        }
+
+        return true;
+    }
+
+    private static bool AcceptsType(ManifestSchema schema, string type)
+    {
+        if (schema.Object?["type"] is JsonValue value
+            && value.TryGetValue<string>(out var declared))
+        {
+            return string.Equals(declared, type, StringComparison.Ordinal);
+        }
+
+        if (schema.Object?["type"] is JsonArray union)
+        {
+            return union.OfType<JsonValue>().Any(value =>
+                value.TryGetValue<string>(out var declared)
+                && string.Equals(declared, type, StringComparison.Ordinal));
+        }
+
+        return true;
+    }
+
+    private static bool TryResolveSchema(
+        ManifestSchema schema,
+        SchemaReferenceResolver? resolver,
+        out ManifestSchema resolved)
+    {
+        if (!schema.IsReference)
+        {
+            resolved = schema;
+            return true;
+        }
+
+        if (resolver is null)
+        {
+            resolved = schema;
+            return false;
+        }
+
+        return resolver.TryResolve(schema, out resolved, out _);
+    }
+
+    private static void CollectRequiredPaths(
+        ManifestSchema schema,
+        string path,
+        SchemaReferenceResolver? resolver,
+        HashSet<string> requiredPaths)
+    {
+        if (!TryResolveSchema(schema, resolver, out ManifestSchema resolved)
+            || resolved.Object?["required"] is not JsonArray required)
         {
             return;
         }
-
-        foreach (string name in required)
-        {
-            if (!mapped.Contains(name))
-            {
-                diagnostics.Add(ManifestDiagnostic.Error(
-                    ManifestDiagnosticCodes.ProjectionMappingIncomplete,
-                    $"The policy does not map required input '{DiagnosticText.Echo(name)}' of " +
-                    $"'{DiagnosticText.Echo(target.Slug)}'. A continuation that omits it is not callable.",
-                    section: ManifestSectionName.AgentSurface,
-                    pointer: pointer));
-            }
-        }
-    }
-
-    private static HashSet<string> InputProperties(AgentOperationEntry operation)
-    {
-        HashSet<string> properties = new(StringComparer.Ordinal);
-
-        if (operation.InputSchema?.Object?["properties"] is not JsonObject declared)
-        {
-            return properties;
-        }
-
-        foreach ((string name, _) in declared)
-        {
-            properties.Add(name);
-        }
-
-        return properties;
-    }
-
-    private static List<string>? RequiredInputs(AgentOperationEntry operation)
-    {
-        if (operation.InputSchema?.Object?["required"] is not JsonArray required)
-        {
-            return null;
-        }
-
-        List<string> names = [];
 
         foreach (JsonNode? item in required)
         {
             if (item is JsonValue value && value.TryGetValue<string>(out string? name))
             {
-                names.Add(name);
+                requiredPaths.Add(path + "/" + JsonPointer.Escape(name));
             }
         }
-
-        return names;
     }
+
 
     /// <summary>
     /// Authentication profile identity, credential references, and kind compatibility.

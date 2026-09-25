@@ -189,6 +189,87 @@ public sealed class ResponseProjectionValidationTests
     }
 
     [Fact]
+    public void Nested_target_pointer_is_checked_against_the_target_input_schema()
+    {
+        var nested = ManifestSchema.From(new JsonObject
+        {
+            ["type"] = "object",
+            ["properties"] = new JsonObject
+            {
+                ["pagination"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["cursor"] = new JsonObject { ["type"] = "string" },
+                    },
+                    ["required"] = new JsonArray("cursor"),
+                },
+            },
+            ["required"] = new JsonArray("pagination"),
+        });
+        var operations = new List<AgentOperationEntry>
+        {
+            new(
+                Slug: "list-items",
+                Name: "List items",
+                Binding: new HttpBinding("GET /items"),
+                OutputProjection: Projection("items-page", "/pagination/cursor")),
+            new(
+                Slug: "items-page",
+                Name: "Items page",
+                Binding: new HttpBinding("GET /page"),
+                InputSchema: nested),
+        };
+
+        var codes = ErrorCodes(Build(operations: operations));
+
+        Assert.DoesNotContain(ManifestDiagnosticCodes.ProjectionMappingInvalid, codes);
+        Assert.DoesNotContain(ManifestDiagnosticCodes.ProjectionMappingIncomplete, codes);
+    }
+
+    [Fact]
+    public void Escaped_nested_target_members_are_resolved_against_the_target_schema()
+    {
+        var targetSchema = ManifestSchema.From(new JsonObject
+        {
+            ["type"] = "object",
+            ["properties"] = new JsonObject
+            {
+                ["filters"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["a/b"] = new JsonObject
+                        {
+                            ["type"] = "object",
+                            ["properties"] = new JsonObject { ["value"] = new JsonObject { ["type"] = "string" } },
+                        },
+                    },
+                },
+            },
+        });
+        var operations = new List<AgentOperationEntry>
+        {
+            new(
+                Slug: "list-items",
+                Name: "List items",
+                Binding: new HttpBinding("GET /items"),
+                OutputProjection: Projection("items-page", "/filters/a~1b/value")),
+            new(
+                Slug: "items-page",
+                Name: "Items page",
+                Binding: new HttpBinding("GET /page"),
+                InputSchema: targetSchema),
+        };
+
+        var codes = ErrorCodes(Build(operations: operations));
+
+        Assert.DoesNotContain(ManifestDiagnosticCodes.ProjectionMappingInvalid, codes);
+    }
+
+    [Fact]
     public void A_surface_publishing_the_source_without_reaching_the_target_is_refused()
     {
         var manifest = Build(
@@ -196,6 +277,19 @@ public sealed class ResponseProjectionValidationTests
             [
                 new SurfaceOperation("list-items", OperationExposure.Direct),
                 new SurfaceOperation("items-page", OperationExposure.Hidden),
+            ]);
+
+        Assert.Contains(ManifestDiagnosticCodes.ProjectionTargetUnreachable, ErrorCodes(manifest));
+    }
+
+    [Fact]
+    public void A_navigator_exposure_without_enabled_navigator_is_unreachable()
+    {
+        var manifest = Build(
+            surfaceOperations:
+            [
+                new SurfaceOperation("list-items", OperationExposure.Direct),
+                new SurfaceOperation("items-page", OperationExposure.Navigator),
             ]);
 
         Assert.Contains(ManifestDiagnosticCodes.ProjectionTargetUnreachable, ErrorCodes(manifest));

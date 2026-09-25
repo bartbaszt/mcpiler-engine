@@ -7,7 +7,7 @@
   "required": ["operations"],
   "additionalProperties": false,
   "properties": {
-    "formatVersion": { "const": 4 },
+    "formatVersion": { "const": 5, "description": "Version 5 retains version 4 responseCache and adds outputProjection." },
     "groups": {
       "type": "array",
       "items": { "$ref": "#/$defs/group" }

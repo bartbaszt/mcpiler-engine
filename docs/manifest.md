@@ -416,6 +416,8 @@ null"; and numeric bounds keep their original lexical token.
 
 ### `agentSurface`
 
+Format version 5 retains version 4's optional per-operation `responseCache` member and adds `outputProjection` for response metadata and pagination.
+
 The operations as an agent sees them.
 
 Each entry carries `slug` (unique, and the reference key used by surface exposure
@@ -762,7 +764,7 @@ described.
 
 **Engine declares an explicit supported range.** This Engine supports manifest
 format `0.3`. Section versions are not uniform, because they move
-independently: `agentSurface` is at `4`, `credentials` is at `4`, `authentication`
+independently: `agentSurface` is at `5`, `credentials` is at `4`, `authentication`
 is at `2`, while `server`, `policy`, `operations`, `tools` and `search` are still
 at `1`. A section that omits `formatVersion` is accepted at whatever version this
 Engine supports for it. A refusal always names the version observed and the range

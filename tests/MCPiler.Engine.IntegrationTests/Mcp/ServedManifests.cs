@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.IO;
+using System.Text.Json.Nodes;
 using Xunit;
 
 namespace MCPiler.Engine.IntegrationTests.Mcp;
@@ -576,13 +577,6 @@ internal static class ServedManifests
                           { "operation": "list-pets" },
                           { "operation": "get-pet", "exposure": "navigator" }
                         ]
-                      },
-                      {
-                        "slug": "nodirect",
-                        "operations": [
-                          { "operation": "list-pets" },
-                          { "operation": "get-pet", "exposure": "navigator" }
-                        ]
                       }
                     ]
                   }
@@ -608,8 +602,8 @@ internal static class ServedManifests
                 },
                 "agentSurface": {
                   "inline": {
-                    "formatVersion": 4,
-                    "operations": [
+                     "formatVersion": 5,
+                     "operations": [
                       {
                         "slug": "list-pets",
                         "name": "List pets",
@@ -651,6 +645,23 @@ internal static class ServedManifests
               }
             }
             """;
+    }
+
+    public static string PaginatingWithUnreachableTarget(Uri upstream)
+    {
+        var root = JsonNode.Parse(Paginating(upstream))!.AsObject();
+        var surfaces = root["sections"]!["server"]!["inline"]!["surfaces"]!.AsArray();
+        surfaces.Insert(1, new JsonObject
+        {
+            ["slug"] = "nodirect",
+            ["operations"] = new JsonArray
+            {
+                new JsonObject { ["operation"] = "list-pets" },
+                new JsonObject { ["operation"] = "get-pet", ["exposure"] = "navigator" },
+            },
+        });
+
+        return root.ToJsonString();
     }
 
     /// <summary>Writes <paramref name="manifest"/> into a fresh bundle directory.</summary>

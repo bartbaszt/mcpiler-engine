@@ -422,7 +422,7 @@ public sealed class ToolsCallTests : IDisposable
     }
 
     [Fact]
-    public async Task A_target_the_surface_cannot_call_is_unavailable_rather_than_emitted()
+    public async Task A_target_the_surface_cannot_call_is_refused_before_serving()
     {
         List<string> received = [];
 
@@ -433,16 +433,11 @@ public sealed class ToolsCallTests : IDisposable
             """{"id":"p-7"}""",
             extraHeaders: [("Link", "</pets/p-7>; rel=\"next\"")]);
 
-        await using var engine = await ServePaginatingAsync(upstream.Address);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => ServePaginatingAsync(upstream.Address, includeUnreachableTarget: true));
 
-        // 'nodirect' exposes 'get-pet' only through the Navigator and leaves the Navigator off,
-        // so the static reachability table is satisfied while no callable name exists.
-        using var session = await McpHttpSession.OpenAsync(engine.At("api/nodirect"), Token);
-
-        var call = await session.CallAsync("list-pets", """{"status":"available"}""", 2, Token);
-
-        Assert.Equal("unavailable", Pagination(call)["state"]!.GetValue<string>());
-        Assert.Equal(["GET /pets?status=available"], received);
+        Assert.Contains("agent/projection-target-unreachable", error.Message, StringComparison.Ordinal);
+        Assert.Empty(received);
     }
 
     [Fact]
@@ -522,12 +517,15 @@ public sealed class ToolsCallTests : IDisposable
             connections);
     }
 
-    private async Task<ServedEngine> ServePaginatingAsync(Uri upstream)
+    private async Task<ServedEngine> ServePaginatingAsync(Uri upstream, bool includeUnreachableTarget = false)
     {
         string root = Path.Combine(Path.GetTempPath(), "mcpiler-call-" + Guid.NewGuid().ToString("N"));
         _roots.Add(root);
 
-        string bundle = ServedManifests.Write(root, "pets", ServedManifests.Paginating(upstream));
+        string manifest = includeUnreachableTarget
+            ? ServedManifests.PaginatingWithUnreachableTarget(upstream)
+            : ServedManifests.Paginating(upstream);
+        string bundle = ServedManifests.Write(root, "pets", manifest);
         string files = Directory.CreateDirectory(Path.Combine(root, "files")).FullName;
 
         return await ServedEngine.StartAsync(

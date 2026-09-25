@@ -322,6 +322,166 @@ public sealed class ResponseProjectionEvaluatorTests
     }
 
     [Fact]
+    public void Nested_target_arguments_are_assembled_with_rfc6901_segments()
+    {
+        var projection = new AgentOutputProjection(
+            "/data",
+            [],
+            new PaginationPolicy(
+                "/pagination",
+                new ResponseHeaderPaginationSource("x-next-cursor", PaginationScalarType.String),
+                "list_items_page",
+                [new PaginationArgumentMapping(
+                    "/pagination/cursor", new ExtractedPaginationArgument(), PaginationConversion.String)],
+                ExposeUrl: false,
+                LinkRelations: []));
+
+        ResponseProjectionOutcome outcome = ResponseProjectionEvaluator.Evaluate(
+            projection, 200, Headers(("X-Next-Cursor", ["c-nested"])), Effective,
+            new JsonObject(), rawBody: null, Arguments(), NoSensitiveHeaders,
+            new SelfResolver("list_items_page"));
+
+        var next = Assert.IsType<JsonObject>(Assert.IsType<JsonObject>(outcome.Value)["pagination"])["next"]!;
+        var arguments = Assert.IsType<JsonObject>(next["arguments"]);
+        var pagination = Assert.IsType<JsonObject>(arguments["pagination"]);
+
+        Assert.Equal("c-nested", pagination["cursor"]!.GetValue<string>());
+        Assert.Empty(outcome.Diagnostics);
+    }
+
+    [Fact]
+    public void Numeric_object_members_use_the_target_schema_instead_of_becoming_arrays()
+    {
+        var schema = new JsonObject
+        {
+            ["type"] = "object",
+            ["properties"] = new JsonObject
+            {
+                ["filters"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["0"] = new JsonObject
+                        {
+                            ["type"] = "object",
+                            ["properties"] = new JsonObject { ["value"] = new JsonObject { ["type"] = "string" } },
+                        },
+                    },
+                },
+            },
+        };
+        var projection = new AgentOutputProjection(
+            "/data",
+            [],
+            new PaginationPolicy(
+                "/pagination",
+                new ResponseHeaderPaginationSource("x-next-cursor", PaginationScalarType.String),
+                "list_items_page",
+                [new PaginationArgumentMapping(
+                    "/filters/0/value", new ExtractedPaginationArgument(), PaginationConversion.String)],
+                ExposeUrl: false,
+                LinkRelations: []));
+
+        ResponseProjectionOutcome outcome = ResponseProjectionEvaluator.Evaluate(
+            projection, 200, Headers(("X-Next-Cursor", ["c-nested"])), Effective,
+            new JsonObject(), rawBody: null, Arguments(), NoSensitiveHeaders,
+            new SelfResolver("list_items_page", schema));
+
+        var arguments = Assert.IsType<JsonObject>(
+            Assert.IsType<JsonObject>(Assert.IsType<JsonObject>(outcome.Value)["pagination"])["next"]!["arguments"]!);
+        var filters = Assert.IsType<JsonObject>(arguments["filters"]);
+        Assert.Equal("c-nested", Assert.IsType<JsonObject>(filters["0"])["value"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void Array_members_use_the_target_schema_when_assembled_from_a_missing_container()
+    {
+        var schema = new JsonObject
+        {
+            ["type"] = "object",
+            ["properties"] = new JsonObject
+            {
+                ["rows"] = new JsonObject
+                {
+                    ["type"] = "array",
+                    ["items"] = new JsonObject
+                    {
+                        ["type"] = "object",
+                        ["properties"] = new JsonObject { ["value"] = new JsonObject { ["type"] = "string" } },
+                    },
+                },
+            },
+        };
+        var projection = new AgentOutputProjection(
+            "/data",
+            [],
+            new PaginationPolicy(
+                "/pagination",
+                new ResponseHeaderPaginationSource("x-next-cursor", PaginationScalarType.String),
+                "list_items_page",
+                [new PaginationArgumentMapping(
+                    "/rows/0/value", new ExtractedPaginationArgument(), PaginationConversion.String)],
+                ExposeUrl: false,
+                LinkRelations: []));
+
+        ResponseProjectionOutcome outcome = ResponseProjectionEvaluator.Evaluate(
+            projection, 200, Headers(("X-Next-Cursor", ["c-nested"])), Effective,
+            new JsonObject(), rawBody: null, Arguments(), NoSensitiveHeaders,
+            new SelfResolver("list_items_page", schema));
+
+        var arguments = Assert.IsType<JsonObject>(
+            Assert.IsType<JsonObject>(Assert.IsType<JsonObject>(outcome.Value)["pagination"])["next"]!["arguments"]!);
+        var rows = Assert.IsType<JsonArray>(arguments["rows"]);
+        Assert.Equal("c-nested", Assert.IsType<JsonObject>(rows[0])["value"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void Escaped_target_segments_address_object_members_by_their_decoded_names()
+    {
+        var schema = new JsonObject
+        {
+            ["type"] = "object",
+            ["properties"] = new JsonObject
+            {
+                ["filters"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["a/b"] = new JsonObject
+                        {
+                            ["type"] = "object",
+                            ["properties"] = new JsonObject { ["value"] = new JsonObject { ["type"] = "string" } },
+                        },
+                    },
+                },
+            },
+        };
+        var projection = new AgentOutputProjection(
+            "/data",
+            [],
+            new PaginationPolicy(
+                "/pagination",
+                new ResponseHeaderPaginationSource("x-next-cursor", PaginationScalarType.String),
+                "list_items_page",
+                [new PaginationArgumentMapping(
+                    "/filters/a~1b/value", new ExtractedPaginationArgument(), PaginationConversion.String)],
+                ExposeUrl: false,
+                LinkRelations: []));
+
+        ResponseProjectionOutcome outcome = ResponseProjectionEvaluator.Evaluate(
+            projection, 200, Headers(("X-Next-Cursor", ["c-nested"])), Effective,
+            new JsonObject(), rawBody: null, Arguments(), NoSensitiveHeaders,
+            new SelfResolver("list_items_page", schema));
+
+        var arguments = Assert.IsType<JsonObject>(
+            Assert.IsType<JsonObject>(Assert.IsType<JsonObject>(outcome.Value)["pagination"])["next"]!["arguments"]!);
+        var filters = Assert.IsType<JsonObject>(arguments["filters"]);
+        Assert.Equal("c-nested", Assert.IsType<JsonObject>(filters["a/b"])["value"]!.GetValue<string>());
+    }
+
+    [Fact]
     public void A_navigator_only_target_is_wrapped_in_the_navigator_payload()
     {
         var projection = new AgentOutputProjection(
@@ -595,7 +755,7 @@ public sealed class ResponseProjectionEvaluatorTests
     }
 
     [Fact]
-    public void Missing_body_target_still_projects_metadata()
+    public void An_absent_body_is_omitted_while_metadata_is_projected()
     {
         var projection = new AgentOutputProjection(
             "/data",
@@ -603,12 +763,16 @@ public sealed class ResponseProjectionEvaluatorTests
 
         ResponseProjectionOutcome outcome = ResponseProjectionEvaluator.Evaluate(
             projection, 200, Headers(("ETag", ["v"]), ("Server", ["s"])), Effective,
-            finalBody: null, rawBody: null, Arguments(), NoSensitiveHeaders, resolveTarget: null);
+            finalBody: null,
+            rawBody: null,
+            Arguments(),
+            NoSensitiveHeaders,
+            resolveTarget: null,
+            hasFinalBody: false);
 
         var value = Assert.IsType<JsonObject>(outcome.Value);
 
-        Assert.True(value.ContainsKey("data"));
-        Assert.Null(value["data"]);
+        Assert.False(value.ContainsKey("data"));
         Assert.Equal(200, Assert.IsType<JsonObject>(value["metadata"])["status"]!.GetValue<int>());
     }
 
@@ -656,10 +820,10 @@ public sealed class ResponseProjectionEvaluatorTests
     }
 
     /// <summary>A resolver that reports a self-continuation as a Direct callable.</summary>
-    private sealed class SelfResolver(string slug) : IContinuationResolver
+    private sealed class SelfResolver(string slug, JsonNode? inputSchema = null) : IContinuationResolver
     {
         public ContinuationTarget? Resolve(string _1, ICollection<ExecutionDiagnostic> _2)
-            => new(slug, slug, NavigatorOnly: false);
+            => new(slug, slug, NavigatorOnly: false, InputSchema: inputSchema);
 
         public bool ValidateArguments(ContinuationTarget _, JsonObject _1, ICollection<ExecutionDiagnostic> _2)
             => true;

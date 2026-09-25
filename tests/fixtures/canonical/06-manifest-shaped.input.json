@@ -34,7 +34,7 @@
     },
     "agentSurface": {
       "inline": {
-        "formatVersion": 4,
+        "formatVersion": 5,
         "components": {
           "schemas": {
             "Error": {

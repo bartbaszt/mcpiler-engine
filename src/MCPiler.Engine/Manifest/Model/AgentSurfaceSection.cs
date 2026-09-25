@@ -18,11 +18,12 @@ public sealed record AgentSurfaceSection(
     /// <remarks>
     /// Version 2 added the credential scope an <c>http</c> binding authorizes. Version 3 adds
     /// the authentication profile reference an <c>http</c> binding names. Version 4 adds the
-    /// optional reviewed output projection and dedicated pagination policy. The
-    /// section version moved rather than only the root version because each change is confined
-    /// to this section's payload.
+    /// optional per-operation response cache. Version 5 retains that policy and adds the
+    /// optional reviewed output projection and dedicated pagination policy. The section
+    /// version moved rather than only the root version because each change is confined to this
+    /// section's payload.
     /// </remarks>
-    public const int FormatVersion = 4;
+    public const int FormatVersion = 5;
 
     /// <summary>The declared operations, never null.</summary>
     public IReadOnlyList<AgentOperationEntry> Operations { get; init; } = Operations ?? [];

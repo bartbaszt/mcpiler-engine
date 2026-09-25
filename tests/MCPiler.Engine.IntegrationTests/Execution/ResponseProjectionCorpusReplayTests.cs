@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 
 using MCPiler.Engine.Execution;
@@ -169,14 +170,16 @@ public sealed class ResponseProjectionCorpusReplayTests
             return $"{id}: the Manifest declares no operation '{operationSlug}'.";
         }
 
-        JsonObject response = Resolve(@case["response"]!.AsObject())!.AsObject();
-        JsonObject body = response["body"]?.AsObject() ?? [];
+        JsonObject responseSpec = @case["response"]!.AsObject();
+        CorpusBody body = ResolveBody(responseSpec["body"]);
+        JsonObject response = Resolve(responseSpec)!.AsObject();
+        response["body"] = body.Value;
 
         if (operation.OutputProjection is not { } projection)
         {
             // A case without a projection is a legacy case: the runtime returns the body it read
             // and nothing else, exactly as it did before projection existed.
-            JsonNode? legacy = body.DeepClone();
+            JsonNode? legacy = body.Value?.DeepClone();
             JsonNode expectedLegacy = expected["result"]!;
 
             return CanonicalJson.Serialize(legacy).AsSpan().SequenceEqual(CanonicalJson.Serialize(expectedLegacy))
@@ -207,7 +210,7 @@ public sealed class ResponseProjectionCorpusReplayTests
             ResponseEffectiveUri = response["effectiveUri"]?.GetValue<string>() is { } effective
                 ? new Uri(effective)
                 : null,
-            ResponseBody = System.Text.Encoding.UTF8.GetBytes(body.ToJsonString()),
+            ResponseBody = body.Bytes,
         };
 
         if (!TransformStage.TryOutput(manifest, operation, execution, out byte[]? transformed, out string? transformFailure))
@@ -216,8 +219,11 @@ public sealed class ResponseProjectionCorpusReplayTests
         }
 
         JsonNode? finalBody = transformed is null
-            ? body.DeepClone()
-            : JsonNode.Parse(System.Text.Encoding.UTF8.GetString(transformed));
+            ? body.Value?.DeepClone()
+            : ParseBody(transformed);
+        bool hasFinalBody = transformed is not null
+            ? transformed.Length > 0
+            : body.HasBody;
 
         ResponseProjectionOutcome outcome = ResponseProjectionEvaluator.Evaluate(
             projection,
@@ -225,10 +231,11 @@ public sealed class ResponseProjectionCorpusReplayTests
             Headers(response),
             response["effectiveUri"]?.GetValue<string>() is { } uri ? new Uri(uri) : null,
             finalBody: finalBody?.DeepClone(),
-            rawBody: body.DeepClone(),
+            rawBody: body.Value?.DeepClone(),
             currentArguments: arguments,
             sensitiveHeaderNames: NoSensitiveNames,
-            resolveTarget: new SurfaceContinuationResolver(manifest, mount, mounted, operationSlug));
+            resolveTarget: new SurfaceContinuationResolver(manifest, mount, mounted, operationSlug),
+            hasFinalBody: hasFinalBody);
 
         JsonNode expectedValue = Resolve(expected["result"]!)!;
         string[] expectedDiagnostics = [.. (expected["diagnostics"]?.AsArray() ?? [])
@@ -276,6 +283,39 @@ public sealed class ResponseProjectionCorpusReplayTests
         JsonArray array => ResolvedArray(array),
         _ => node?.DeepClone(),
     };
+
+    private static CorpusBody ResolveBody(JsonNode? node)
+    {
+        if (node is not JsonObject root || root["$rawBody"] is not JsonObject directive)
+        {
+            JsonNode? value = Resolve(node);
+            byte[]? bytes = value is null
+                ? null
+                : System.Text.Encoding.UTF8.GetBytes(value.ToJsonString());
+            return new CorpusBody(value, bytes, bytes is { Length: > 0 });
+        }
+
+        string text = Resolve(directive["text"])!.GetValue<string>();
+        byte[] rawBytes = System.Text.Encoding.UTF8.GetBytes(text);
+        return new CorpusBody(ParseBody(rawBytes), rawBytes, rawBytes.Length > 0);
+    }
+
+    private static JsonNode? ParseBody(byte[]? body)
+    {
+        if (body is null || body.Length == 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonNode.Parse(body);
+        }
+        catch (JsonException)
+        {
+            return JsonValue.Create(System.Text.Encoding.UTF8.GetString(body));
+        }
+    }
 
     private static JsonObject Resolved(JsonObject root)
     {
@@ -406,4 +446,6 @@ public sealed class ResponseProjectionCorpusReplayTests
     }
 
     private static string SourceFile([System.Runtime.CompilerServices.CallerFilePath] string path = "") => path;
+
+    private sealed record CorpusBody(JsonNode? Value, byte[]? Bytes, bool HasBody);
 }

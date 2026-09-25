@@ -36,6 +36,9 @@ public sealed class ResponseProjectionCorpusTests
         "metadata.raw-header-aggregate-over-32k",
         "metadata.serialized-aggregate-over-64k",
         "metadata.sensitive-header-load-refusal",
+        "metadata.non-json-text-body-projected-as-string",
+        "metadata.absent-body-remains-absent",
+        "metadata.json-null-body-remains-null",
         "pagination.self-direct-next-arguments",
         "pagination.self-final-page",
         "pagination.body-json-pointer-survives-output-transform",
@@ -56,12 +59,29 @@ public sealed class ResponseProjectionCorpusTests
         "pagination.object-over-32k",
         "pagination.direct-name-collision-continuation",
         "pagination.profile-target-removed-refusal",
+        "pagination.string-to-integer-exponent-exact",
+        "pagination.string-to-integer-int64-max",
+        "pagination.string-to-integer-int64-min",
+        "pagination.string-to-integer-overflow-positive",
+        "pagination.string-to-integer-overflow-negative",
+        "pagination.number-token-negative-zero",
+        "pagination.number-token-exponent",
+        "pagination.number-token-huge-mantissa",
+        "pagination.number-exponent-overflow",
+        "pagination.number-exponent-underflow",
+        "pagination.number-refuses-nan",
+        "pagination.number-refuses-infinity",
+        "pagination.number-refuses-negative-infinity",
+        "pagination.number-refuses-leading-zero",
+        "pagination.number-refuses-leading-whitespace",
+        "pagination.number-refuses-trailing-whitespace",
     ];
 
-    private static readonly string[] RequiredDirectives = ["$repeatUtf8", "$repeatArray", "$concatUtf8"];
+    private static readonly string[] RequiredDirectives =
+        ["$repeatUtf8", "$repeatArray", "$concatUtf8", "$rawBody"];
 
     private static readonly string[] RequiredSemantics =
-        ["evaluation", "responseShape", "expectedShape", "aggregateRefusal", "comparison"];
+        ["evaluation", "responseShape", "bodyRepresentation", "expectedShape", "aggregateRefusal", "comparison"];
 
     [Fact]
     public void The_local_corpus_is_exactly_the_declared_contract()

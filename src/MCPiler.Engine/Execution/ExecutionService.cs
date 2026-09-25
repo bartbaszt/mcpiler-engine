@@ -881,7 +881,8 @@ public sealed class ExecutionService
             Parse(rawBody),
             currentArguments,
             SensitiveHeaderNames.For(credentials),
-            request.Continuations);
+            request.Continuations,
+            shaped.ResponseBody is { Length: > 0 });
 
         return shaped with
         {
@@ -891,16 +892,16 @@ public sealed class ExecutionService
     }
 
     /// <summary>
-    /// Parses a materialized body as JSON, or null when it is absent or not a JSON value.
+    /// Parses a materialized body as JSON, or preserves non-empty non-JSON bytes as text.
     /// </summary>
     /// <remarks>
-    /// A non-JSON body leaves the envelope's body target as the text carrier's content rather
-    /// than failing the projection: an operation may legitimately return text, and the metadata
-    /// half of the projection is still meaningful.
+    /// A non-JSON body leaves the envelope's body target as a JSON string rather than failing the
+    /// projection: an operation may legitimately return text, and the metadata half of the
+    /// projection is still meaningful. Empty bytes remain absent.
     /// </remarks>
     private static JsonNode? Parse(byte[]? body)
     {
-        if (body is null)
+        if (body is null || body.Length == 0)
         {
             return null;
         }
@@ -911,7 +912,7 @@ public sealed class ExecutionService
         }
         catch (JsonException)
         {
-            return null;
+            return JsonValue.Create(Encoding.UTF8.GetString(body));
         }
     }
 

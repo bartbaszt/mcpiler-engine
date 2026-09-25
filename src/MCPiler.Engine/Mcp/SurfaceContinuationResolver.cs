@@ -90,7 +90,12 @@ internal sealed class SurfaceContinuationResolver : IContinuationResolver
             && _surface.Tools.FirstOrDefault(tool =>
                 string.Equals(tool.Operation, targetSlug, StringComparison.Ordinal)) is { } direct)
         {
-            return new ContinuationTarget(targetSlug, direct.Name, NavigatorOnly: false, pathTemplate);
+            return new ContinuationTarget(
+                targetSlug,
+                direct.Name,
+                NavigatorOnly: false,
+                pathTemplate,
+                entry.InputSchema?.Node.DeepClone());
         }
 
         if (_mount.Document.Server.Surface(_surface.Slug) is { } declared
@@ -98,7 +103,11 @@ internal sealed class SurfaceContinuationResolver : IContinuationResolver
             && ExposureGate.Permits(_mount, _surface, targetSlug, InvocationPath.Navigator))
         {
             return new ContinuationTarget(
-                targetSlug, ManifestTool.NavigatorInvoke, NavigatorOnly: true, pathTemplate);
+                targetSlug,
+                ManifestTool.NavigatorInvoke,
+                NavigatorOnly: true,
+                pathTemplate,
+                entry.InputSchema?.Node.DeepClone());
         }
 
         diagnostics.Add(new ExecutionDiagnostic(

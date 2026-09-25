@@ -76,6 +76,37 @@ public sealed class ExecutionServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task A_projected_text_body_is_preserved_as_a_json_string()
+    {
+        await using var host = await StartAsync(200, "text/plain", Encoding.UTF8.GetBytes("abc"));
+        var manifest = ExecutionManifests.For(
+            host.Address,
+            outputProjection: new AgentOutputProjection("/data", []));
+
+        var result = await Execute(manifest);
+
+        Assert.Equal(ExecutionFailureKind.None, result.Failure);
+        var projected = JsonNode.Parse(result.ResponseBody!)!.AsObject();
+        Assert.Equal("abc", projected["data"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task A_projected_json_null_body_remains_a_null_value()
+    {
+        await using var host = await StartAsync(200, "application/json", Encoding.UTF8.GetBytes("null"));
+        var manifest = ExecutionManifests.For(
+            host.Address,
+            outputProjection: new AgentOutputProjection("/data", []));
+
+        var result = await Execute(manifest);
+
+        Assert.Equal(ExecutionFailureKind.None, result.Failure);
+        var projected = JsonNode.Parse(result.ResponseBody!)!.AsObject();
+        Assert.True(projected.ContainsKey("data"));
+        Assert.Null(projected["data"]);
+    }
+
+    [Fact]
     public async Task A_missing_required_argument_fails_compilation_without_reaching_the_server()
     {
         var arrivals = 0;

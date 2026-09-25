@@ -1405,7 +1405,7 @@ public sealed class SectionReaderTests
             Json(
                 """
                 {
-                  "formatVersion": 4,
+                  "formatVersion": 5,
                   "operations": [
                     {
                       "slug": "a", "name": "A",

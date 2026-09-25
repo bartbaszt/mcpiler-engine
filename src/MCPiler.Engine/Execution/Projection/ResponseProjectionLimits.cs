@@ -1,7 +1,7 @@
 namespace MCPiler.Engine.Execution.Projection;
 
 /// <summary>
-/// The fixed response-metadata ceilings of the initial <c>agentSurface</c> v4 contract.
+/// The fixed response-metadata ceilings of the <c>agentSurface</c> v5 contract.
 /// </summary>
 /// <remarks>
 /// <para>
