@@ -235,7 +235,7 @@ public sealed class ResponseCacheObservationIntegrationTests
         ManifestDocument manifest,
         CallerPartition? caller = null)
         => await harness.Service.ExecuteAsync(
-            new ExecutionRequest(manifest, ExecutionManifests.Slug, [])
+            new ExecutionRequest(manifest, ExecutionManifests.Slug, [], manifest.Policy)
             {
                 CallerPartition = caller ?? CallerPartition.Public,
             },

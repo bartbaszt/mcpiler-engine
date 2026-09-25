@@ -160,7 +160,7 @@ internal static class ToolInvocation
 
         var result = await executions
             .ExecuteAsync(
-                new ExecutionRequest(mount.Document, slug, arguments)
+                new ExecutionRequest(mount.Document, slug, arguments, mount.Policy)
                 {
                     // The exact resource context that admitted this invocation. On HTTP the
                     // host supplies the canonical protected-resource identity, so the bare

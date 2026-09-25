@@ -1252,7 +1252,7 @@ public sealed class AuthenticationExecutionTests : IDisposable
             runtime);
 
         return await service.ExecuteAsync(
-            new ExecutionRequest(manifest, "get-thing", arguments ?? []) { CallerPartition = callerPartition },
+            new ExecutionRequest(manifest, "get-thing", arguments ?? [], manifest.Policy) { CallerPartition = callerPartition },
             TestContext.Current.CancellationToken);
     }
 
@@ -1267,7 +1267,7 @@ public sealed class AuthenticationExecutionTests : IDisposable
             new ManifestSecretResolver());
 
         return await service.ExecuteAsync(
-            new ExecutionRequest(manifest, "get-thing", []) { CallerPartition = callerPartition },
+            new ExecutionRequest(manifest, "get-thing", [], manifest.Policy) { CallerPartition = callerPartition },
             TestContext.Current.CancellationToken);
     }
 
@@ -1292,7 +1292,7 @@ public sealed class AuthenticationExecutionTests : IDisposable
         for (int index = 0; index < manifests.Length; index++)
         {
             results[index] = await service.ExecuteAsync(
-                new ExecutionRequest(manifests[index], "get-thing", []),
+                new ExecutionRequest(manifests[index], "get-thing", [], manifests[index].Policy),
                 TestContext.Current.CancellationToken);
         }
 
@@ -1321,7 +1321,7 @@ public sealed class AuthenticationExecutionTests : IDisposable
         for (int index = 0; index < manifests.Length; index++)
         {
             results[index] = await service.ExecuteAsync(
-                new ExecutionRequest(manifests[index], "get-thing", []),
+                new ExecutionRequest(manifests[index], "get-thing", [], manifests[index].Policy),
                 TestContext.Current.CancellationToken);
         }
 
@@ -1679,7 +1679,7 @@ public sealed class AuthenticationExecutionTests : IDisposable
             runtime);
 
         var first = await service.ExecuteAsync(
-            new ExecutionRequest(manifest, "get-thing", []),
+            new ExecutionRequest(manifest, "get-thing", [], manifest.Policy),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(ExecutionFailureKind.None, first.Failure);
@@ -1689,7 +1689,7 @@ public sealed class AuthenticationExecutionTests : IDisposable
         // A second invocation would reuse the same session, so it must report the same authority
         // rather than a new one per call.
         var reused = await service.ExecuteAsync(
-            new ExecutionRequest(manifest, "get-thing", []),
+            new ExecutionRequest(manifest, "get-thing", [], manifest.Policy),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(first.AuthorityFingerprint, reused.AuthorityFingerprint);
@@ -1700,7 +1700,7 @@ public sealed class AuthenticationExecutionTests : IDisposable
         runtime.InvalidateProfile(ChallengeProfileId);
 
         var renegotiated = await service.ExecuteAsync(
-            new ExecutionRequest(manifest, "get-thing", []),
+            new ExecutionRequest(manifest, "get-thing", [], manifest.Policy),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(ExecutionFailureKind.None, renegotiated.Failure);
@@ -1769,7 +1769,7 @@ public sealed class AuthenticationExecutionTests : IDisposable
             identityKey);
 
         Task<EngineExecutionResult> Invoke() => service.ExecuteAsync(
-            new ExecutionRequest(manifest, "get-thing", []) { CallerPartition = CallerPartition.Public },
+            new ExecutionRequest(manifest, "get-thing", [], manifest.Policy) { CallerPartition = CallerPartition.Public },
             TestContext.Current.CancellationToken);
 
         EngineExecutionResult negotiated = await Invoke();

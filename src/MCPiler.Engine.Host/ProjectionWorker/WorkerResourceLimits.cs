@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
@@ -54,6 +55,32 @@ internal static class WorkerResourceLimits
     /// <summary>The default Linux address-space limit: 4 GiB.</summary>
     internal const long DefaultAddressSpaceBytes = 4L * 1024 * 1024 * 1024;
 
+    internal const long DefaultInputBodyLimitBytes = (int.MaxValue - 1024) / 6;
+
+    internal const string CommittedBytesVariable = "MCPILER_PROJECTION_WORKER_COMMITTED_BYTES";
+
+    internal const string AddressSpaceBytesVariable = "MCPILER_PROJECTION_WORKER_ADDRESS_SPACE_BYTES";
+
+    internal const string InputBodyBytesVariable = "MCPILER_PROJECTION_WORKER_INPUT_BODY_BYTES";
+
+    private static readonly HashSet<string> AllowedWorkerEnvironmentVariables = new(
+        [
+            GcHeapHardLimitVariable,
+            GcServerVariable,
+            GcRegionRangeVariable,
+            CommittedBytesVariable,
+            AddressSpaceBytesVariable,
+            InputBodyBytesVariable,
+            "DOTNET_ROOT",
+            "DOTNET_ROOT(x86)",
+            "DOTNET_ROOT_X86",
+            "DOTNET_ROOT_X64",
+            "DOTNET_ROOT_ARM64",
+            "SystemRoot",
+            "WINDIR",
+        ],
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+
     private const int JobObjectExtendedLimitInformation = 9;
     private const uint JobObjectLimitProcessMemory = 0x00000100;
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
@@ -74,6 +101,12 @@ internal static class WorkerResourceLimits
 
         applied = string.Empty;
         refusal = null;
+
+        if (committedBytes > long.MaxValue / 2)
+        {
+            refusal = "The committed-memory limit is too large to derive the worker GC region range.";
+            return false;
+        }
 
         if (OperatingSystem.IsWindows())
         {
@@ -117,6 +150,7 @@ internal static class WorkerResourceLimits
         ArgumentOutOfRangeException.ThrowIfLessThan(committedBytes, 1);
 
         // The runtime reads these as hexadecimal byte counts.
+        long regionRangeBytes = checked(2 * committedBytes);
         environment[GcHeapHardLimitVariable] = committedBytes.ToString("X", CultureInfo.InvariantCulture);
 
         // Workstation GC: one heap sized to the cap instead of a heap per core.
@@ -124,7 +158,112 @@ internal static class WorkerResourceLimits
 
         // Twice the heap cap, which is the documented safe reservation for a small-heap workload.
         environment[GcRegionRangeVariable] =
-            (2 * committedBytes).ToString("X", CultureInfo.InvariantCulture);
+            regionRangeBytes.ToString("X", CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Replaces the inherited child environment with the small set of runtime and confinement
+    /// values required by the worker.
+    /// </summary>
+    internal static bool TryConfigureWorkerEnvironment(
+        IDictionary<string, string?> environment,
+        long committedBytes,
+        long addressSpaceBytes,
+        out string? refusal)
+        => TryConfigureWorkerEnvironment(
+            environment,
+            committedBytes,
+            addressSpaceBytes,
+            DefaultInputBodyLimitBytes,
+            out refusal);
+
+    internal static bool TryConfigureWorkerEnvironment(
+        IDictionary<string, string?> environment,
+        long committedBytes,
+        long addressSpaceBytes,
+        long inputBodyBytes,
+        out string? refusal)
+    {
+        ArgumentNullException.ThrowIfNull(environment);
+        ArgumentOutOfRangeException.ThrowIfLessThan(committedBytes, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(addressSpaceBytes, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(inputBodyBytes, 1);
+
+        if (committedBytes > long.MaxValue / 2)
+        {
+            refusal = "The committed-memory limit is too large to derive the worker GC region range.";
+            return false;
+        }
+
+        refusal = null;
+        environment.Clear();
+
+        // Apphosts use these explicit runtime roots when .NET is installed outside a default
+        // location. Copy only the documented discovery variables, never the rest of DOTNET_*.
+        foreach (string variableName in DotNetRootVariables)
+        {
+            string? value = Environment.GetEnvironmentVariable(variableName);
+
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                environment[variableName] = value;
+            }
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            string? systemRoot = Environment.GetEnvironmentVariable("SystemRoot");
+            string? windowsDirectory = Environment.GetEnvironmentVariable("WINDIR");
+            systemRoot = string.IsNullOrWhiteSpace(systemRoot) ? windowsDirectory : systemRoot;
+
+            if (string.IsNullOrWhiteSpace(systemRoot))
+            {
+                refusal = "The required Windows system directory environment variable is unavailable.";
+                return false;
+            }
+
+            environment["SystemRoot"] = systemRoot;
+
+            if (!string.IsNullOrWhiteSpace(windowsDirectory))
+            {
+                environment["WINDIR"] = windowsDirectory;
+            }
+        }
+
+        ApplyGcHeapCap(environment, committedBytes);
+        environment[CommittedBytesVariable] =
+            committedBytes.ToString(CultureInfo.InvariantCulture);
+        environment[AddressSpaceBytesVariable] =
+            addressSpaceBytes.ToString(CultureInfo.InvariantCulture);
+        environment[InputBodyBytesVariable] =
+            inputBodyBytes.ToString(CultureInfo.InvariantCulture);
+
+        return true;
+    }
+
+    private static readonly string[] DotNetRootVariables =
+    [
+        "DOTNET_ROOT",
+        "DOTNET_ROOT(x86)",
+        "DOTNET_ROOT_X86",
+        "DOTNET_ROOT_X64",
+        "DOTNET_ROOT_ARM64",
+    ];
+
+    /// <summary>Refuses worker startup if an unapproved environment variable reaches the child.</summary>
+    internal static bool TryValidateWorkerEnvironment(out string? refusal)
+    {
+        foreach (DictionaryEntry item in Environment.GetEnvironmentVariables())
+        {
+            if (item.Key is string name && !AllowedWorkerEnvironmentVariables.Contains(name))
+            {
+                refusal = "The worker environment contains an unapproved variable.";
+                return false;
+            }
+        }
+
+        refusal = null;
+        return true;
     }
 
     /// <summary>

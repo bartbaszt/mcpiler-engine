@@ -23,7 +23,12 @@ namespace MCPiler.Engine.Execution;
 /// <param name="Manifest">The compiled manifest that governs the execution.</param>
 /// <param name="Slug">The agent operation to execute.</param>
 /// <param name="Arguments">The arguments as the caller supplied them.</param>
-public sealed record ExecutionRequest(ManifestDocument Manifest, string Slug, JsonObject Arguments)
+/// <param name="EffectivePolicy">The policy after mount narrowing, governing this invocation and any compound steps it starts.</param>
+public sealed record ExecutionRequest(
+    ManifestDocument Manifest,
+    string Slug,
+    JsonObject Arguments,
+    PolicySection EffectivePolicy)
 {
     /// <summary>
     /// File payloads by agent-facing slot name. The execution owns these sources and disposes
@@ -322,6 +327,7 @@ public sealed class ExecutionService
         await using var ownedFiles = new ExecutionFileLease(request.Files);
 
         var manifest = request.Manifest;
+        var policy = request.EffectivePolicy;
         var entry = manifest.AgentSurface.Operation(request.Slug);
 
         if (entry is null)
@@ -350,7 +356,6 @@ public sealed class ExecutionService
                 $"Operation '{request.Slug}' has no HTTP binding this runtime can execute.");
         }
 
-        var policy = manifest.Policy;
         var limits = policy.EffectiveLimits;
 
         OriginAllowList origins;
@@ -398,6 +403,7 @@ public sealed class ExecutionService
 
         if (!TransformStage.TryInput(
                 manifest,
+                policy,
                 entry,
                 operation,
                 request.Arguments,
@@ -746,6 +752,7 @@ public sealed class ExecutionService
             OutputProjectionResult projection = await OutputProjectionStage
                 .ApplyAsync(
                     manifest,
+                    policy,
                     entry,
                     operation,
                     outcome,

@@ -371,7 +371,7 @@ public sealed class ExecutionServiceTests : IDisposable
         var service = new ExecutionService(new UpstreamSender(clients), new ManifestSecretResolver());
 
         var result = await service.ExecuteAsync(
-            new ExecutionRequest(ExecutionManifests.For(host.Address), ExecutionManifests.Slug, []),
+            Request(ExecutionManifests.For(host.Address), ExecutionManifests.Slug, []),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(ExecutionFailureKind.AddressPolicy, result.Failure);
@@ -481,7 +481,7 @@ public sealed class ExecutionServiceTests : IDisposable
         using var runtime = new AuthenticationRuntime(transport);
         var service = new ExecutionService(transport, new ManifestSecretResolver(), authentication: runtime);
         var result = await service.ExecuteAsync(
-            new ExecutionRequest(manifest, ExecutionManifests.Slug, []),
+            Request(manifest, ExecutionManifests.Slug, []),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(ExecutionFailureKind.None, result.Failure);
@@ -544,7 +544,7 @@ public sealed class ExecutionServiceTests : IDisposable
         var service = new ExecutionService(new UpstreamSender(clients), new ManifestSecretResolver());
 
         var result = await service.ExecuteAsync(
-            new ExecutionRequest(ExecutionManifests.For(host.Address), "no-such-operation", []),
+            Request(ExecutionManifests.For(host.Address), "no-such-operation", []),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(ExecutionFailureKind.Compilation, result.Failure);
@@ -560,7 +560,7 @@ public sealed class ExecutionServiceTests : IDisposable
 
         var result = await service.ExecuteAsync(
             WithFile(
-                new ExecutionRequest(
+                Request(
                     ExecutionManifests.For(new Uri("https://api.example.com")),
                     "no-such-operation",
                     []),
@@ -581,7 +581,7 @@ public sealed class ExecutionServiceTests : IDisposable
 
         var result = await service.ExecuteAsync(
             WithFile(
-                new ExecutionRequest(
+                Request(
                     ExecutionManifests.For(new Uri("https://api.example.com")),
                     ExecutionManifests.Slug,
                     []),
@@ -607,7 +607,7 @@ public sealed class ExecutionServiceTests : IDisposable
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.ExecuteAsync(
             WithFile(
-                new ExecutionRequest(
+                Request(
                     ExecutionManifests.For(new Uri("https://api.example.com")),
                     ExecutionManifests.Slug,
                     []),
@@ -651,9 +651,15 @@ public sealed class ExecutionServiceTests : IDisposable
         var service = new ExecutionService(new UpstreamSender(clients), new ManifestSecretResolver(), store);
 
         return await service.ExecuteAsync(
-            new ExecutionRequest(manifest, ExecutionManifests.Slug, arguments ?? []),
+            Request(manifest, ExecutionManifests.Slug, arguments ?? []),
             TestContext.Current.CancellationToken);
     }
+
+    private static ExecutionRequest Request(
+        Manifest.Model.ManifestDocument manifest,
+        string slug,
+        JsonObject arguments)
+        => new(manifest, slug, arguments, manifest.Policy);
 
     private static string Describe(EngineExecutionResult result)
         => string.Join(

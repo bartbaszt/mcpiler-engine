@@ -28,8 +28,9 @@ public interface IProjectionWorker
     /// </param>
     /// <param name="limits">The effective limits for this evaluation.</param>
     /// <param name="cancellationToken">
-    /// Cancels the wait. A canceled call still terminates and reaps the worker before
-    /// returning; the cancellation does not leave a live orphan behind.
+    /// Cancels admission and asynchronous worker work. A synchronous process launch cannot be
+    /// interrupted; after it returns, the call performs bounded cleanup. If exit cannot be
+    /// confirmed, capacity remains charged.
     /// </param>
     ValueTask<JmesPathEvaluationResult> EvaluateAsync(
         string expression,

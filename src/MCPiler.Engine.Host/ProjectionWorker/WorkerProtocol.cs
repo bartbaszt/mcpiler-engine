@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Globalization;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 
 using MCPiler.Engine.Runtime.Projection;
@@ -41,11 +42,18 @@ internal static class WorkerProtocol
     /// <summary>The largest request or response header frame.</summary>
     internal const int MaxHeaderBytes = 64 * 1024;
 
-    /// <summary>
-    /// The largest body frame. The effective input bounds make a body this large unreachable in
-    /// practice; the cap exists so the framing layer has a number even when the bounds do not.
-    /// </summary>
-    internal const int MaxBodyBytes = 64 * 1024 * 1024;
+    /// <summary>The maximum request body frame for one raw-input bound.</summary>
+    internal static int PreparedInputFrameLimitBytes(long rawInputLimitBytes)
+    {
+        long limit = JmesPathProfile.PreparedInputFrameLimitBytes(rawInputLimitBytes);
+
+        if (limit > int.MaxValue)
+        {
+            throw new ArgumentOutOfRangeException(nameof(rawInputLimitBytes));
+        }
+
+        return checked((int)limit);
+    }
 
     /// <summary>Writes one length-framed payload.</summary>
     internal static async Task WriteFrameAsync(
@@ -233,7 +241,6 @@ internal static class WorkerProtocol
                 || bodyBytes.ValueKind != JsonValueKind.Number
                 || !bodyBytes.TryGetInt32(out int bytes)
                 || bytes <= 0
-                || bytes > MaxBodyBytes
                 || !root.TryGetProperty("limits", out JsonElement limits)
                 || limits.ValueKind != JsonValueKind.Object)
             {
@@ -302,8 +309,7 @@ internal static class WorkerProtocol
                     if (!root.TryGetProperty("outputBytes", out JsonElement outputBytes)
                         || outputBytes.ValueKind != JsonValueKind.Number
                         || !outputBytes.TryGetInt32(out int bytes)
-                        || bytes < 0
-                        || bytes > MaxBodyBytes)
+                        || bytes < 0)
                     {
                         refusal = "A success response declares no usable output size.";
                         return false;
@@ -391,7 +397,11 @@ internal static class WorkerProtocol
     {
         using var stream = new MemoryStream();
 
-        using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = false }))
+        using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions
+        {
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+            Indented = false,
+        }))
         {
             writer.WriteStartObject();
             body(writer);

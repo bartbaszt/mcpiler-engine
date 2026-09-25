@@ -57,7 +57,7 @@ internal static class CompoundExecutor
 
         var completed = new List<string>();
 
-        if (!StepPlanResolver.TryResolve(request.Manifest, binding, out CompoundPlan? plan, out string? unresolved))
+        if (!StepPlanResolver.TryResolve(request.Manifest, request.EffectivePolicy, binding, out CompoundPlan? plan, out string? unresolved))
         {
             return Failed(request, null, CompoundStage.Plan, ExecutionFailureKind.Compilation, completed, unresolved);
         }
@@ -96,7 +96,7 @@ internal static class CompoundExecutor
 
             if (step.InputProgram is { } program
                 && !TransformStage.TryApply(
-                    request.Manifest, program, slots, TransformDirection.Input, document, out document, out string? refused))
+                    request.Manifest, request.EffectivePolicy, program, slots, TransformDirection.Input, document, out document, out string? refused))
             {
                 return Failed(
                     request,
@@ -130,7 +130,7 @@ internal static class CompoundExecutor
             {
                 outcome = await executions
                     .ExecuteAsync(
-                        new ExecutionRequest(request.Manifest, step.Slug, arguments)
+                        new ExecutionRequest(request.Manifest, step.Slug, arguments, request.EffectivePolicy)
                         {
                             Scope = request.Scope,
                             Files = carried,
@@ -222,7 +222,7 @@ internal static class CompoundExecutor
 
             if (selection.OutputProgram is { } program
                 && !TransformStage.TryApply(
-                    request.Manifest, program, EmptySlots, TransformDirection.Output, result, out result, out string? refused))
+                    request.Manifest, request.EffectivePolicy, program, EmptySlots, TransformDirection.Output, result, out result, out string? refused))
             {
                 return Failed(
                     request,

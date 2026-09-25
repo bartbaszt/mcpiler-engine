@@ -34,6 +34,7 @@ internal static class TransformStage
     /// <returns>False when the program is refused or aborts; nothing has been contacted.</returns>
     internal static bool TryInput(
         ManifestDocument manifest,
+        PolicySection policy,
         AgentOperationEntry entry,
         ManifestOperation operation,
         JsonObject arguments,
@@ -41,6 +42,7 @@ internal static class TransformStage
         [NotNullWhen(false)] out string? failure)
     {
         ArgumentNullException.ThrowIfNull(manifest);
+        ArgumentNullException.ThrowIfNull(policy);
         ArgumentNullException.ThrowIfNull(entry);
         ArgumentNullException.ThrowIfNull(operation);
         ArgumentNullException.ThrowIfNull(arguments);
@@ -54,7 +56,7 @@ internal static class TransformStage
         }
 
         IReadOnlySet<string> slots = ExclusionValidation.FileArguments(entry.InputSchema?.Object);
-        TransformCeilingValues ceiling = Ceiling(manifest.Policy);
+        TransformCeilingValues ceiling = Ceiling(policy);
 
         if (!TransformValidation.TryAccept(
                 document,
@@ -100,12 +102,14 @@ internal static class TransformStage
     /// <returns>False when the program is refused or aborts.</returns>
     internal static bool TryOutput(
         ManifestDocument manifest,
+        PolicySection policy,
         AgentOperationEntry entry,
         EngineExecutionResult result,
         out byte[]? body,
         [NotNullWhen(false)] out string? failure)
     {
         ArgumentNullException.ThrowIfNull(manifest);
+        ArgumentNullException.ThrowIfNull(policy);
         ArgumentNullException.ThrowIfNull(entry);
         ArgumentNullException.ThrowIfNull(result);
 
@@ -120,7 +124,7 @@ internal static class TransformStage
         }
 
         IReadOnlySet<string> slots = ExclusionValidation.FileArguments(entry.InputSchema?.Object);
-        TransformCeilingValues ceiling = Bounded(Ceiling(manifest.Policy), manifest.Policy);
+        TransformCeilingValues ceiling = Bounded(Ceiling(policy), policy);
 
         if (!TransformValidation.TryAccept(
                 document,
@@ -162,6 +166,7 @@ internal static class TransformStage
     /// <returns>False when the program is refused or aborts.</returns>
     internal static bool TryApply(
         ManifestDocument manifest,
+        PolicySection policy,
         JsonObject program,
         IReadOnlySet<string> slots,
         TransformDirection direction,
@@ -170,14 +175,15 @@ internal static class TransformStage
         [NotNullWhen(false)] out string? failure)
     {
         ArgumentNullException.ThrowIfNull(manifest);
+        ArgumentNullException.ThrowIfNull(policy);
         ArgumentNullException.ThrowIfNull(program);
         ArgumentNullException.ThrowIfNull(slots);
         ArgumentNullException.ThrowIfNull(document);
 
         produced = document;
         TransformCeilingValues ceiling = direction == TransformDirection.Output
-            ? Bounded(Ceiling(manifest.Policy), manifest.Policy)
-            : Ceiling(manifest.Policy);
+            ? Bounded(Ceiling(policy), policy)
+            : Ceiling(policy);
 
         if (!TransformValidation.TryAccept(
                 program,
