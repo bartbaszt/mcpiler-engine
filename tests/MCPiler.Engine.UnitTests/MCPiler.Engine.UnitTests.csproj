@@ -14,4 +14,8 @@
     <ProjectReference Include="..\..\src\MCPiler.Engine\MCPiler.Engine.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include="..\fixtures\compatibility\**" Link="fixtures/compatibility/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

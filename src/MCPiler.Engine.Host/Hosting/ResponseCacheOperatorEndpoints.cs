@@ -57,6 +57,7 @@ internal static class ResponseCacheOperatorEndpoints
 
     private static readonly JsonSerializerOptions Json = new()
     {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         Converters = { new JsonStringEnumConverter() },
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
@@ -104,6 +105,16 @@ internal static class ResponseCacheOperatorEndpoints
             await WriteJsonAsync(
                     context,
                     new { error = "The operator channel requires https unless the request originates on loopback." })
+                .ConfigureAwait(false);
+            return;
+        }
+
+        if (!HasSupportedContract(context.Request))
+        {
+            context.Response.StatusCode = StatusCodes.Status409Conflict;
+            await WriteJsonAsync(
+                    context,
+                    new { error = "The operator contract generation is missing or unsupported." })
                 .ConfigureAwait(false);
             return;
         }
@@ -196,6 +207,20 @@ internal static class ResponseCacheOperatorEndpoints
                     recent = observation.Recent,
                 }).ConfigureAwait(false);
         }
+    }
+
+    private static bool HasSupportedContract(HttpRequest request)
+    {
+        if (!request.Headers.TryGetValue(CompatibilitySchema.ContractGenerationHeader, out var values)
+            || values.Count != 1)
+        {
+            return false;
+        }
+
+        return string.Equals(
+            values[0],
+            CompatibilitySchema.ResponseCacheOperatorGeneration,
+            StringComparison.Ordinal);
     }
 
     /// <summary>

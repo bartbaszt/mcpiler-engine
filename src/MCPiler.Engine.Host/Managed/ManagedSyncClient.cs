@@ -2,7 +2,9 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
+using MCPiler.Engine.Runtime;
 using MCPiler.Engine.Runtime.Managed;
 
 namespace MCPiler.Engine.Host.Managed;
@@ -67,6 +69,14 @@ internal sealed class ManagedSyncClient : IDisposable
     private readonly string _pollPath;
     private bool _disposed;
 
+    private static readonly JsonSerializerOptions ProtocolJson = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = false,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+        AllowDuplicateProperties = false,
+    };
+
     /// <summary>Creates a client for one deployment.</summary>
     public ManagedSyncClient(ManagedSyncOptions options)
     {
@@ -122,7 +132,7 @@ internal sealed class ManagedSyncClient : IDisposable
 
         try
         {
-            body = JsonSerializer.SerializeToUtf8Bytes(request);
+            body = JsonSerializer.SerializeToUtf8Bytes(request, ProtocolJson);
         }
         catch (JsonException)
         {
@@ -207,7 +217,7 @@ internal sealed class ManagedSyncClient : IDisposable
 
         try
         {
-            body = JsonSerializer.SerializeToUtf8Bytes(report);
+            body = JsonSerializer.SerializeToUtf8Bytes(report, ProtocolJson);
         }
         catch (JsonException)
         {
@@ -303,8 +313,6 @@ internal sealed class ManagedSyncClient : IDisposable
         }
         catch (InvalidOperationException)
         {
-            // The response exceeded the bound. Reading further would spend memory the operator
-            // bounded, and a generation that large is a producer defect rather than a delivery.
             return ManagedPollResult.Unreachable;
         }
 
@@ -312,16 +320,63 @@ internal sealed class ManagedSyncClient : IDisposable
 
         try
         {
-            parsed = JsonSerializer.Deserialize<ManagedGenerationMessage>(payload);
+            parsed = JsonSerializer.Deserialize<ManagedGenerationMessage>(payload, ProtocolJson);
         }
         catch (JsonException)
         {
-            return ManagedPollResult.Unreachable;
+            return Refused(
+                "managed/response-json-invalid",
+                "The Platform returned malformed managed JSON.");
         }
 
-        if (parsed is null
-            || string.IsNullOrWhiteSpace(parsed.GenerationId)
-            || parsed.Mounts.Count == 0)
+        if (parsed is null)
+        {
+            return Refused(
+                "managed/response-shape-invalid",
+                "The Platform returned an empty managed response.");
+        }
+
+        if (parsed.ProtocolVersion != ManagedProtocol.Version)
+        {
+            return Refused(
+                "managed/protocol-version-unsupported",
+                $"The Platform answered managed protocol {parsed.ProtocolVersion}; this Engine speaks {ManagedProtocol.Version}.");
+        }
+
+        if (!HasValidShape(parsed))
+        {
+            return Refused(
+                "managed/response-shape-invalid",
+                "The Platform returned a managed response with an invalid shape.");
+        }
+
+        if (string.Equals(parsed.Kind, "refusal", StringComparison.Ordinal))
+        {
+            ManagedDiagnosticMessage diagnostic = parsed.Diagnostics.Count > 0
+                ? parsed.Diagnostics[0]
+                : new ManagedDiagnosticMessage
+                {
+                    Code = parsed.Compatibility?.ReasonCode ?? "managed/refused",
+                    Message = parsed.Compatibility?.Message ?? "The Platform refused the generation.",
+                };
+            return Refused(diagnostic.Code, diagnostic.Message);
+        }
+
+        if (!string.Equals(parsed.Kind, "generation", StringComparison.Ordinal))
+        {
+            return Refused("managed/response-kind-invalid", "The Platform returned an unknown managed response kind.");
+        }
+
+        if (parsed.Compatibility is null
+            || !string.Equals(parsed.Compatibility.Status, "compatible", StringComparison.Ordinal)
+            || parsed.Compatibility.DescriptorSchemaVersion != CompatibilitySchema.Version)
+        {
+            return Refused(
+                parsed.Compatibility?.ReasonCode ?? "managed/compatibility-invalid",
+                parsed.Compatibility?.Message ?? "The Platform did not provide a compatible contract result.");
+        }
+
+        if (string.IsNullOrWhiteSpace(parsed.GenerationId) || parsed.Mounts.Count == 0)
         {
             return ManagedPollResult.Unreachable;
         }
@@ -358,6 +413,64 @@ internal sealed class ManagedSyncClient : IDisposable
                 parsed.Secrets),
             []);
     }
+
+    private static bool HasValidShape(ManagedGenerationMessage message)
+    {
+        if (message.Mounts is null
+            || message.Secrets is null
+            || message.Metadata is null
+            || message.Diagnostics is null
+            || message.Kind is not ("generation" or "refusal"))
+        {
+            return false;
+        }
+
+        if (message.Compatibility is { } compatibility
+            && (string.IsNullOrWhiteSpace(compatibility.Status)
+                || compatibility.Status.Length > 32
+                || string.IsNullOrWhiteSpace(compatibility.ReasonCode)
+                || compatibility.ReasonCode.Length > 200
+                || string.IsNullOrWhiteSpace(compatibility.Dimension)
+                || compatibility.Dimension.Length > 200
+                || string.IsNullOrWhiteSpace(compatibility.Message)
+                || compatibility.Message.Length > 500
+                || compatibility.DescriptorSchemaVersion != CompatibilitySchema.Version))
+        {
+            return false;
+        }
+
+        foreach (ManagedDiagnosticMessage diagnostic in message.Diagnostics)
+        {
+            if (diagnostic is null
+                || string.IsNullOrWhiteSpace(diagnostic.Code)
+                || diagnostic.Code.Length > 200
+                || string.IsNullOrWhiteSpace(diagnostic.Message)
+                || diagnostic.Message.Length > 500)
+            {
+                return false;
+            }
+        }
+
+        foreach (ManagedMountMessage mount in message.Mounts)
+        {
+            if (mount is null
+                || string.IsNullOrWhiteSpace(mount.Prefix)
+                || mount.Prefix.Length > 256
+                || string.IsNullOrEmpty(mount.Bundle))
+            {
+                return false;
+            }
+        }
+
+        return message.Secrets.All(pair => pair.Key is not null && pair.Value is not null);
+    }
+
+    private static ManagedPollResult Refused(string code, string message)
+        => new(
+            ManagedPollOutcome.CandidateRefused,
+            null,
+            [new ManagedDiagnosticMessage { Code = code, Message = message }]);
+
 
     private static async Task<byte[]> ReadBoundedAsync(
         HttpResponseMessage response,

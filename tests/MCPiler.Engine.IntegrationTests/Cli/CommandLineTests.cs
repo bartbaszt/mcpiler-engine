@@ -18,6 +18,7 @@ public sealed class CommandLineTests
     [InlineData("serve", HostVerb.Serve)]
     [InlineData("inspect", HostVerb.Inspect)]
     [InlineData("version", HostVerb.Version)]
+    [InlineData("compatibility", HostVerb.Compatibility)]
     public void A_known_verb_is_read(string argument, HostVerb expected)
     {
         CommandLineResult parsed = CommandLine.Parse([argument]);
@@ -62,6 +63,15 @@ public sealed class CommandLineTests
 
         Assert.False(parsed.Recognized);
         Assert.Contains(parsed.Refusals, refusal => refusal.Contains("'deploy'", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void The_compatibility_option_is_a_whole_command_line()
+    {
+        CommandLineResult parsed = CommandLine.Parse(["--compatibility"]);
+
+        Assert.Equal(HostVerb.Compatibility, parsed.Verb);
+        Assert.Empty(parsed.Refusals);
     }
 
     [Fact]

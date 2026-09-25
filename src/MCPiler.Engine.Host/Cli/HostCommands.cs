@@ -72,6 +72,9 @@ public static class HostCommands
         return parsed.Verb switch
         {
             HostVerb.Version => new CommandOutcome(ExitCodes.Success, identity + Environment.NewLine),
+            HostVerb.Compatibility => new CommandOutcome(
+                ExitCodes.Success,
+                CompatibilityDescriptor.EngineSupport().ToCanonicalJson()),
             HostVerb.Serve => await ServeAsync(parsed, identity, progress, cancellationToken).ConfigureAwait(false),
             HostVerb.Inspect => await InspectAsync(parsed, identity, cancellationToken).ConfigureAwait(false),
             _ => await FilesAsync(parsed, cancellationToken).ConfigureAwait(false),

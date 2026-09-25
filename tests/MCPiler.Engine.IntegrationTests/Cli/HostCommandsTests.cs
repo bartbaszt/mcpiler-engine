@@ -53,6 +53,20 @@ public sealed class HostCommandsTests : IDisposable
     /// wrong". The first is a script bug; the second must not be retried.
     /// </remarks>
     [Fact]
+    public async Task Compatibility_prints_the_machine_readable_descriptor()
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            ["compatibility"],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Success, outcome.ExitCode);
+        Assert.Equal(
+            MCPiler.Engine.Runtime.CompatibilityDescriptor.EngineSupport().ToCanonicalJson(),
+            outcome.Output);
+    }
+
+    [Fact]
     public async Task An_unknown_verb_a_refused_configuration_and_a_success_exit_differently()
     {
         CommandOutcome unknown = await HostCommands.RunAsync(["deploy"], Identity, TestContext.Current.CancellationToken);

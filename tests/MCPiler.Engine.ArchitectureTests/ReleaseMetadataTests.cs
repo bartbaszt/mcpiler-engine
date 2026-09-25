@@ -301,6 +301,27 @@ public sealed class ReleaseMetadataTests
     /// accepting <c>if:</c>.
     /// </summary>
     [Fact]
+    public void Resume_requires_release_commit_ancestry_in_origin_main()
+    {
+        var release = Read("eng/release.sh");
+        Assert.Contains("merge-base --is-ancestor", release, StringComparison.Ordinal);
+        Assert.Contains("is not contained in origin/main", release, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Engine_workflows_cannot_read_private_platform_state()
+    {
+        foreach (var path in Directory.EnumerateFiles(EngineRepository.Absolute(".github/workflows"), "*.yml"))
+        {
+            var source = File.ReadAllText(path);
+            Assert.DoesNotContain("github.com/bartbaszt/mcpiler.git", source, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("github.com/bartbaszt/mcpiler/", source, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("github.com/bartbaszt/mcpiler\"", source, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("ENGINE_SUBMODULE_TOKEN", source, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
     public void Every_resume_job_after_a_conditional_job_declares_an_accepting_if()
     {
         const string Workflow = ".github/workflows/release-resume.yml";

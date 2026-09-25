@@ -178,6 +178,18 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             },
             ["secrets"] = new Dictionary<string, string>(StringComparer.Ordinal),
             ["metadata"] = new { desiredRevisionId = "g2", engineVersion = "fixture" },
+            ["kind"] = "generation",
+            ["compatibility"] = new
+            {
+                status = "compatible",
+                reasonCode = "compatibility/compatible",
+                dimension = "contract",
+                descriptorSchemaVersion = 1,
+                required = (string?)null,
+                supported = (string?)null,
+                message = "The Platform requirements and Engine support are compatible.",
+            },
+            ["diagnostics"] = Array.Empty<object>(),
         };
 
         var delivering = true;
@@ -206,6 +218,72 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         Assert.Equal(
             ["list-pets", "add-pet"],
             Names(await session.RequestAsync("tools/list", 2, TestContext.Current.CancellationToken)));
+    }
+
+    [Fact]
+    public async Task A_malformed_generation_response_is_refused_without_replacing_the_active_generation()
+    {
+        var original = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var malformed = new Dictionary<string, object?>
+        {
+            ["protocolVersion"] = 1,
+            ["generationId"] = "g2",
+            ["mounts"] = null,
+            ["secrets"] = new Dictionary<string, string>(StringComparer.Ordinal),
+            ["metadata"] = new { desiredRevisionId = "g2", engineVersion = "fixture" },
+            ["kind"] = "generation",
+            ["compatibility"] = new
+            {
+                status = "compatible",
+                reasonCode = "compatibility/compatible",
+                dimension = "contract",
+                descriptorSchemaVersion = 1,
+                required = (string?)null,
+                supported = (string?)null,
+                message = "The Platform requirements and Engine support are compatible.",
+            },
+            ["diagnostics"] = Array.Empty<object>(),
+        };
+
+        var delivering = true;
+        var originalBytes = JsonSerializer.SerializeToUtf8Bytes(original);
+        var malformedBytes = JsonSerializer.SerializeToUtf8Bytes(malformed);
+        await using var platform = await PlatformAsync(
+            _ => Response.Bytes(delivering ? originalBytes : malformedBytes, isGeneration: true));
+        await using ManagedProcess engine = await StartAsync(platform);
+
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        delivering = false;
+        await Task.Delay(TimeSpan.FromMilliseconds(600), TestContext.Current.CancellationToken);
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+    }
+
+    [Fact]
+    public async Task A_response_missing_a_required_member_is_refused_without_replacing_the_active_generation()
+    {
+        var original = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var missing = Generation("g2", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        missing.Remove("mounts");
+
+        var delivering = true;
+        var requests = new System.Collections.Concurrent.ConcurrentQueue<JsonObject>();
+        var originalBytes = JsonSerializer.SerializeToUtf8Bytes(original);
+        var missingBytes = JsonSerializer.SerializeToUtf8Bytes(missing);
+        await using var platform = await PlatformAsync(request =>
+        {
+            requests.Enqueue(request);
+            return Response.Bytes(delivering ? originalBytes : missingBytes, isGeneration: true);
+        });
+        await using ManagedProcess engine = await StartAsync(platform);
+
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        delivering = false;
+        await WaitForAsync(() => requests.Any(request =>
+            string.Equals(request["lastCandidateOutcome"]?.GetValue<string>(), "candidate-failed", StringComparison.Ordinal)
+            && request["lastCandidateDiagnostics"] is JsonArray diagnostics
+            && diagnostics.Count > 0
+            && diagnostics[0]?["code"]?.GetValue<string>() == "managed/response-json-invalid"));
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
     }
 
     [Fact]
@@ -255,6 +333,18 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             },
             ["secrets"] = new Dictionary<string, string>(StringComparer.Ordinal),
             ["metadata"] = new { desiredRevisionId = "g2", engineVersion = "fixture" },
+            ["kind"] = "generation",
+            ["compatibility"] = new
+            {
+                status = "compatible",
+                reasonCode = "compatibility/compatible",
+                dimension = "contract",
+                descriptorSchemaVersion = 1,
+                required = (string?)null,
+                supported = (string?)null,
+                message = "The Platform requirements and Engine support are compatible.",
+            },
+            ["diagnostics"] = Array.Empty<object>(),
         };
 
         var delivering = false;
@@ -315,6 +405,18 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             },
             ["secrets"] = new Dictionary<string, string>(StringComparer.Ordinal),
             ["metadata"] = new { desiredRevisionId = "g2", engineVersion = "fixture" },
+            ["kind"] = "generation",
+            ["compatibility"] = new
+            {
+                status = "compatible",
+                reasonCode = "compatibility/compatible",
+                dimension = "contract",
+                descriptorSchemaVersion = 1,
+                required = (string?)null,
+                supported = (string?)null,
+                message = "The Platform requirements and Engine support are compatible.",
+            },
+            ["diagnostics"] = Array.Empty<object>(),
         };
 
         var delivering = false;
@@ -794,6 +896,18 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             ["mounts"] = new[] { new { prefix, bundle } },
             ["secrets"] = secrets,
             ["metadata"] = new { desiredRevisionId = id, engineVersion = "fixture" },
+            ["kind"] = "generation",
+            ["compatibility"] = new
+            {
+                status = "compatible",
+                reasonCode = "compatibility/compatible",
+                dimension = "contract",
+                descriptorSchemaVersion = 1,
+                required = (string?)null,
+                supported = (string?)null,
+                message = "The Platform requirements and Engine support are compatible.",
+            },
+            ["diagnostics"] = Array.Empty<object>(),
         };
     }
 

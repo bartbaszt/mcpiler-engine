@@ -1,0 +1,21 @@
+{
+  "shared": [
+    "None",
+    "Compilation",
+    "Authentication",
+    "OriginPolicy",
+    "AddressPolicy",
+    "RedirectLimit",
+    "Timeout",
+    "ResponseSize",
+    "FileRuntime",
+    "Transport"
+  ],
+  "engineOnly": [
+    {
+      "name": "Transformation",
+      "reason": "Engine evaluates transformation failure inside its runtime; Platform evaluates that boundary before Engine execution."
+    }
+  ],
+  "platformOnly": []
+}

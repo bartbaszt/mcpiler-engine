@@ -20,6 +20,9 @@ public enum HostVerb
 
     /// <summary>Report the build identity and the Manifest format range it accepts.</summary>
     Version,
+
+    /// <summary>Report the machine-readable compatibility descriptor.</summary>
+    Compatibility,
 }
 
 /// <summary>One parsed command line.</summary>
@@ -71,6 +74,9 @@ public static class CommandLine
     /// <summary>The option reporting identity and exiting.</summary>
     public const string VersionOption = "--version";
 
+    /// <summary>The option reporting the machine-readable compatibility descriptor and exiting.</summary>
+    public const string CompatibilityOption = "--compatibility";
+
     /// <summary>What the process prints when it cannot read its own arguments.</summary>
     public const string Usage = """
         mcpiler-engine <verb> [options]
@@ -82,6 +88,7 @@ public static class CommandLine
           files show <id>          Print one handle.
           files sweep              Reclaim expired handles and orphan content.
           version                  Print the build identity and supported Manifest format range.
+          compatibility            Print the machine-readable compatibility descriptor.
 
         Options
           --mount <prefix>=<dir>   A Manifest bundle directory answering on <prefix>. Repeatable.
@@ -152,6 +159,9 @@ public static class CommandLine
                 case VersionOption:
                     verb ??= HostVerb.Version;
                     break;
+                case CompatibilityOption:
+                    verb = HostVerb.Compatibility;
+                    break;
                 default:
                     settings.Add(new KeyValuePair<string, string>(name, value));
                     break;
@@ -173,7 +183,8 @@ public static class CommandLine
         {
             // '--version' alone is a legitimate whole command line, so an absent verb is only
             // a refusal once nothing else names one.
-            if (!options.Contains(VersionOption, StringComparer.Ordinal))
+            if (!options.Contains(VersionOption, StringComparer.Ordinal)
+                && !options.Contains(CompatibilityOption, StringComparer.Ordinal))
             {
                 refusals.Add("No verb was given.");
             }
@@ -192,6 +203,9 @@ public static class CommandLine
             case "version":
                 Extra(positional, 1, refusals);
                 return HostVerb.Version;
+            case "compatibility":
+                Extra(positional, 1, refusals);
+                return HostVerb.Compatibility;
             case "files":
                 return ReadFilesVerb(positional, out operand, refusals);
             default:

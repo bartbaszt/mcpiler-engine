@@ -113,6 +113,48 @@ public sealed class ResponseCacheOperatorTests : IDisposable
     }
 
     [Fact]
+    public async Task The_shared_operator_fixture_replays_the_real_read_and_clear_shapes()
+    {
+        using JsonDocument expected = JsonDocument.Parse(File.ReadAllText(
+            Path.Combine(AppContext.BaseDirectory, "fixtures", "response-cache", "operator-v1.json")));
+        int arrivals = 0;
+        await using LoopbackHost upstream = await LoopbackCachedUpstreamAsync(() => Interlocked.Increment(ref arrivals));
+        await using ServedEngine engine = await StartAsync(upstream.Address, configureOperator: true);
+        await WarmAsync(engine, upstream.Address);
+        await WarmAsync(engine, upstream.Address);
+
+        using HttpClient client = Authorized(OperatorSecret);
+        using HttpResponseMessage read = await client.GetAsync(engine.At(ReadPath(MountPrefix)), Token);
+        using JsonDocument actualRead = JsonDocument.Parse(await read.Content.ReadAsStringAsync(Token));
+        Assert.Equal(HttpStatusCode.OK, read.StatusCode);
+        Assert.Equal(
+            expected.RootElement.GetProperty("read").GetProperty("mount").GetString(),
+            actualRead.RootElement.GetProperty("mount").GetString());
+        Assert.Equal(
+            expected.RootElement.GetProperty("read").GetProperty("caching").GetString(),
+            actualRead.RootElement.GetProperty("caching").GetString());
+        Assert.Equal(
+            expected.RootElement.GetProperty("read").GetProperty("recent").GetArrayLength(),
+            actualRead.RootElement.GetProperty("recent").GetArrayLength());
+        Assert.Equal(
+            expected.RootElement.GetProperty("read").GetProperty("recent")[0].GetProperty("operationSlug").GetString(),
+            actualRead.RootElement.GetProperty("recent")[0].GetProperty("operationSlug").GetString());
+
+        using HttpResponseMessage clear = await client.PostAsync(
+            engine.At(ClearPath(MountPrefix, ExecutionManifests.Slug)),
+            null,
+            Token);
+        using JsonDocument actualClear = JsonDocument.Parse(await clear.Content.ReadAsStringAsync(Token));
+        Assert.Equal(HttpStatusCode.OK, clear.StatusCode);
+        Assert.Equal(
+            expected.RootElement.GetProperty("clear").GetProperty("removed").GetInt32(),
+            actualClear.RootElement.GetProperty("removed").GetInt32());
+        Assert.Equal(
+            expected.RootElement.GetProperty("clear").GetProperty("manifestGenerationChanged").GetBoolean(),
+            actualClear.RootElement.GetProperty("manifestGenerationChanged").GetBoolean());
+    }
+
+    [Fact]
     public async Task A_clear_reports_the_selected_scope_and_never_claims_a_generation_change()
     {
         int arrivals = 0;
@@ -287,6 +329,9 @@ public sealed class ResponseCacheOperatorTests : IDisposable
     {
         HttpClient client = new();
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", secret);
+        client.DefaultRequestHeaders.Add(
+            MCPiler.Engine.Runtime.CompatibilitySchema.ContractGenerationHeader,
+            MCPiler.Engine.Runtime.CompatibilitySchema.ResponseCacheOperatorGeneration);
         return client;
     }
 

@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "contractGeneration": "1",
+  "read": {
+    "mount": "/api",
+    "caching": "enabled",
+    "invocations": 2,
+    "upstreamSends": 1,
+    "recent": [
+      {
+        "observedAtUtc": "2026-09-24T10:00:00+00:00",
+        "operationSlug": "get-thing",
+        "kind": "Miss",
+        "execution": "Upstream",
+        "reason": "live-send",
+        "keyFingerprint": "a1b2c3d4e5f6",
+        "effectiveTtlSeconds": 300,
+        "flightRole": "Producer",
+        "entryBytes": 512,
+        "stored": true
+      },
+      {
+        "observedAtUtc": "2026-09-24T10:00:05+00:00",
+        "operationSlug": "get-thing",
+        "kind": "Hit",
+        "execution": "Cached",
+        "reason": "hit",
+        "keyFingerprint": "a1b2c3d4e5f6",
+        "effectiveTtlSeconds": 300,
+        "ageSeconds": 5,
+        "remainingTtlSeconds": 295,
+        "flightRole": "None",
+        "entryBytes": 512,
+        "stored": false
+      }
+    ]
+  },
+  "clear": {
+    "mount": "/api",
+    "operation": "get-thing",
+    "removed": 1,
+    "caching": "enabled",
+    "manifestGenerationChanged": false
+  }
+}

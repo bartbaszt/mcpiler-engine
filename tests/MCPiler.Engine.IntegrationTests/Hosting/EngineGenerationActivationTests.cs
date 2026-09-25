@@ -1087,6 +1087,9 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
             HttpClient client = new();
             client.DefaultRequestHeaders.Authorization =
                 new AuthenticationHeaderValue("Bearer", "operator-secret-for-tests");
+            client.DefaultRequestHeaders.Add(
+                MCPiler.Engine.Runtime.CompatibilitySchema.ContractGenerationHeader,
+                MCPiler.Engine.Runtime.CompatibilitySchema.ResponseCacheOperatorGeneration);
             return client;
         }
     }

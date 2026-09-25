@@ -33,6 +33,10 @@
     to start with, and what a client sees over a transport. None of that is a unit.
   -->
   <ItemGroup>
+    <Content Include="..\..\tests\fixtures\response-cache\operator-v1.json" Link="fixtures/response-cache/operator-v1.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\MCPiler.Engine\MCPiler.Engine.csproj" />
     <ProjectReference Include="..\..\src\MCPiler.Engine.Host\MCPiler.Engine.Host.csproj" />
   </ItemGroup>

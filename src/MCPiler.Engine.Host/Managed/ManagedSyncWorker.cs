@@ -278,6 +278,15 @@ internal sealed class ManagedSyncWorker : IDisposable
                             + "will not open a listener that would serve an empty surface; publish a "
                             + "connector and restart, or check the configured deployment identity.");
 
+                    case ManagedPollOutcome.CandidateRefused:
+                        return ManagedInitialSync.Refused(
+                            result.Diagnostics.Count > 0
+                                ? result.Diagnostics[0].Code
+                                : "managed/initial-candidate-refused",
+                            result.Diagnostics.Count > 0
+                                ? result.Diagnostics[0].Message
+                                : "The Platform refused the initial generation.");
+
                     default:
                         // Unreachable, or a retryable failure. Backoff applies within the bound so a
                         // Platform that is only briefly unavailable does not cost a restart.
@@ -360,6 +369,17 @@ internal sealed class ManagedSyncWorker : IDisposable
                         // an immediate retry would turn one bad candidate into a request storm
                         // against the control plane. The bounded backoff applies instead, and the
                         // refusal stays recorded for the next report.
+                        await Task.Delay(_backoff.Next(), cancellationToken).ConfigureAwait(false);
+                        break;
+
+                    case ManagedPollOutcome.CandidateRefused:
+                        _lastCandidateOutcome = ManagedProtocol.CandidateFailed;
+                        _lastCandidateCode = result.Diagnostics.Count > 0
+                            ? result.Diagnostics[0].Code
+                            : "managed/refused";
+                        _lastCandidateMessage = result.Diagnostics.Count > 0
+                            ? result.Diagnostics[0].Message
+                            : "The Platform refused the generation.";
                         await Task.Delay(_backoff.Next(), cancellationToken).ConfigureAwait(false);
                         break;
 
@@ -525,6 +545,7 @@ internal sealed class ManagedSyncWorker : IDisposable
         PendingReconciliationCount = _reconciliations.Count,
         EngineInstanceId = _instanceId,
         EngineReportSequence = ++_reportSequence,
+        Compatibility = CompatibilityDescriptor.EngineSupport(),
     };
 
     /// <inheritdoc />

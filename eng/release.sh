@@ -224,6 +224,11 @@ case "$mode" in
       exit 64
     }
     git -C "$ROOT" fetch origin main --tags
+    origin_main="$(git -C "$ROOT" rev-parse origin/main)"
+    git -C "$ROOT" merge-base --is-ancestor "$release_commit" "$origin_main" || {
+      echo "FAIL: release commit $release_commit is not contained in origin/main." >&2
+      exit 1
+    }
     remote_commit="$(remote_tag_commit "$release_tag")"
     mode_result="$(release_recovery_mode "$remote_commit" "$release_commit" "$candidate_commit")" || {
       echo 'FAIL: remote tag, release commit and candidate identity do not agree.' >&2

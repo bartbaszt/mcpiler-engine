@@ -1,5 +1,7 @@
 using System.Text.Json.Serialization;
 
+using MCPiler.Engine.Runtime;
+
 namespace MCPiler.Engine.Host.Managed;
 
 /// <summary>
@@ -20,14 +22,17 @@ namespace MCPiler.Engine.Host.Managed;
 public sealed class ManagedGenerationMessage
 {
     /// <summary>The protocol version the producer wrote.</summary>
+    [JsonRequired]
     [JsonPropertyName("protocolVersion")]
     public int ProtocolVersion { get; set; }
 
     /// <summary>The producer's deterministic generation identity.</summary>
+    [JsonRequired]
     [JsonPropertyName("generationId")]
     public string GenerationId { get; set; } = string.Empty;
 
     /// <summary>Every mount of the generation, in delivery order.</summary>
+    [JsonRequired]
     [JsonPropertyName("mounts")]
     public List<ManagedMountMessage> Mounts { get; set; } = [];
 
@@ -35,22 +40,37 @@ public sealed class ManagedGenerationMessage
     /// Provider key to value. Delivered separately from the Manifests because the Manifests
     /// carry only references; a value here never becomes part of a Manifest byte.
     /// </summary>
+    [JsonRequired]
     [JsonPropertyName("secrets")]
     public Dictionary<string, string> Secrets { get; set; } = new(StringComparer.Ordinal);
 
     /// <summary>Correlation metadata; none of it changes what is served.</summary>
+    [JsonRequired]
     [JsonPropertyName("metadata")]
     public ManagedMetadataMessage Metadata { get; set; } = new();
+
+    [JsonRequired]
+    [JsonPropertyName("kind")]
+    public string Kind { get; set; } = "generation";
+
+    [JsonPropertyName("compatibility")]
+    public ManagedCompatibilityMessage? Compatibility { get; set; }
+
+    [JsonRequired]
+    [JsonPropertyName("diagnostics")]
+    public List<ManagedDiagnosticMessage> Diagnostics { get; set; } = [];
 }
 
 /// <summary>One mount of the delivered generation.</summary>
 public sealed class ManagedMountMessage
 {
     /// <summary>The route prefix this mount is served under.</summary>
+    [JsonRequired]
     [JsonPropertyName("prefix")]
     public string Prefix { get; set; } = string.Empty;
 
     /// <summary>The packed Manifest bundle, base64.</summary>
+    [JsonRequired]
     [JsonPropertyName("bundle")]
     public string Bundle { get; set; } = string.Empty;
 }
@@ -59,10 +79,12 @@ public sealed class ManagedMountMessage
 public sealed class ManagedMetadataMessage
 {
     /// <summary>The producer's desired revision identity.</summary>
+    [JsonRequired]
     [JsonPropertyName("desiredRevisionId")]
     public string? DesiredRevisionId { get; set; }
 
     /// <summary>The producer's Engine version, for diagnostics only.</summary>
+    [JsonRequired]
     [JsonPropertyName("engineVersion")]
     public string? EngineVersion { get; set; }
 }
@@ -123,16 +145,49 @@ public sealed class ManagedPollRequestMessage
     /// </summary>
     [JsonPropertyName("engineReportSequence")]
     public long EngineReportSequence { get; set; }
+
+    [JsonPropertyName("compatibility")]
+    public CompatibilityDescriptor? Compatibility { get; set; }
 }
 
 /// <summary>One bounded, sanitized diagnostic.</summary>
 public sealed class ManagedDiagnosticMessage
 {
     /// <summary>The stable code.</summary>
+    [JsonRequired]
     [JsonPropertyName("code")]
     public string Code { get; set; } = string.Empty;
 
     /// <summary>The human-readable message; never a secret.</summary>
+    [JsonRequired]
+    [JsonPropertyName("message")]
+    public string Message { get; set; } = string.Empty;
+}
+
+public sealed class ManagedCompatibilityMessage
+{
+    [JsonRequired]
+    [JsonPropertyName("status")]
+    public string Status { get; set; } = string.Empty;
+
+    [JsonRequired]
+    [JsonPropertyName("reasonCode")]
+    public string ReasonCode { get; set; } = string.Empty;
+
+    [JsonRequired]
+    [JsonPropertyName("dimension")]
+    public string Dimension { get; set; } = string.Empty;
+
+    [JsonPropertyName("required")]
+    public string? Required { get; set; }
+
+    [JsonPropertyName("supported")]
+    public string? Supported { get; set; }
+
+    [JsonPropertyName("descriptorSchemaVersion")]
+    public int? DescriptorSchemaVersion { get; set; }
+
+    [JsonRequired]
     [JsonPropertyName("message")]
     public string Message { get; set; } = string.Empty;
 }

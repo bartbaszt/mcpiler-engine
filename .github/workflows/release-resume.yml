@@ -274,12 +274,16 @@ jobs:
           set -euo pipefail
           source eng/release-lib.sh
           changelog_section CHANGELOG.md "$RELEASE_VERSION" > release-body.md
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo 'RESULT: GITHUB_RELEASE_ALREADY_PUBLISHED'
-          else
-            gh release create "$RELEASE_TAG" --verify-tag --title "MCPiler Engine $RELEASE_TAG" --notes-file release-body.md
-            echo 'RESULT: GITHUB_RELEASE_PUBLISHED'
-          fi
+           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+             [[ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" != true ]]
+             [[ "$(gh release view "$RELEASE_TAG" --json isPrerelease --jq .isPrerelease)" != true ]]
+             gh release view "$RELEASE_TAG" --json body --jq .body > existing-release-body.md
+             cmp -s release-body.md existing-release-body.md
+             echo 'RESULT: GITHUB_RELEASE_ALREADY_PUBLISHED'
+           else
+             gh release create "$RELEASE_TAG" --verify-tag --title "MCPiler Engine $RELEASE_TAG" --notes-file release-body.md
+             echo 'RESULT: GITHUB_RELEASE_PUBLISHED'
+           fi
 
   resume_complete:
     # Terminal completeness gate. A skipped job taints the downstream chain, so without an explicit

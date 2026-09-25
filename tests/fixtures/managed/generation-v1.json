@@ -17,5 +17,14 @@
   "metadata": {
     "desiredRevisionId": "0000000000000000000000000000000000000000000000000000000000000001",
     "engineVersion": "fixture"
-  }
+  },
+  "kind": "generation",
+  "compatibility": {
+    "status": "compatible",
+    "reasonCode": "compatibility/compatible",
+    "dimension": "contract",
+    "descriptorSchemaVersion": 1,
+    "message": "The Platform requirements and Engine support are compatible."
+  },
+  "diagnostics": []
 }
