@@ -20,12 +20,12 @@ namespace MCPiler.Engine.Host.ProjectionWorker;
 /// else.
 /// </para>
 /// <para>
-/// The parent's obligations are the ones a child cannot be trusted with: a total wall deadline
-/// spanning launch, handshake, evaluation and reap; a cap on every frame in both directions,
-/// enforced while reading; a bounded number of concurrent workers and a bounded wait for a slot;
-/// and kill-and-reap on every failure path before a slot is released. A worker whose exit was
-/// not confirmed keeps its slot charged, because a released slot with a live orphan behind it is
-/// how a bounded pool becomes an unbounded process launcher.
+/// The evaluation clock starts before the synchronous <see cref="Process.Start"/> call and keeps
+/// running through the handshake, evaluation and reap. <see cref="Process.Start"/> itself cannot
+/// be cancelled, so its call is not claimed to stop at the deadline; after it returns, the
+/// deadline governs every asynchronous phase. Cleanup has a separate bounded timeout, and a
+/// worker whose exit is not confirmed keeps its slot charged, because a released slot with a live
+/// orphan behind it is how a bounded pool becomes an unbounded process launcher.
 /// </para>
 /// <para>
 /// Nothing about an evaluation reaches the child except the expression and the normalized body,
@@ -37,6 +37,7 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
 {
     private readonly WorkerPoolOptions _options;
     private readonly SemaphoreSlim _slots;
+    private readonly SemaphoreSlim _queueSlots;
     private bool _disposed;
 
     /// <summary>Creates a host over one pool configuration.</summary>
@@ -51,7 +52,44 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
             throw new ArgumentOutOfRangeException(nameof(options), "At least one worker slot is required.");
         }
 
+        if (options.QueueCapacity < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "At least one queue slot is required.");
+        }
+
+        if (options.TotalDeadline <= TimeSpan.Zero
+            || options.TotalDeadline > WorkerPoolOptions.MaximumEvaluationDeadline)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "The local evaluation deadline must be positive and no more than 60 seconds.");
+        }
+
+        if (options.AdmissionWait <= TimeSpan.Zero
+            || options.AdmissionWait > WorkerPoolOptions.MaximumAdmissionWait)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "The admission wait must be positive and no greater than the timer-supported maximum.");
+        }
+
+        if (options.Limits.CommittedBytes < 1
+            || options.Limits.CommittedBytes > long.MaxValue / 2)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "The committed-memory limit must be positive and no more than long.MaxValue / 2.");
+        }
+
+        if (options.InputBodyLimitBytes < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "A positive input body bound is required.");
+        }
+
+        _ = options.PreparedInputFrameLimitBytes;
+
         _slots = new SemaphoreSlim(options.MaxConcurrentWorkers, options.MaxConcurrentWorkers);
+        _queueSlots = new SemaphoreSlim(options.QueueCapacity, options.QueueCapacity);
     }
 
     /// <inheritdoc />
@@ -71,14 +109,46 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
                 "The worker received non-positive projection limits."));
         }
 
-        if (!_slots.Wait(0, CancellationToken.None)
-            && !await _slots.WaitAsync(_options.AdmissionWait, cancellationToken).ConfigureAwait(false))
+        if (normalizedJson.Length > _options.PreparedInputFrameLimitBytes)
         {
             return JmesPathEvaluationResult.Failed(new JmesPathFailure(
-                JmesPathFailureClass.OperationalBusy,
-                string.Create(
+                JmesPathFailureClass.InputNotJson,
+                "The prepared input exceeds the operational transport bound."));
+        }
+
+        bool slotAcquired = _slots.Wait(0, CancellationToken.None);
+
+        if (!slotAcquired && !_queueSlots.Wait(0, CancellationToken.None))
+        {
+            // A worker may have released its slot between the first probe and the full-queue
+            // check. Claim that slot directly rather than refuse a request while capacity exists.
+            slotAcquired = _slots.Wait(0, CancellationToken.None);
+
+            if (!slotAcquired)
+            {
+                return Busy("The projection worker queue is full.");
+            }
+        }
+        else if (!slotAcquired)
+        {
+            try
+            {
+                slotAcquired = await _slots.WaitAsync(_options.AdmissionWait, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            finally
+            {
+                // Queue capacity bounds only callers waiting for a worker slot. Once a slot is
+                // acquired, the caller occupies worker capacity rather than queue capacity.
+                _ = _queueSlots.Release();
+            }
+
+            if (!slotAcquired)
+            {
+                return Busy(string.Create(
                     CultureInfo.InvariantCulture,
-                    $"No projection worker slot became free within {_options.AdmissionWait.TotalMilliseconds:F0} ms.")));
+                    $"No projection worker slot became free within {_options.AdmissionWait.TotalMilliseconds:F0} ms."));
+            }
         }
 
         bool reapConfirmed = false;
@@ -110,6 +180,13 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
         }
     }
 
+    internal int ActiveWorkerCount => _options.MaxConcurrentWorkers - _slots.CurrentCount;
+
+    internal int PendingWaiterCount => _options.QueueCapacity - _queueSlots.CurrentCount;
+
+    private static JmesPathEvaluationResult Busy(string message)
+        => JmesPathEvaluationResult.Failed(new JmesPathFailure(JmesPathFailureClass.OperationalBusy, message));
+
     /// <inheritdoc />
     public void Dispose()
     {
@@ -120,6 +197,7 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
 
         _disposed = true;
         _slots.Dispose();
+        _queueSlots.Dispose();
     }
 
     private async Task<JmesPathEvaluationResult> RunWorkerAsync(
@@ -129,12 +207,9 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
         CancellationToken cancellationToken)
     {
         // Start the one-call clock before process creation. Process.Start is synchronous, so it
-        // cannot be interrupted, but time spent in it still consumes the same wall budget: a
-        // launch that returns after its deadline is killed before it receives any request data.
-        TimeSpan requestedDeadline = TimeSpan.FromMilliseconds(limits.MaxEvaluationMilliseconds);
-        TimeSpan totalBudget = requestedDeadline < _options.TotalDeadline
-            ? requestedDeadline
-            : _options.TotalDeadline;
+        // cannot be interrupted; time spent in it still consumes the same wall budget, and a
+        // launch that returns after the deadline receives no request data.
+        TimeSpan totalBudget = _options.GetEvaluationBudget(limits.MaxEvaluationMilliseconds);
         using var total = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         total.CancelAfter(totalBudget);
 
@@ -150,7 +225,7 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
                 {
                     return JmesPathEvaluationResult.Failed(new JmesPathFailure(
                         JmesPathFailureClass.OperationalTimeout,
-                        $"The projection worker did not launch within its {totalBudget.TotalMilliseconds:F0} ms deadline."));
+                        $"The synchronous worker launch returned after its {totalBudget.TotalMilliseconds:F0} ms deadline; no request was sent."));
                 }
 
                 return JmesPathEvaluationResult.Failed(new JmesPathFailure(
@@ -199,7 +274,7 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
                 {
                     return await RefuseAsync(
                         process, input, JmesPathFailureClass.OperationalWorkerFailure,
-                        "The projection worker did not report a verified memory confinement before its deadline.")
+                        "The projection worker did not report a verified memory confinement before the worker call deadline.")
                         .ConfigureAwait(false);
                 }
 
@@ -243,7 +318,7 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
                 {
                     return await RefuseAsync(
                         process, input, JmesPathFailureClass.OperationalWorkerFailure,
-                        "The projection worker produced no response header before its deadline.")
+                        "The projection worker produced no response header before the worker call deadline.")
                         .ConfigureAwait(false);
                 }
 
@@ -269,13 +344,15 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
                         JmesPathFailure.ClassFromCode(response!.Code), response.Message!));
                 }
 
-                if (response!.OutputBytes > limits.MaxOutputBytes)
+                long responseLimit = Math.Min(_options.MaxOutputBytes, limits.MaxOutputBytes);
+
+                if (response!.OutputBytes > responseLimit)
                 {
                     return await RefuseAsync(
                         process,
                         input,
                         JmesPathFailureClass.OutputTooManyBytes,
-                        $"The projection worker declared {response.OutputBytes} output bytes, exceeding maxOutputBytes={limits.MaxOutputBytes}.")
+                        $"The projection worker declared {response.OutputBytes} output bytes, exceeding maxOutputBytes={responseLimit}.")
                         .ConfigureAwait(false);
                 }
 
@@ -286,9 +363,7 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
                     payload = await WorkerProtocol
                         .ReadFrameAsync(
                             output,
-                            (int)Math.Min(
-                                Math.Min(_options.MaxOutputBytes, limits.MaxOutputBytes),
-                                WorkerProtocol.MaxBodyBytes),
+                            checked((int)Math.Min(responseLimit, int.MaxValue)),
                             total.Token)
                         .ConfigureAwait(false);
                 }
@@ -330,7 +405,7 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
                         JmesPathFailureClass.OperationalTimeout,
                         string.Create(
                             CultureInfo.InvariantCulture,
-                            $"The projection evaluation exceeded its {totalBudget.TotalMilliseconds:F0} ms deadline.")));
+                            $"The projection worker call exceeded its {totalBudget.TotalMilliseconds:F0} ms deadline; synchronous process launch is not interruptible.")));
             }
             catch (Exception streamFailure) when (
                 streamFailure is IOException or ObjectDisposedException or InvalidOperationException)
@@ -421,20 +496,17 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
 
         information.ArgumentList.Add(WorkerProtocol.ModeArgument);
 
-        // The child caps its managed heap from the environment before the runtime initializes.
-        WorkerResourceLimits.ApplyGcHeapCap(information.Environment, _options.Limits.CommittedBytes);
-
-        // The child applies the same confinement values the parent believes it applied. Passing
-        // them means a deployment that narrowed the policy narrows the worker identically, and
-        // the echoed handshake is then a verification rather than a coincidence.
-        information.Environment["MCPILER_PROJECTION_WORKER_COMMITTED_BYTES"] =
-            _options.Limits.CommittedBytes.ToString(CultureInfo.InvariantCulture);
-        information.Environment["MCPILER_PROJECTION_WORKER_ADDRESS_SPACE_BYTES"] =
-            _options.Limits.AddressSpaceBytes.ToString(CultureInfo.InvariantCulture);
-
-        // No ambient host environment travels with the evaluator.
-        information.Environment.Remove("ASPNETCORE_ENVIRONMENT");
-        information.Environment.Remove("DOTNET_ENVIRONMENT");
+        // Start from an empty environment. Only required Windows runtime values and explicit
+        // worker confinement settings reach the child; application secrets never do.
+        if (!WorkerResourceLimits.TryConfigureWorkerEnvironment(
+                information.Environment,
+                _options.Limits.CommittedBytes,
+                _options.Limits.AddressSpaceBytes,
+                _options.InputBodyLimitBytes,
+                out refusal))
+        {
+            return null;
+        }
 
         try
         {
@@ -475,7 +547,7 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
             // the authority on whether it is gone.
         }
 
-        using var reap = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        using var reap = new CancellationTokenSource(WorkerPoolOptions.CleanupTimeout);
 
         try
         {
@@ -484,7 +556,7 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
         catch (OperationCanceledException)
         {
             throw new WorkerReapException(
-                "The projection worker did not confirm its exit after a kill, so its capacity remains charged.");
+                $"The projection worker did not confirm its exit within the {WorkerPoolOptions.CleanupTimeout.TotalSeconds:F0}-second cleanup bound, so its capacity remains charged.");
         }
     }
 
@@ -531,11 +603,12 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
     }
 }
 
-/// <summary>The operational policy one host applies to every worker it starts.</summary>
+/// <summary>The operational policy one host applies to every worker it starts. The total deadline is an independent absolute local ceiling.</summary>
 /// <param name="Limits">The OS-confined memory values.</param>
 /// <param name="MaxConcurrentWorkers">How many workers may run at once.</param>
-/// <param name="TotalDeadline">The whole-call wall budget.</param>
-/// <param name="AdmissionWait">How long a caller waits for a slot before a busy refusal.</param>
+/// <param name="TotalDeadline">The independent absolute local launch/IPC/evaluation host ceiling; it is capped at 60 seconds.</param>
+/// <param name="AdmissionWait">How long a caller waits for a slot before a busy refusal; it is capped at the timer-supported maximum.</param>
+/// <param name="QueueCapacity">How many callers may wait beyond active workers.</param>
 /// <param name="MaxStderrBytes">The diagnostic cap per worker.</param>
 /// <param name="MaxOutputBytes">The parent's own cap on a result frame.</param>
 /// <param name="Launch">
@@ -543,6 +616,7 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
 /// it because the process that starts a worker is normally the serving executable while a test
 /// host is a different one; production leaves it unset.
 /// </param>
+/// <param name="InputBodyLimitBytes">The accepted raw JSON input bound for this host.</param>
 internal sealed record WorkerPoolOptions(
     WorkerLimits Limits,
     int MaxConcurrentWorkers,
@@ -550,18 +624,46 @@ internal sealed record WorkerPoolOptions(
     TimeSpan AdmissionWait,
     int MaxStderrBytes,
     long MaxOutputBytes,
-    WorkerLaunch? Launch = null)
+    int QueueCapacity = 8,
+    WorkerLaunch? Launch = null,
+    long InputBodyLimitBytes = WorkerResourceLimits.DefaultInputBodyLimitBytes)
 {
+    internal static TimeSpan MaximumEvaluationDeadline { get; } = TimeSpan.FromSeconds(60);
+
+    internal static TimeSpan MaximumAdmissionWait { get; } = TimeSpan.FromMilliseconds(int.MaxValue);
+
+    internal static TimeSpan CleanupTimeout { get; } = TimeSpan.FromSeconds(5);
+
+    internal int PreparedInputFrameLimitBytes
+        => WorkerProtocol.PreparedInputFrameLimitBytes(InputBodyLimitBytes);
+
+    internal TimeSpan GetEvaluationBudget(int declaredMilliseconds)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(declaredMilliseconds);
+
+        if (TotalDeadline <= TimeSpan.Zero || TotalDeadline > MaximumEvaluationDeadline)
+        {
+            throw new InvalidOperationException(
+                "The local evaluation deadline must be positive and no more than 60 seconds.");
+        }
+
+        TimeSpan declared = TimeSpan.FromMilliseconds(declaredMilliseconds);
+        return declared < TotalDeadline ? declared : TotalDeadline;
+    }
+
     /// <summary>The calibrated production defaults.</summary>
     internal static WorkerPoolOptions Default { get; } = new(
         Limits: new WorkerLimits(
             CommittedBytes: WorkerResourceLimits.DefaultCommittedBytes,
-            AddressSpaceBytes: WorkerResourceLimits.DefaultAddressSpaceBytes),
+            AddressSpaceBytes: WorkerResourceLimits.DefaultAddressSpaceBytes,
+            InputBodyLimitBytes: WorkerResourceLimits.DefaultInputBodyLimitBytes),
         MaxConcurrentWorkers: 2,
-        TotalDeadline: TimeSpan.FromMilliseconds(10_000),
+        TotalDeadline: TimeSpan.FromMilliseconds(60_000),
         AdmissionWait: TimeSpan.FromMilliseconds(5_000),
         MaxStderrBytes: 64 * 1024,
-        MaxOutputBytes: 1024L * 1024);
+        MaxOutputBytes: 1024L * 1024,
+        QueueCapacity: 8,
+        InputBodyLimitBytes: WorkerResourceLimits.DefaultInputBodyLimitBytes);
 }
 
 /// <summary>The exact program and worker assembly a host starts.</summary>

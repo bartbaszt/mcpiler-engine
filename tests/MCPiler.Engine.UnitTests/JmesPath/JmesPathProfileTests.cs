@@ -314,6 +314,14 @@ public sealed class JmesPathProfileTests
     }
 
     [Fact]
+    public void Prepared_input_frame_limit_uses_checked_canonicalization_arithmetic()
+    {
+        Assert.Equal(1_048, JmesPathProfile.PreparedInputFrameLimitBytes(4));
+        Assert.Equal(314_573_824, JmesPathProfile.PreparedInputFrameLimitBytes(50L * 1024 * 1024));
+        Assert.Throws<OverflowException>(() => JmesPathProfile.PreparedInputFrameLimitBytes(long.MaxValue));
+    }
+
+    [Fact]
     public void Non_positive_limits_are_refused_before_anything_is_parsed()
     {
         JmesPathLimits broken = Limits with { MaxInputNodes = 0 };

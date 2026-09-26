@@ -34,6 +34,7 @@ internal static class OutputProjectionStage
     /// <summary>Applies the binding's output projection to an arrived body.</summary>
     internal static async Task<OutputProjectionResult> ApplyAsync(
         ManifestDocument manifest,
+        PolicySection policy,
         AgentOperationEntry entry,
         ManifestOperation operation,
         EngineExecutionResult result,
@@ -41,6 +42,7 @@ internal static class OutputProjectionStage
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(manifest);
+        ArgumentNullException.ThrowIfNull(policy);
         ArgumentNullException.ThrowIfNull(entry);
         ArgumentNullException.ThrowIfNull(operation);
         ArgumentNullException.ThrowIfNull(result);
@@ -53,11 +55,11 @@ internal static class OutputProjectionStage
         switch (projection)
         {
             case ManifestOutputProjection.TransformProgramVariant:
-                return TransformOutput(manifest, entry, result);
+                return TransformOutput(manifest, policy, entry, result);
 
             case ManifestOutputProjection.JmesPathVariant jmesPath:
                 return await JmesPathOutputAsync(
-                    manifest,
+                    policy,
                     operation,
                     result,
                     jmesPath,
@@ -75,11 +77,13 @@ internal static class OutputProjectionStage
     /// <summary>The existing TransformProgram path, delegated without changing its behavior.</summary>
     private static OutputProjectionResult TransformOutput(
         ManifestDocument manifest,
+        PolicySection policy,
         AgentOperationEntry entry,
         EngineExecutionResult result)
     {
         if (TransformStage.TryOutput(
                 manifest,
+                policy,
                 entry,
                 result,
                 out byte[]? body,
@@ -97,7 +101,7 @@ internal static class OutputProjectionStage
     }
 
     private static async Task<OutputProjectionResult> JmesPathOutputAsync(
-        ManifestDocument manifest,
+        PolicySection policy,
         ManifestOperation operation,
         EngineExecutionResult result,
         ManifestOutputProjection.JmesPathVariant projection,
@@ -146,7 +150,7 @@ internal static class OutputProjectionStage
                     "The response has no inline JSON body to project."));
         }
 
-        JmesPathLimits effective = EffectiveLimits(manifest.Policy, projection.Limits);
+        JmesPathLimits effective = EffectiveLimits(policy, projection.Limits);
 
         int expressionBytes = JmesPathProfile.ExpressionByteCount(projection.Expression);
         if (expressionBytes > effective.MaxExpressionBytes)

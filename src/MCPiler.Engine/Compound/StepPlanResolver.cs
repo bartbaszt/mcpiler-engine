@@ -25,11 +25,13 @@ internal static class StepPlanResolver
     /// <returns>False when a step, an operation or a bound cannot be resolved.</returns>
     internal static bool TryResolve(
         ManifestDocument manifest,
+        PolicySection policy,
         CompoundBinding binding,
         [NotNullWhen(true)] out CompoundPlan? plan,
         [NotNullWhen(false)] out string? failure)
     {
         ArgumentNullException.ThrowIfNull(manifest);
+        ArgumentNullException.ThrowIfNull(policy);
         ArgumentNullException.ThrowIfNull(binding);
 
         plan = null;
@@ -65,7 +67,7 @@ internal static class StepPlanResolver
                 step.InputProgram));
         }
 
-        CompoundBounds bounds = manifest.Policy.EffectiveCompound;
+        CompoundBounds bounds = policy.EffectiveCompound;
 
         plan = new CompoundPlan(
             steps,

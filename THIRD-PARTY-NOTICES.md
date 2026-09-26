@@ -6,6 +6,8 @@ excluded. Regenerate and verify it with `eng/check-licenses.sh`.
 
 | Package | Version | Licence |
 | --- | --- | --- |
+| `Corvus.Text.Json` | `5.6.1` | `Apache-2.0` |
+| `Corvus.Text.Json.JMESPath` | `5.6.1` | `Apache-2.0` |
 | `Humanizer.Core` | `3.0.10` | `MIT` |
 | `Json.More.Net` | `3.0.1` | `MCPILER-APPROVED-OSMFEULA` |
 | `JsonPointer.Net` | `7.0.2` | `MCPILER-APPROVED-OSMFEULA` |
@@ -19,6 +21,7 @@ excluded. Regenerate and verify it with `eng/check-licenses.sh`.
 | `ModelContextProtocol` | `2.2.0` | `Apache-2.0` |
 | `ModelContextProtocol.AspNetCore` | `2.2.0` | `Apache-2.0` |
 | `ModelContextProtocol.Core` | `2.2.0` | `Apache-2.0` |
+| `NodaTime` | `3.3.1` | `Apache-2.0` |
 
 ## Reviewed JSON-Everything binary terms
 

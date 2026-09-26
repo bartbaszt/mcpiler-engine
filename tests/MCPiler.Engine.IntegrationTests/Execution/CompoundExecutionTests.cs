@@ -403,7 +403,7 @@ public sealed class CompoundExecutionTests : IDisposable
         var service = new ExecutionService(new UpstreamSender(clients), new ManifestSecretResolver(), store);
 
         return await service.ExecuteAsync(
-            new ExecutionRequest(manifest, slug, arguments ?? []) { Scope = "mount" },
+            new ExecutionRequest(manifest, slug, arguments ?? [], manifest.Policy) { Scope = "mount" },
             TestContext.Current.CancellationToken);
     }
 

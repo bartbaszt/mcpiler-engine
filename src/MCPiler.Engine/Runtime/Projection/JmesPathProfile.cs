@@ -24,6 +24,19 @@ namespace MCPiler.Engine.Runtime.Projection;
 /// </remarks>
 public static class JmesPathProfile
 {
+    private const long CanonicalizationExpansionFactor = 6;
+    private const long CanonicalizationEnvelopeBytes = 1024;
+
+    /// <summary>
+    /// Returns the maximum prepared input frame for a raw JSON input bound.
+    /// </summary>
+    public static long PreparedInputFrameLimitBytes(long rawInputBytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(rawInputBytes);
+
+        return checked((rawInputBytes * CanonicalizationExpansionFactor) + CanonicalizationEnvelopeBytes);
+    }
+
     /// <summary>The only JMESPath language version this profile implements.</summary>
     /// <remarks>
     /// The version is MCPiler's, not the evaluator package's. It selects the frozen language
@@ -70,10 +83,9 @@ public static class JmesPathProfile
         using (document)
         {
             // A frame is JSON text, not raw source: re-encoding can expand a multi-byte
-            // character into escapes, and three times the source plus a header is above the
-            // measured worst case. The cap exists so a refusal is a refusal, never a partial
-            // write.
-            long cap = (body.Length * 4L) + 1024L;
+            // character into escapes. The checked six-times source bound plus envelope is
+            // the measured transport ceiling; the cap refuses rather than partially writes.
+            long cap = PreparedInputFrameLimitBytes(body.Length);
 
             if (!JmesPathCanonicalizer.TryCanonicalize(
                     document.RootElement,
@@ -154,7 +166,7 @@ public static class JmesPathProfile
                     JmesPathBudget.Input,
                     limits.MaxInputNodes,
                     limits.MaxInputDepth,
-                    (preparedJson.Length * 4L) + 1024L,
+                    PreparedInputFrameLimitBytes(preparedJson.Length),
                     out byte[]? normalized,
                     out _,
                     out JmesPathFailure? boundFailure))

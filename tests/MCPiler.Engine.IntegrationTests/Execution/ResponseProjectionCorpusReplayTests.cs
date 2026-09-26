@@ -213,7 +213,7 @@ public sealed class ResponseProjectionCorpusReplayTests
             ResponseBody = body.Bytes,
         };
 
-        if (!TransformStage.TryOutput(manifest, operation, execution, out byte[]? transformed, out string? transformFailure))
+        if (!TransformStage.TryOutput(manifest, manifest.Policy, operation, execution, out byte[]? transformed, out string? transformFailure))
         {
             return $"{id}: the output transformation failed: {transformFailure}";
         }

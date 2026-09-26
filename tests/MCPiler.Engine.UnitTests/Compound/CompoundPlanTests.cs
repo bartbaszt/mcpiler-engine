@@ -22,7 +22,7 @@ public sealed class CompoundPlanTests
     [Fact]
     public void Every_step_resolves_to_the_operation_its_binding_executes()
     {
-        Assert.True(StepPlanResolver.TryResolve(Manifest(), Binding("list-pets"), out CompoundPlan? plan, out _));
+        Assert.True(TryResolve(Manifest(), Binding("list-pets"), out CompoundPlan? plan, out _));
 
         PlannedStep step = Assert.Single(plan!.Steps);
 
@@ -43,14 +43,14 @@ public sealed class CompoundPlanTests
                 "Wrapped",
                 new TransformedHttpBinding(new HttpBinding("GET /pets"))));
 
-        Assert.True(StepPlanResolver.TryResolve(manifest, Binding("wrapped"), out CompoundPlan? plan, out _));
+        Assert.True(TryResolve(manifest, Binding("wrapped"), out CompoundPlan? plan, out _));
         Assert.Equal("GET /pets", Assert.Single(plan!.Steps).Operation.Key);
     }
 
     [Fact]
     public void A_step_naming_no_declared_operation_refuses_the_plan()
     {
-        Assert.False(StepPlanResolver.TryResolve(Manifest(), Binding("ghost"), out _, out string? failure));
+        Assert.False(TryResolve(Manifest(), Binding("ghost"), out _, out string? failure));
 
         Assert.Contains("s0", failure!, StringComparison.Ordinal);
         Assert.Contains("ghost", failure, StringComparison.Ordinal);
@@ -74,7 +74,7 @@ public sealed class CompoundPlanTests
                 new CompoundBinding([new CompoundStepEntry("x", "list-pets")]),
                 Kind: AgentOperationKind.Compound));
 
-        Assert.False(StepPlanResolver.TryResolve(manifest, Binding("inner"), out _, out string? failure));
+        Assert.False(TryResolve(manifest, Binding("inner"), out _, out string? failure));
         Assert.Contains("no upstream binding", failure!, StringComparison.Ordinal);
     }
 
@@ -85,7 +85,7 @@ public sealed class CompoundPlanTests
     public void The_response_budget_is_the_smaller_of_the_binding_and_the_policy(long? declared, long expected)
     {
         Assert.True(
-            StepPlanResolver.TryResolve(
+            TryResolve(
                 Manifest(compound: new CompoundBounds(4096, TimeSpan.FromSeconds(30))),
                 Binding("list-pets") with { MaxTotalResponseBytes = declared },
                 out CompoundPlan? plan,
@@ -101,7 +101,7 @@ public sealed class CompoundPlanTests
     public void The_time_budget_is_the_smaller_of_the_binding_and_the_policy(int? declared, int expected)
     {
         Assert.True(
-            StepPlanResolver.TryResolve(
+            TryResolve(
                 Manifest(compound: new CompoundBounds(4096, TimeSpan.FromSeconds(30))),
                 Binding("list-pets") with
                 {
@@ -119,7 +119,7 @@ public sealed class CompoundPlanTests
     [Fact]
     public void A_workflow_declaring_no_bounds_takes_the_format_defaults()
     {
-        Assert.True(StepPlanResolver.TryResolve(Manifest(), Binding("list-pets"), out CompoundPlan? plan, out _));
+        Assert.True(TryResolve(Manifest(), Binding("list-pets"), out CompoundPlan? plan, out _));
 
         Assert.Equal(100L * 1024 * 1024, plan!.MaxTotalResponseBytes);
         Assert.Equal(TimeSpan.FromSeconds(120), plan.WorkflowTimeout);
@@ -190,6 +190,13 @@ public sealed class CompoundPlanTests
             CompoundStage.All.OrderBy(static stage => stage, StringComparer.Ordinal));
 
     // ---- fixtures ------------------------------------------------------------------------
+
+    private static bool TryResolve(
+        ManifestDocument manifest,
+        CompoundBinding binding,
+        out CompoundPlan? plan,
+        out string? failure)
+        => StepPlanResolver.TryResolve(manifest, manifest.Policy, binding, out plan, out failure);
 
     private static CompoundBinding Binding(string operation)
         => new([new CompoundStepEntry("s0", operation)]);

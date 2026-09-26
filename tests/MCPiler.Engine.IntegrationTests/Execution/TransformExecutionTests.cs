@@ -344,7 +344,7 @@ public sealed class TransformExecutionTests : IDisposable
         var service = new ExecutionService(new UpstreamSender(clients), new ManifestSecretResolver(), store);
 
         return await service.ExecuteAsync(
-            new ExecutionRequest(manifest, ExecutionManifests.Slug, arguments ?? []),
+            new ExecutionRequest(manifest, ExecutionManifests.Slug, arguments ?? [], manifest.Policy),
             TestContext.Current.CancellationToken);
     }
 

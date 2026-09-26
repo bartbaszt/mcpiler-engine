@@ -39,6 +39,7 @@ internal sealed class SurfaceContinuationResolver : IContinuationResolver
     private readonly ManifestDocument _manifest;
     private readonly MountedManifest _mount;
     private readonly MountedSurface _surface;
+    private readonly PolicySection _policy;
     private readonly SchemaReferenceResolver? _schemaResolver;
     private readonly string _sourceSlug;
 
@@ -51,8 +52,15 @@ internal sealed class SurfaceContinuationResolver : IContinuationResolver
         _manifest = manifest;
         _mount = mount;
         _surface = surface;
+
+        // The policy that governs this mount after narrowing, not the policy as authored. A
+        // continuation is a promise about arguments a later call will compile and run, so it
+        // must be measured with the same effective policy that call will execute under. Using
+        // the authored document policy could accept an input program the real invocation then
+        // refuses, and a promised continuation that always fails is a broken promise.
+        _policy = mount.Policy;
         _schemaResolver = manifest.AgentSurfaceDocument is { } document
-            ? new SchemaReferenceResolver(document, manifest.Policy.EffectiveSchemaBounds)
+            ? new SchemaReferenceResolver(document, _policy.EffectiveSchemaBounds)
             : null;
         _sourceSlug = sourceSlug;
     }
@@ -156,6 +164,7 @@ internal sealed class SurfaceContinuationResolver : IContinuationResolver
 
         if (!TransformStage.TryInput(
                 _manifest,
+                _policy,
                 entry,
                 operation,
                 arguments,
@@ -247,6 +256,7 @@ internal sealed class SurfaceContinuationResolver : IContinuationResolver
 
         if (!TransformStage.TryInput(
                 _manifest,
+                _policy,
                 entry,
                 operation,
                 arguments,

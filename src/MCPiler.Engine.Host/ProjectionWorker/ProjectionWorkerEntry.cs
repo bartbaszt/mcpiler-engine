@@ -48,6 +48,28 @@ internal static class ProjectionWorkerEntry
         ArgumentNullException.ThrowIfNull(diagnostics);
         ArgumentNullException.ThrowIfNull(options);
 
+        int bodyFrameLimit;
+        try
+        {
+            bodyFrameLimit = WorkerProtocol.PreparedInputFrameLimitBytes(options.InputBodyLimitBytes);
+        }
+        catch (Exception exception) when (exception is ArgumentOutOfRangeException or OverflowException)
+        {
+            await WriteDiagnosticAsync(
+                diagnostics,
+                "The worker input bound cannot be represented by the frame protocol.",
+                cancellationToken).ConfigureAwait(false);
+
+            return ProtocolRefusedExitCode;
+        }
+
+        if (!WorkerResourceLimits.TryValidateWorkerEnvironment(out string? environmentRefusal))
+        {
+            await WriteDiagnosticAsync(diagnostics, environmentRefusal!, cancellationToken).ConfigureAwait(false);
+
+            return ConfinementRefusedExitCode;
+        }
+
         if (!WorkerResourceLimits.TryApply(
                 options.CommittedBytes,
                 options.AddressSpaceBytes,
@@ -105,7 +127,7 @@ internal static class ProjectionWorkerEntry
             }
 
             byte[]? body = await WorkerProtocol
-                .ReadFrameAsync(input, WorkerProtocol.MaxBodyBytes, cancellationToken)
+                .ReadFrameAsync(input, bodyFrameLimit, cancellationToken)
                 .ConfigureAwait(false);
 
             if (body is null || body.Length != request!.BodyBytes)
@@ -192,4 +214,8 @@ internal static class ProjectionWorkerEntry
 /// <summary>What one worker process is allowed to use.</summary>
 /// <param name="CommittedBytes">The Windows committed-memory limit, and the GC heap cap.</param>
 /// <param name="AddressSpaceBytes">The Linux address-space limit.</param>
-internal sealed record WorkerLimits(long CommittedBytes, long AddressSpaceBytes);
+/// <param name="InputBodyLimitBytes">The accepted raw JSON input bound.</param>
+internal sealed record WorkerLimits(
+    long CommittedBytes,
+    long AddressSpaceBytes,
+    long InputBodyLimitBytes = WorkerResourceLimits.DefaultInputBodyLimitBytes);

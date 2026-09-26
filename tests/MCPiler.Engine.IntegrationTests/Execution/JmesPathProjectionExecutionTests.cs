@@ -428,7 +428,7 @@ public sealed class JmesPathProjectionExecutionTests : IDisposable
             projections: worker);
 
         return await service.ExecuteAsync(
-            new ExecutionRequest(manifest, ExecutionManifests.Slug, []),
+            new ExecutionRequest(manifest, ExecutionManifests.Slug, [], manifest.Policy),
             TestContext.Current.CancellationToken);
     }
 

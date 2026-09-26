@@ -14,10 +14,12 @@ namespace MCPiler.Engine.Runtime.Projection;
 /// worker's operating-system memory limit, not by a meter.
 /// </para>
 /// <para>
-/// <c>MaxEvaluationMilliseconds</c> is the total wall budget for one worker call, covering
-/// launch, confinement handshake, evaluation and reap. It is an operational bound: two
-/// machines may reach different outcomes on the same input, and a caller must not treat a
-/// timeout as a language result.
+/// <c>MaxEvaluationMilliseconds</c> is the total wall budget for one worker call's launch,
+/// confinement handshake, IPC and evaluation. The synchronous process-launch call itself is not
+/// interruptible; after it returns, the deadline governs the remaining work. Mandatory kill/reap
+/// after cancellation uses a separate bounded cleanup interval, and an unconfirmed reap keeps
+/// capacity charged. It is an operational bound: two machines may reach different outcomes on the
+/// same input, and a caller must not treat a timeout as a language result.
 /// </para>
 /// </remarks>
 /// <param name="MaxExpressionBytes">UTF-8 byte length of the expression.</param>

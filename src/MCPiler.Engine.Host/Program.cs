@@ -72,10 +72,11 @@ internal static class Program
     /// </remarks>
     private static WorkerLimits WorkerLimitsFromEnvironment()
     {
-        long committed = ReadLimit("MCPILER_PROJECTION_WORKER_COMMITTED_BYTES", WorkerResourceLimits.DefaultCommittedBytes);
-        long addressSpace = ReadLimit("MCPILER_PROJECTION_WORKER_ADDRESS_SPACE_BYTES", WorkerResourceLimits.DefaultAddressSpaceBytes);
+        long committed = ReadLimit(WorkerResourceLimits.CommittedBytesVariable, WorkerResourceLimits.DefaultCommittedBytes);
+        long addressSpace = ReadLimit(WorkerResourceLimits.AddressSpaceBytesVariable, WorkerResourceLimits.DefaultAddressSpaceBytes);
+        long inputBody = ReadLimit(WorkerResourceLimits.InputBodyBytesVariable, WorkerResourceLimits.DefaultInputBodyLimitBytes);
 
-        return new WorkerLimits(committed, addressSpace);
+        return new WorkerLimits(committed, addressSpace, inputBody);
 
         static long ReadLimit(string name, long fallback)
         {
