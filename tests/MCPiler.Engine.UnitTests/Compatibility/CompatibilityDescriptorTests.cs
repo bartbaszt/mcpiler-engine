@@ -38,9 +38,9 @@ public sealed class CompatibilityDescriptorTests
                 Sections = new Dictionary<string, CompatibilitySectionRange>(StringComparer.Ordinal)
                 {
                     ["server"] = new(2, 2),
-                    ["policy"] = new(2, 2),
+                    ["policy"] = new(3, 3),
                     ["operations"] = new(1, 1),
-                    ["agentSurface"] = new(4, 4),
+                    ["agentSurface"] = new(5, 5),
                     ["credentials"] = new(4, 4),
                     ["authentication"] = new(2, 2),
                     ["tools"] = new(1, 1),
