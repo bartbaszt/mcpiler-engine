@@ -47,6 +47,18 @@
     <PackageVersion Include="JsonSchema.Net" Version="9.4.0" />
 
     <!--
+      Runtime as of the output projection profile. Two obligations need a real JMESPath
+      evaluator: previewing/validating an authored expression, and evaluating the frozen
+      profile-1 projection at invocation time. The package is consumed UNMODIFIED at this
+      exact version, and it is deliberately never called in-process: the serving process
+      and the Blazor process both run it only inside a short-lived, OS-confined worker.
+      The same package and same version are used by the Studio, so the two implementations
+      agree on the language rather than by comparison. Apache-2.0, no fork, no patch.
+    -->
+    <PackageVersion Include="Corvus.Text.Json.JMESPath" Version="5.6.1" />
+    <PackageVersion Include="Corvus.Text.Json" Version="5.6.1" />
+
+    <!--
       Runtime as of the authorization boundary. JWKS validation needs a token security
       library: signature and lifetime checking that is maintained against the JOSE
       ecosystem rather than reimplemented here. MIT licensed. Used only by the host

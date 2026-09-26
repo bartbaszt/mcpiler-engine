@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 
 using MCPiler.Engine.Execution.Outbound;
+using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Runtime;
 
 using Microsoft.AspNetCore.Http;
@@ -28,6 +29,8 @@ namespace MCPiler.Engine.IntegrationTests.Mcp;
 /// </remarks>
 public sealed class ToolsCallTests : IDisposable
 {
+    private const string ContinuationCanary = "AC065-91c7e4a2-engine-load-continuation";
+
     private readonly List<string> _roots = [];
 
     private static CancellationToken Token => TestContext.Current.CancellationToken;
@@ -441,6 +444,137 @@ public sealed class ToolsCallTests : IDisposable
     }
 
     [Fact]
+    public async Task A_compound_source_projection_is_refused_before_serving()
+    {
+        List<string> received = [];
+
+        await using var upstream = await Recording(
+            received,
+            200,
+            "application/json",
+            "{}");
+
+        JsonObject manifest = JsonNode.Parse(ServedManifests.Paginating(upstream.Address))!.AsObject();
+        JsonArray operations = manifest["sections"]!["agentSurface"]!["inline"]!["operations"]!.AsArray();
+        JsonObject source = operations[0]!.AsObject();
+        source["slug"] = "workflow";
+        source["name"] = "Workflow";
+        source["kind"] = "compound";
+        source["binding"] = new JsonObject
+        {
+            ["type"] = "compound",
+            ["steps"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["stepId"] = "one",
+                    ["operation"] = "get-pet",
+                    ["inputMappings"] = new JsonArray(),
+                },
+            },
+        };
+
+        foreach (JsonNode? surfaceNode in manifest["sections"]!["server"]!["inline"]!["surfaces"]!.AsArray())
+        {
+            foreach (JsonNode? entry in surfaceNode!.AsObject()["operations"]!.AsArray())
+            {
+                JsonObject operation = entry!.AsObject();
+                if (string.Equals(operation["operation"]?.GetValue<string>(), "list-pets", StringComparison.Ordinal))
+                {
+                    operation["operation"] = "workflow";
+                }
+            }
+        }
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => ServeManifestAsync(manifest.ToJsonString(), "compound-projection"));
+
+        Assert.Contains("binding/projection-invalid", error.Message, StringComparison.Ordinal);
+        Assert.Empty(received);
+    }
+
+    [Theory]
+    [InlineData(ParameterLocation.Query, "api_key")]
+    [InlineData(ParameterLocation.Header, "X-Session-Token")]
+    public async Task A_transformed_sensitive_continuation_destination_is_refused_at_load_without_an_outbound_request(
+        ParameterLocation location,
+        string destination)
+    {
+        List<string> received = [];
+
+        await using var upstream = await Recording(
+            received,
+            200,
+            "application/json",
+            "{}");
+
+        string manifest = ServedManifests.TransformedSensitiveContinuation(
+            upstream.Address,
+            location,
+            destination,
+            ContinuationCanary);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => ServeManifestAsync(manifest, "transformed-sensitive-continuation"));
+
+        Assert.Contains("binding/projection-invalid", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(ContinuationCanary, error.Message, StringComparison.Ordinal);
+        Assert.Empty(received);
+    }
+
+    [Fact]
+    public async Task A_self_sensitive_continuation_destination_is_refused_at_load_without_an_outbound_request()
+    {
+        List<string> received = [];
+
+        await using var upstream = await Recording(
+            received,
+            200,
+            "application/json",
+            "{}");
+
+        string manifest = ServedManifests.SelfSensitiveContinuation(
+            upstream.Address,
+            ContinuationCanary);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => ServeManifestAsync(manifest, "self-sensitive-continuation"));
+
+        Assert.Contains("binding/projection-invalid", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(ContinuationCanary, error.Message, StringComparison.Ordinal);
+        Assert.Empty(received);
+    }
+
+    [Theory]
+    [InlineData(ParameterLocation.Query, "api_key")]
+    [InlineData(ParameterLocation.Header, "X-Session-Token")]
+    public async Task A_sensitive_continuation_destination_is_refused_at_load_without_an_outbound_request(
+        ParameterLocation location,
+        string destination)
+    {
+        List<string> received = [];
+
+        await using var upstream = await Recording(
+            received,
+            200,
+            "application/json",
+            "{}");
+
+        string manifest = ServedManifests.SensitiveContinuation(
+            upstream.Address,
+            location,
+            destination,
+            ContinuationCanary);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => ServeManifestAsync(manifest, "sensitive-continuation"));
+
+        Assert.Contains("binding/projection-invalid", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(ContinuationCanary, error.Message, StringComparison.Ordinal);
+        Assert.Empty(received);
+    }
+
+    [Fact]
     public async Task Arguments_the_target_schema_refuses_are_unavailable_rather_than_emitted()
     {
         List<string> received = [];
@@ -515,6 +649,19 @@ public sealed class ToolsCallTests : IDisposable
             new RuntimeOptions([new MountRequest("/api", bundle)], files),
             Token,
             connections);
+    }
+
+    private async Task<ServedEngine> ServeManifestAsync(string manifest, string name)
+    {
+        string root = Path.Combine(Path.GetTempPath(), "mcpiler-call-" + Guid.NewGuid().ToString("N"));
+        _roots.Add(root);
+
+        string bundle = ServedManifests.Write(root, name, manifest);
+        string files = Directory.CreateDirectory(Path.Combine(root, "files")).FullName;
+
+        return await ServedEngine.StartAsync(
+            new RuntimeOptions([new MountRequest("/api", bundle)], files),
+            Token);
     }
 
     private async Task<ServedEngine> ServePaginatingAsync(Uri upstream, bool includeUnreachableTarget = false)

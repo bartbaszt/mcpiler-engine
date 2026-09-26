@@ -72,7 +72,7 @@
         },
         "policy": {
           "inline": {
-            "formatVersion": 1,
+            "formatVersion": 2,
             "baseUrl": "https://api.example",
             "allowedOrigins": ["https://api.example"]
           }
@@ -256,7 +256,9 @@
                       { "op": "copy", "source": "/cursor", "target": "/query/cursor", "onMissing": "skip" }
                     ]
                   },
-                  "outputProgram": {
+                  "outputProjection": {
+                    "kind": "transformProgram",
+                    "program": {
                     "transformVersion": 1,
                     "direction": "output",
                     "base": "passthrough",
@@ -266,6 +268,7 @@
                       { "op": "omit", "target": "/paging" }
                     ]
                   }
+                }
                 },
                 "outputProjection": {
                   "bodyTarget": "/data",
@@ -303,7 +306,9 @@
                       { "op": "copy", "source": "/q", "target": "/query/q" }
                     ]
                   },
-                  "outputProgram": {
+                  "outputProjection": {
+                    "kind": "transformProgram",
+                    "program": {
                     "transformVersion": 1,
                     "direction": "output",
                     "base": "passthrough",
@@ -313,6 +318,7 @@
                       { "op": "omit", "target": "/paging" }
                     ]
                   }
+                }
                 },
                 "outputProjection": {
                   "bodyTarget": "/data",
@@ -339,6 +345,7 @@
                   "pagination": {
                     "target": "/pagination",
                     "source": { "kind": "jsonPointer", "pointer": "/nextUrl", "interpretation": "url" },
+                    "exposeUrl": true,
                     "nextOperation": "list_items_page",
                     "nextArguments": [
                       { "target": "/account", "from": { "kind": "urlPathParameter", "name": "account" }, "as": "string" },
@@ -385,7 +392,7 @@
             ]
           }
         },
-        "policy": { "inline": { "formatVersion": 1, "baseUrl": "https://api.example", "allowedOrigins": ["https://api.example"] } },
+        "policy": { "inline": { "formatVersion": 2, "baseUrl": "https://api.example", "allowedOrigins": ["https://api.example"] } },
         "operations": {
           "inline": {
             "formatVersion": 1,
@@ -456,7 +463,7 @@
             ]
           }
         },
-        "policy": { "inline": { "formatVersion": 1, "baseUrl": "https://api.example", "allowedOrigins": ["https://api.example"] } },
+        "policy": { "inline": { "formatVersion": 2, "baseUrl": "https://api.example", "allowedOrigins": ["https://api.example"] } },
         "operations": {
           "inline": {
             "formatVersion": 1,
@@ -526,7 +533,7 @@
       "manifestFormatVersion": "0.3",
       "sections": {
         "server": { "inline": { "name": "Sensitive Header Refusal" } },
-        "policy": { "inline": { "baseUrl": "https://api.example" } },
+        "policy": { "inline": { "formatVersion": 2, "baseUrl": "https://api.example" } },
         "operations": {
           "inline": {
             "operations": [
@@ -761,11 +768,33 @@
       "expected": { "result": { "data": { "items": [] }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/url-unrepresentable"] }
     },
     {
+      "id": "pagination.query-only-unmapped-change-refused",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "search_items", "arguments": { "account": "acme", "q": "blue" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/v2/search", "headers": [{ "name": "Link", "values": ["</v2/accounts/acme/items?cursor=c10&include=archived>; rel=next"] }], "body": { "items": [] } },
+      "expected": { "result": { "data": { "items": [] }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/url-unrepresentable"] }
+    },
+    {
       "id": "pagination.non-success-skips-link-but-keeps-retry-after",
       "manifest": "projection-v5",
       "invoke": { "surface": "direct", "operation": "list_items", "arguments": { "account": "acme" } },
       "response": { "status": 429, "effectiveUri": "https://api.example/items?account=acme", "headers": [{ "name": "Retry-After", "values": ["30"] }, { "name": "Link", "values": ["</accounts/acme/items?cursor=c8>; rel=next"] }], "body": { "error": "slow down" } },
       "expected": { "result": { "data": { "error": "slow down" }, "metadata": { "retryAfter": "30" }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/non-success-status"] }
+    },
+    {
+      "id": "pagination.non-success-401-challenge-body-preserved",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "next_url_items", "arguments": {} },
+      "response": {
+        "status": 401,
+        "effectiveUri": "https://api.example/metadata",
+        "headers": [
+          { "name": "WWW-Authenticate", "values": ["Bearer realm=\"mcpiler\""] },
+          { "name": "Proxy-Authenticate", "values": ["Basic realm=\"mcpiler\""] }
+        ],
+        "body": { "nextUrl": "https://api.example/v2/accounts/acme/items?cursor=must-not-be-used" }
+      },
+      "expected": { "result": { "data": { "nextUrl": "https://api.example/v2/accounts/acme/items?cursor=must-not-be-used" }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/non-success-status"] }
     },
     {
       "id": "pagination.body-transform-does-not-remove-link-next",
@@ -779,7 +808,7 @@
       "manifest": "projection-v5",
       "invoke": { "surface": "direct", "operation": "next_url_items", "arguments": {} },
       "response": { "status": 200, "effectiveUri": "https://api.example/metadata", "headers": [], "body": { "nextUrl": { "$concatUtf8": ["https://api.example/v2/accounts/acme/items?cursor=", { "$repeatUtf8": { "text": "a", "bytes": 16334 } }] } } },
-      "expected": { "result": { "data": { "nextUrl": { "$concatUtf8": ["https://api.example/v2/accounts/acme/items?cursor=", { "$repeatUtf8": { "text": "a", "bytes": 16334 } }] } }, "pagination": { "state": "next", "hasNext": true, "next": { "operation": "list_items_page", "tool": "list_items_page", "arguments": { "account": "acme", "cursor": { "$repeatUtf8": { "text": "a", "bytes": 16334 } } } } } }, "diagnostics": [] }
+      "expected": { "result": { "data": { "nextUrl": { "$concatUtf8": ["https://api.example/v2/accounts/acme/items?cursor=", { "$repeatUtf8": { "text": "a", "bytes": 16334 } }] } }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/metadata-oversized"] }
     },
     {
       "id": "pagination.body-url-over-16k",
@@ -787,6 +816,13 @@
       "invoke": { "surface": "direct", "operation": "next_url_items", "arguments": {} },
       "response": { "status": 200, "effectiveUri": "https://api.example/metadata", "headers": [], "body": { "nextUrl": { "$concatUtf8": ["https://api.example/v2/accounts/acme/items?cursor=", { "$repeatUtf8": { "text": "a", "bytes": 16350 } }] } } },
       "expected": { "result": { "data": { "nextUrl": { "$concatUtf8": ["https://api.example/v2/accounts/acme/items?cursor=", { "$repeatUtf8": { "text": "a", "bytes": 16350 } }] } }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/metadata-oversized"] }
+    },
+    {
+      "id": "pagination.body-url-exposed",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "next_url_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/metadata", "headers": [], "body": { "nextUrl": "https://api.example/v2/accounts/acme/items?cursor=next" } },
+      "expected": { "result": { "data": { "nextUrl": "https://api.example/v2/accounts/acme/items?cursor=next" }, "pagination": { "state": "next", "hasNext": true, "next": { "operation": "list_items_page", "tool": "list_items_page", "arguments": { "account": "acme", "cursor": "next" }, "url": "https://api.example/v2/accounts/acme/items?cursor=next" } } }, "diagnostics": [] }
     },
     {
       "id": "pagination.link-values-at-128",
@@ -801,6 +837,20 @@
       "invoke": { "surface": "direct", "operation": "search_items", "arguments": { "account": "acme", "q": "blue" } },
       "response": { "status": 200, "effectiveUri": "https://api.example/v2/search", "headers": [{ "name": "Link", "values": { "$repeatArray": { "value": "</accounts/acme/items?cursor=old>; rel=prev", "count": 128 } } }, { "name": "Link", "values": ["<accounts/acme/items?cursor=c129>; rel=next"] }], "body": { "items": [] } },
       "expected": { "result": { "data": { "items": [] }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/metadata-oversized"] }
+    },
+    {
+      "id": "pagination.header-values-over-32",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "list_items", "arguments": { "account": "acme" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/items", "headers": [{ "name": "X-Next-Cursor", "values": { "$repeatArray": { "value": "next", "count": 33 } } }], "body": { "items": [] } },
+      "expected": { "result": { "data": { "items": [] }, "pagination": { "state": "unavailable" } }, "diagnostics": ["response-metadata/header-oversized"] }
+    },
+    {
+      "id": "pagination.header-control-refused",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "list_items", "arguments": { "account": "acme" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/items", "headers": [{ "name": "X-Next-Cursor", "values": ["bad\nvalue"] }], "body": { "items": [] } },
+      "expected": { "result": { "data": { "items": [] }, "pagination": { "state": "unavailable" } }, "diagnostics": ["response-metadata/header-invalid-value"] }
     },
     {
       "id": "pagination.object-over-32k",
@@ -934,6 +984,13 @@
       "invoke": { "surface": "direct", "operation": "number_items", "arguments": {} },
       "response": { "status": 200, "effectiveUri": "https://api.example/numeric", "headers": [], "body": { "value": "1 " } },
       "expected": { "result": { "data": { "value": "1 " }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/argument-unmappable"] }
+    },
+    {
+      "id": "pagination.body-url-cross-origin-refused",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "next_url_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/metadata", "headers": [], "body": { "nextUrl": "https://evil.example/v2/accounts/acme/items?cursor=opaque" } },
+      "expected": { "result": { "data": { "nextUrl": "https://evil.example/v2/accounts/acme/items?cursor=opaque" }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/link-cross-origin"] }
     }
   ]
 }

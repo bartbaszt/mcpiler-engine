@@ -7,7 +7,7 @@
   "required": ["baseUrl"],
   "additionalProperties": false,
   "properties": {
-    "formatVersion": { "const": 1 },
+    "formatVersion": { "const": 2 },
     "baseUrl": {
       "type": "string",
       "pattern": "^https?://"
@@ -41,6 +41,20 @@
         "maxNodes": { "$ref": "#/$defs/positiveInteger" },
         "maxOutputBytes": { "$ref": "#/$defs/positiveInteger" },
         "maxArrayFanout": { "$ref": "#/$defs/positiveInteger" }
+      }
+    },
+    "jmesPathCeiling": {
+      "description": "Upper bound on any JMESPath projection's own explicit limits. A declared projection limit above this is refused; local configuration may narrow each dimension and may never widen one.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxExpressionBytes": { "$ref": "#/$defs/positiveInteger" },
+        "maxInputNodes": { "$ref": "#/$defs/positiveInteger" },
+        "maxInputDepth": { "$ref": "#/$defs/positiveInteger" },
+        "maxResultNodes": { "$ref": "#/$defs/positiveInteger" },
+        "maxResultDepth": { "$ref": "#/$defs/positiveInteger" },
+        "maxOutputBytes": { "$ref": "#/$defs/positiveInteger" },
+        "maxEvaluationMilliseconds": { "$ref": "#/$defs/positiveInteger" }
       }
     },
     "compound": {

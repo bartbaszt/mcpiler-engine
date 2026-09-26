@@ -78,7 +78,9 @@ public interface IContinuationResolver
     bool ValidateArguments(
         ContinuationTarget target,
         JsonObject arguments,
-        ICollection<ExecutionDiagnostic> diagnostics);
+        ICollection<ExecutionDiagnostic> diagnostics,
+        IReadOnlySet<string>? sensitiveHeaderNames = null,
+        IReadOnlySet<string>? sensitiveQueryNames = null);
 
     /// <summary>
     /// Checks a resolved continuation URL against the target's ordinary compiled request, or
@@ -88,7 +90,9 @@ public interface IContinuationResolver
         ContinuationTarget target,
         JsonObject arguments,
         string url,
-        ICollection<ExecutionDiagnostic> diagnostics);
+        ICollection<ExecutionDiagnostic> diagnostics,
+        Uri? effectiveUri = null,
+        IReadOnlySet<string>? sensitiveQueryNames = null);
 }
 
 /// <summary>What projection produced for one response.</summary>
@@ -154,7 +158,8 @@ internal static class ResponseProjectionEvaluator
         JsonObject currentArguments,
         IReadOnlySet<string> sensitiveHeaderNames,
         IContinuationResolver? resolveTarget,
-        bool? hasFinalBody = null)
+        bool? hasFinalBody = null,
+        IReadOnlySet<string>? sensitiveQueryNames = null)
     {
         ArgumentNullException.ThrowIfNull(projection);
         ArgumentNullException.ThrowIfNull(headers);
@@ -162,7 +167,8 @@ internal static class ResponseProjectionEvaluator
         ArgumentNullException.ThrowIfNull(sensitiveHeaderNames);
 
         var diagnostics = new List<ExecutionDiagnostic>();
-        var metadata = BuildMetadata(projection, statusCode, headers, sensitiveHeaderNames, diagnostics);
+        var rawHeaderBytes = 0;
+        var metadata = BuildMetadata(projection, statusCode, headers, sensitiveHeaderNames, diagnostics, ref rawHeaderBytes);
 
         JsonObject? pagination = null;
 
@@ -177,7 +183,18 @@ internal static class ResponseProjectionEvaluator
                 currentArguments,
                 sensitiveHeaderNames,
                 resolveTarget,
-                diagnostics);
+                diagnostics,
+                sensitiveQueryNames ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                ref rawHeaderBytes);
+        }
+
+        if (pagination is not null
+            && projection.Pagination is { } budgetPolicy
+            && SerializedMetadataPlusPaginationBytes(metadata, budgetPolicy.Target, pagination)
+                > ResponseProjectionLimits.MaxSerializedMetadataBytes)
+        {
+            diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.MetadataOversized, budgetPolicy.Target));
+            pagination = Unavailable();
         }
 
         var envelope = new JsonObject();
@@ -224,13 +241,13 @@ internal static class ResponseProjectionEvaluator
         int statusCode,
         IReadOnlyDictionary<string, string[]> headers,
         IReadOnlySet<string> sensitiveHeaderNames,
-        List<ExecutionDiagnostic> diagnostics)
+        List<ExecutionDiagnostic> diagnostics,
+        ref int rawHeaderBytes)
     {
         // The origin is tracked rather than inferred from a target, because a drop must remove
         // exactly the header-derived members and nothing else. Inferring it from a target name
         // would make the budget depend on where an operator chose to write a status value.
         var produced = new List<(string Target, JsonNode? Value, bool HeaderDerived)>(projection.Metadata.Count);
-        var rawHeaderBytes = 0;
         var headersDropped = false;
 
         foreach (ResponseMetadataMapping mapping in projection.Metadata)
@@ -248,7 +265,8 @@ internal static class ResponseProjectionEvaluator
 
             string name = header.Name;
 
-            if (AgentOutputProjectionSafety.IsHardDenied(name) || sensitiveHeaderNames.Contains(name))
+            if (AgentOutputProjectionSafety.IsHardDenied(name)
+                || sensitiveHeaderNames.Contains(name.ToLowerInvariant()))
             {
                 diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.HeaderSensitive, mapping.Target));
                 continue;
@@ -262,46 +280,14 @@ internal static class ResponseProjectionEvaluator
                 continue;
             }
 
-            if (values.Count > ResponseProjectionLimits.MaxHeaderValues)
+            if (!TryConsumeHeader(values, mapping.Target, diagnostics, ref rawHeaderBytes, out bool aggregateExceeded))
             {
-                diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.HeaderOversized, mapping.Target));
-                continue;
-            }
-
-            var refused = false;
-
-            foreach (string value in values)
-            {
-                if (HasInvalidControl(value))
+                if (aggregateExceeded)
                 {
-                    diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.HeaderInvalidValue, mapping.Target));
-                    refused = true;
-                    break;
-                }
-
-                int bytes = Encoding.UTF8.GetByteCount(value);
-
-                if (bytes > ResponseProjectionLimits.MaxHeaderValueBytes)
-                {
-                    diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.HeaderOversized, mapping.Target));
-                    refused = true;
-                    break;
-                }
-
-                rawHeaderBytes += bytes;
-
-                if (rawHeaderBytes > ResponseProjectionLimits.MaxRawHeaderBytes)
-                {
-                    diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.HeaderOversized, mapping.Target));
                     produced.RemoveAll(static entry => entry.HeaderDerived);
                     headersDropped = true;
-                    refused = true;
-                    break;
                 }
-            }
 
-            if (refused)
-            {
                 continue;
             }
 
@@ -344,7 +330,9 @@ internal static class ResponseProjectionEvaluator
         JsonObject currentArguments,
         IReadOnlySet<string> sensitiveHeaderNames,
         IContinuationResolver? resolveTarget,
-        List<ExecutionDiagnostic> diagnostics)
+        List<ExecutionDiagnostic> diagnostics,
+        IReadOnlySet<string> sensitiveQueryNames,
+        ref int rawHeaderBytes)
     {
         if (statusCode is < 200 or >= 300)
         {
@@ -362,7 +350,15 @@ internal static class ResponseProjectionEvaluator
         }
 
         ExtractedValue extracted = Extract(
-            policy.Source, headers, effectiveUri, body, currentArguments, diagnostics, policy.Target);
+            policy.Source,
+            headers,
+            effectiveUri,
+            body,
+            currentArguments,
+            diagnostics,
+            policy.Target,
+            sensitiveQueryNames,
+            ref rawHeaderBytes);
 
         if (extracted.Kind == ExtractionKind.None)
         {
@@ -397,7 +393,12 @@ internal static class ResponseProjectionEvaluator
             }
         }
 
-        if (!resolveTarget.ValidateArguments(target, arguments, diagnostics))
+        if (!resolveTarget.ValidateArguments(
+                target,
+                arguments,
+                diagnostics,
+                sensitiveHeaderNames,
+                sensitiveQueryNames))
         {
             // The static Manifest check proved the target declares the mapped inputs; this
             // measures the values that were actually produced. Emitting arguments the target
@@ -406,7 +407,13 @@ internal static class ResponseProjectionEvaluator
         }
 
         if (extracted.Url is { } url
-            && !resolveTarget.ValidateUrl(target, arguments, url, diagnostics))
+            && !resolveTarget.ValidateUrl(
+                target,
+                arguments,
+                url,
+                diagnostics,
+                effectiveUri,
+                sensitiveQueryNames))
         {
             // A URL that does not reproduce the target's ordinary compiled request would make
             // the emitted arguments a different request than the one the URL names. The check
@@ -422,16 +429,22 @@ internal static class ResponseProjectionEvaluator
             }
             : arguments;
 
+        var next = new JsonObject
+        {
+            ["operation"] = target.Slug,
+            ["tool"] = target.Tool,
+            ["arguments"] = payload,
+        };
+        if (policy.ExposeUrl && extracted.Url is { } exposedUrl)
+        {
+            next["url"] = exposedUrl;
+        }
+
         var pagination = new JsonObject
         {
             ["state"] = "next",
             ["hasNext"] = true,
-            ["next"] = new JsonObject
-            {
-                ["operation"] = target.Slug,
-                ["tool"] = target.Tool,
-                ["arguments"] = payload,
-            },
+            ["next"] = next,
         };
 
         if (SerializedBytes(pagination) > ResponseProjectionLimits.MaxPaginationObjectBytes)
@@ -466,9 +479,9 @@ internal static class ResponseProjectionEvaluator
         => source switch
         {
             LinkHeaderPaginationSource link =>
-                AgentOutputProjectionSafety.IsHardDenied(link.Header) || sensitiveHeaderNames.Contains(link.Header),
+                AgentOutputProjectionSafety.IsHardDenied(link.Header) || sensitiveHeaderNames.Contains(link.Header.ToLowerInvariant()),
             ResponseHeaderPaginationSource header =>
-                AgentOutputProjectionSafety.IsHardDenied(header.Name) || sensitiveHeaderNames.Contains(header.Name),
+                AgentOutputProjectionSafety.IsHardDenied(header.Name) || sensitiveHeaderNames.Contains(header.Name.ToLowerInvariant()),
             _ => false,
         };
 
@@ -487,7 +500,9 @@ internal static class ResponseProjectionEvaluator
         JsonNode? body,
         JsonObject currentArguments,
         List<ExecutionDiagnostic> diagnostics,
-        string target)
+        string target,
+        IReadOnlySet<string> sensitiveQueryNames,
+        ref int rawHeaderBytes)
     {
         switch (source)
         {
@@ -498,6 +513,11 @@ internal static class ResponseProjectionEvaluator
                 if (values.Count == 0)
                 {
                     return ExtractedValue.Absent;
+                }
+
+                if (!TryConsumeHeader(values, target, diagnostics, ref rawHeaderBytes, out _))
+                {
+                    return ExtractedValue.Refused;
                 }
 
                 if (values.Count > 1)
@@ -524,14 +544,28 @@ internal static class ResponseProjectionEvaluator
                         return ExtractedValue.Refused;
                     }
 
-                    return Url(url, currentArguments, diagnostics, target);
+                    return Url(
+                        url,
+                        effectiveUri,
+                        sensitiveQueryNames,
+                        currentArguments,
+                        diagnostics,
+                        target);
                 }
 
                 return ExtractedValue.Of(node.DeepClone(), url: null, currentArguments);
             }
 
             case LinkHeaderPaginationSource link:
-                return ExtractLink(link, headers, effectiveUri, currentArguments, diagnostics, target);
+                return ExtractLink(
+                    link,
+                    headers,
+                    effectiveUri,
+                    currentArguments,
+                    diagnostics,
+                    target,
+                    sensitiveQueryNames,
+                    ref rawHeaderBytes);
 
             default:
                 return ExtractedValue.Refused;
@@ -554,13 +588,20 @@ internal static class ResponseProjectionEvaluator
         Uri? effectiveUri,
         JsonObject currentArguments,
         List<ExecutionDiagnostic> diagnostics,
-        string target)
+        string target,
+        IReadOnlySet<string> sensitiveQueryNames,
+        ref int rawHeaderBytes)
     {
         IReadOnlyList<string> fieldValues = Lookup(headers, link.Header);
 
         if (fieldValues.Count == 0)
         {
             return ExtractedValue.Absent;
+        }
+
+        if (!TryConsumeLinkField(fieldValues, target, diagnostics))
+        {
+            return ExtractedValue.Refused;
         }
 
         LinkParseResult parsed = LinkFieldParser.Parse(fieldValues);
@@ -601,13 +642,36 @@ internal static class ResponseProjectionEvaluator
             return ExtractedValue.Refused;
         }
 
-        if (effectiveUri is null || !Uri.TryCreate(effectiveUri, candidate.Target, out Uri? resolved))
+        return Url(
+            candidate.Target,
+            effectiveUri,
+            sensitiveQueryNames,
+            currentArguments,
+            diagnostics,
+            target);
+    }
+
+    private static ExtractedValue Url(
+        string url,
+        Uri? effectiveUri,
+        IReadOnlySet<string> sensitiveQueryNames,
+        JsonObject currentArguments,
+        List<ExecutionDiagnostic> diagnostics,
+        string target)
+    {
+        Uri? resolved = null;
+        if (effectiveUri is not null)
         {
-            diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.UrlUnrepresentable, target));
-            return ExtractedValue.Refused;
+            Uri.TryCreate(effectiveUri, url, out resolved);
+        }
+        else
+        {
+            Uri.TryCreate(url, UriKind.Absolute, out resolved);
         }
 
-        if (!resolved.IsAbsoluteUri || resolved.Scheme is not ("http" or "https"))
+        if (resolved is null
+            || !resolved.IsAbsoluteUri
+            || resolved.Scheme is not ("http" or "https"))
         {
             diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.UrlUnrepresentable, target));
             return ExtractedValue.Refused;
@@ -619,32 +683,58 @@ internal static class ResponseProjectionEvaluator
             return ExtractedValue.Refused;
         }
 
-        if (!string.Equals(
-            resolved.GetLeftPart(UriPartial.Authority),
-            effectiveUri.GetLeftPart(UriPartial.Authority),
-            StringComparison.OrdinalIgnoreCase))
+        if (effectiveUri is null || !SameOrigin(resolved, effectiveUri))
         {
             diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.LinkCrossOrigin, target));
             return ExtractedValue.Refused;
         }
 
-        return Url(resolved.ToString(), currentArguments, diagnostics, target);
-    }
+        if (HasSensitiveQuery(resolved, sensitiveQueryNames))
+        {
+            diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.ValueSensitive, target));
+            return ExtractedValue.Refused;
+        }
 
-    /// <summary>Wraps a resolved continuation URL after the shared size check.</summary>
-    private static ExtractedValue Url(
-        string url,
-        JsonObject currentArguments,
-        List<ExecutionDiagnostic> diagnostics,
-        string target)
-    {
-        if (Encoding.UTF8.GetByteCount(url) > ResponseProjectionLimits.MaxContinuationUrlBytes)
+        string normalized = resolved.ToString();
+        if (Encoding.UTF8.GetByteCount(normalized) > ResponseProjectionLimits.MaxContinuationUrlBytes)
         {
             diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.MetadataOversized, target));
             return ExtractedValue.Refused;
         }
 
-        return ExtractedValue.Of(JsonValue.Create(url), url, currentArguments);
+        return ExtractedValue.Of(JsonValue.Create(normalized), normalized, currentArguments);
+    }
+
+    private static bool SameOrigin(Uri left, Uri right)
+        => string.Equals(Origin(left), Origin(right), StringComparison.OrdinalIgnoreCase);
+
+    private static string Origin(Uri uri)
+        => $"{uri.Scheme.ToLowerInvariant()}://{uri.IdnHost.ToLowerInvariant()}"
+            + (uri.IsDefaultPort ? string.Empty : $":{uri.Port}");
+
+    private static bool HasSensitiveQuery(Uri uri, IReadOnlySet<string> sensitiveQueryNames)
+    {
+        foreach (string pair in uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int separator = pair.IndexOf('=', StringComparison.Ordinal);
+            string rawName = separator < 0 ? pair : pair[..separator];
+            string name;
+            try
+            {
+                name = Uri.UnescapeDataString(rawName);
+            }
+            catch (UriFormatException)
+            {
+                return true;
+            }
+
+            if (sensitiveQueryNames.Contains(name))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -657,14 +747,16 @@ internal static class ResponseProjectionEvaluator
             return false;
         }
 
+        _ = target;
         return Uri.TryCreate(effectiveUri, anchor, out Uri? anchorUri)
-            && Uri.TryCreate(effectiveUri, target, out Uri? targetUri)
-            && string.Equals(
-                anchorUri.GetLeftPart(UriPartial.Authority),
-                targetUri.GetLeftPart(UriPartial.Authority),
-                StringComparison.OrdinalIgnoreCase)
-            && string.Equals(anchorUri.AbsolutePath, targetUri.AbsolutePath, StringComparison.Ordinal);
+            && SameContext(anchorUri, effectiveUri);
     }
+
+    private static bool SameContext(Uri left, Uri right)
+        => SameOrigin(left, right)
+            && string.Equals(left.AbsolutePath, right.AbsolutePath, StringComparison.Ordinal)
+            && string.Equals(left.Query, right.Query, StringComparison.Ordinal)
+            && string.Equals(left.Fragment, right.Fragment, StringComparison.Ordinal);
 
     /// <summary>Maps one reviewed argument source into the target input object.</summary>
     private static bool MapArgument(
@@ -717,7 +809,7 @@ internal static class ResponseProjectionEvaluator
             return false;
         }
 
-        if (!TryAssign(arguments, mapping.Target, converted, target.InputSchema))
+        if (!TryAssign(arguments, mapping.Target, converted, target.InputSchema, target.InputSchema))
         {
             diagnostics.Add(new ExecutionDiagnostic(
                 ResponseProjectionCodes.ArgumentUnmappable,
@@ -915,6 +1007,87 @@ internal static class ResponseProjectionEvaluator
             new(ExtractionKind.Value, value, url, currentArguments);
     }
 
+    private static bool TryConsumeLinkField(
+        IReadOnlyList<string> values,
+        string target,
+        List<ExecutionDiagnostic> diagnostics)
+    {
+        foreach (string value in values)
+        {
+            if (HasInvalidControl(value))
+            {
+                diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.HeaderInvalidValue, target));
+                return false;
+            }
+
+            if (Encoding.UTF8.GetByteCount(value) > ResponseProjectionLimits.MaxHeaderValueBytes)
+            {
+                diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.HeaderOversized, target));
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool TryConsumeHeader(
+        IReadOnlyList<string> values,
+        string target,
+        List<ExecutionDiagnostic> diagnostics,
+        ref int rawHeaderBytes,
+        out bool aggregateExceeded)
+    {
+        aggregateExceeded = false;
+        if (values.Count > ResponseProjectionLimits.MaxHeaderValues)
+        {
+            diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.HeaderOversized, target));
+            return false;
+        }
+
+        foreach (string value in values)
+        {
+            if (HasInvalidControl(value))
+            {
+                diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.HeaderInvalidValue, target));
+                return false;
+            }
+
+            int bytes = Encoding.UTF8.GetByteCount(value);
+            if (bytes > ResponseProjectionLimits.MaxHeaderValueBytes)
+            {
+                diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.HeaderOversized, target));
+                return false;
+            }
+
+            if (rawHeaderBytes > ResponseProjectionLimits.MaxRawHeaderBytes - bytes)
+            {
+                rawHeaderBytes = ResponseProjectionLimits.MaxRawHeaderBytes + 1;
+                aggregateExceeded = true;
+                diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.HeaderOversized, target));
+                return false;
+            }
+
+            rawHeaderBytes += bytes;
+        }
+
+        return true;
+    }
+
+    private static int SerializedMetadataPlusPaginationBytes(
+        IReadOnlyList<(string Target, JsonNode? Value)> metadata,
+        string paginationTarget,
+        JsonNode pagination)
+    {
+        var holder = new JsonObject();
+        foreach ((string target, JsonNode? value) in metadata)
+        {
+            _ = TryAssign(holder, target, value?.DeepClone());
+        }
+
+        _ = TryAssign(holder, paginationTarget, pagination.DeepClone());
+        return Encoding.UTF8.GetByteCount(holder.ToJsonString());
+    }
+
     private static bool HasInvalidControl(string value)
         => value.Any(static character => character is '\r' or '\n' or '\0');
 
@@ -1002,8 +1175,10 @@ internal static class ResponseProjectionEvaluator
         JsonObject root,
         string pointer,
         JsonNode? value,
-        JsonNode? inputSchema = null)
+        JsonNode? inputSchema = null,
+        JsonNode? inputSchemaRoot = null)
     {
+        inputSchemaRoot ??= inputSchema;
         string[] tokens = [.. pointer.Split('/').Skip(1).Select(JsonPointer.Unescape)];
         if (tokens.Length == 0)
         {
@@ -1020,7 +1195,7 @@ internal static class ResponseProjectionEvaluator
                 if (currentObject.TryGetPropertyValue(token, out var existing) && existing is not null)
                 {
                     current = existing;
-                    if (!TryGetChildSchema(currentSchema, token, isArrayToken: false, out currentSchema))
+                    if (!TryGetChildSchema(currentSchema, token, isArrayToken: false, inputSchemaRoot, out currentSchema))
                     {
                         return false;
                     }
@@ -1028,12 +1203,12 @@ internal static class ResponseProjectionEvaluator
                     continue;
                 }
 
-                if (!TryGetChildSchema(currentSchema, token, isArrayToken: false, out var childSchema))
+                if (!TryGetChildSchema(currentSchema, token, isArrayToken: false, inputSchemaRoot, out var childSchema))
                 {
                     return false;
                 }
 
-                JsonNode created = IsArraySchema(childSchema)
+                JsonNode created = IsArraySchema(childSchema, inputSchemaRoot)
                     || childSchema is null && IsArrayIndex(tokens[index + 1])
                         ? new JsonArray()
                         : new JsonObject();
@@ -1056,14 +1231,14 @@ internal static class ResponseProjectionEvaluator
                     return false;
                 }
 
-                if (!TryGetChildSchema(currentSchema, token, isArrayToken: true, out var itemSchema))
+                if (!TryGetChildSchema(currentSchema, token, isArrayToken: true, inputSchemaRoot, out var itemSchema))
                 {
                     return false;
                 }
 
                 if (currentArray[arrayIndex] is null)
                 {
-                    currentArray[arrayIndex] = IsArraySchema(itemSchema)
+                    currentArray[arrayIndex] = IsArraySchema(itemSchema, inputSchemaRoot)
                         || itemSchema is null && IsArrayIndex(tokens[index + 1])
                             ? (JsonNode)new JsonArray()
                             : new JsonObject();
@@ -1101,9 +1276,11 @@ internal static class ResponseProjectionEvaluator
         JsonNode? schema,
         string token,
         bool isArrayToken,
+        JsonNode? schemaRoot,
         out JsonNode? childSchema)
     {
         childSchema = null;
+        schema = ResolveLocalReference(schema, schemaRoot);
         if (schema is JsonValue booleanSchema)
         {
             return !booleanSchema.TryGetValue<bool>(out var accepts) || accepts;
@@ -1157,8 +1334,22 @@ internal static class ResponseProjectionEvaluator
         return true;
     }
 
-    private static bool IsArraySchema(JsonNode? schema)
+    private static JsonNode? ResolveLocalReference(JsonNode? schema, JsonNode? schemaRoot)
     {
+        if (schemaRoot is null)
+        {
+            return schema;
+        }
+
+        var resolver = new SchemaReferenceResolver(schemaRoot, SchemaBounds.Default);
+        return resolver.TryResolveNode(schema, out var resolved, out _)
+            ? resolved
+            : schema;
+    }
+
+    private static bool IsArraySchema(JsonNode? schema, JsonNode? schemaRoot)
+    {
+        schema = ResolveLocalReference(schema, schemaRoot);
         if (schema is not JsonObject schemaObject)
         {
             return false;

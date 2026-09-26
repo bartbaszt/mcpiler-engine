@@ -6,6 +6,7 @@ using MCPiler.Engine.Manifest.Derivation;
 using MCPiler.Engine.Manifest.Loading;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Runtime;
+using MCPiler.Engine.Transform;
 
 namespace MCPiler.Engine.Mcp;
 
@@ -38,6 +39,7 @@ internal sealed class SurfaceContinuationResolver : IContinuationResolver
     private readonly ManifestDocument _manifest;
     private readonly MountedManifest _mount;
     private readonly MountedSurface _surface;
+    private readonly SchemaReferenceResolver? _schemaResolver;
     private readonly string _sourceSlug;
 
     internal SurfaceContinuationResolver(
@@ -49,6 +51,9 @@ internal sealed class SurfaceContinuationResolver : IContinuationResolver
         _manifest = manifest;
         _mount = mount;
         _surface = surface;
+        _schemaResolver = manifest.AgentSurfaceDocument is { } document
+            ? new SchemaReferenceResolver(document, manifest.Policy.EffectiveSchemaBounds)
+            : null;
         _sourceSlug = sourceSlug;
     }
 
@@ -95,7 +100,7 @@ internal sealed class SurfaceContinuationResolver : IContinuationResolver
                 direct.Name,
                 NavigatorOnly: false,
                 pathTemplate,
-                entry.InputSchema?.Node.DeepClone());
+                RuntimeSchema(entry.InputSchema));
         }
 
         if (_mount.Document.Server.Surface(_surface.Slug) is { } declared
@@ -107,7 +112,7 @@ internal sealed class SurfaceContinuationResolver : IContinuationResolver
                 ManifestTool.NavigatorInvoke,
                 NavigatorOnly: true,
                 pathTemplate,
-                entry.InputSchema?.Node.DeepClone());
+                RuntimeSchema(entry.InputSchema));
         }
 
         diagnostics.Add(new ExecutionDiagnostic(
@@ -116,15 +121,73 @@ internal sealed class SurfaceContinuationResolver : IContinuationResolver
         return null;
     }
 
+    private JsonNode? RuntimeSchema(ManifestSchema? schema)
+    {
+        if (schema is null)
+        {
+            return null;
+        }
+
+        return (_schemaResolver is null
+            ? schema
+            : _schemaResolver.SelfContain(schema)).Node.DeepClone();
+    }
+
     /// <inheritdoc />
     public bool ValidateArguments(
         ContinuationTarget target,
         JsonObject arguments,
-        ICollection<ExecutionDiagnostic> diagnostics)
+        ICollection<ExecutionDiagnostic> diagnostics,
+        IReadOnlySet<string>? sensitiveHeaderNames = null,
+        IReadOnlySet<string>? sensitiveQueryNames = null)
     {
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(arguments);
         ArgumentNullException.ThrowIfNull(diagnostics);
+
+        if (_manifest.AgentSurface.Operation(target.Slug) is not { } entry
+            || ManifestBindingDispatcher.TryResolveOperationKey(entry.Binding) is not { } operationKey
+            || _manifest.Operations.Operation(operationKey) is not { } operation)
+        {
+            diagnostics.Add(new ExecutionDiagnostic(
+                ResponseProjectionCodes.ArgumentUnmappable, target.Slug));
+            return false;
+        }
+
+        if (!TransformStage.TryInput(
+                _manifest,
+                entry,
+                operation,
+                arguments,
+                out JsonObject effectiveArguments,
+                out _))
+        {
+            diagnostics.Add(new ExecutionDiagnostic(
+                ResponseProjectionCodes.ArgumentUnmappable, target.Slug));
+            return false;
+        }
+
+        var effective = SensitiveHeaderNames.ForBinding(_manifest, entry.Binding);
+        var headers = effective.Headers.ToHashSet(StringComparer.Ordinal);
+        var queries = effective.Queries.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (sensitiveHeaderNames is not null)
+        {
+            headers.UnionWith(sensitiveHeaderNames);
+        }
+
+        if (sensitiveQueryNames is not null)
+        {
+            queries.UnionWith(sensitiveQueryNames);
+        }
+
+        if (operation.Parameters.Any(parameter =>
+            effectiveArguments.ContainsKey(parameter.Name)
+            && SensitiveHeaderNames.IsSensitiveParameter(parameter, headers, queries)))
+        {
+            diagnostics.Add(new ExecutionDiagnostic(
+                ResponseProjectionCodes.ValueSensitive, target.Slug));
+            return false;
+        }
 
         if (Advertised(target) is not { } tool)
         {
@@ -165,22 +228,63 @@ internal sealed class SurfaceContinuationResolver : IContinuationResolver
         ContinuationTarget target,
         JsonObject arguments,
         string url,
-        ICollection<ExecutionDiagnostic> diagnostics)
+        ICollection<ExecutionDiagnostic> diagnostics,
+        Uri? effectiveUri = null,
+        IReadOnlySet<string>? sensitiveQueryNames = null)
     {
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(arguments);
         ArgumentNullException.ThrowIfNull(diagnostics);
 
-        JsonObject input = arguments;
-
         if (_manifest.AgentSurface.Operation(target.Slug) is not { } entry
             || ManifestBindingDispatcher.TryResolveOperationKey(entry.Binding) is not { } operationKey
-            || _manifest.Operations.Operation(operationKey) is not { } operation
-            || !Uri.TryCreate(url, UriKind.Absolute, out Uri? parsed))
+            || _manifest.Operations.Operation(operationKey) is not { } operation)
         {
             diagnostics.Add(new ExecutionDiagnostic(
                 ResponseProjectionCodes.UrlUnrepresentable, target.Slug));
+            return false;
+        }
 
+        if (!TransformStage.TryInput(
+                _manifest,
+                entry,
+                operation,
+                arguments,
+                out JsonObject input,
+                out _))
+        {
+            diagnostics.Add(new ExecutionDiagnostic(
+                ResponseProjectionCodes.UrlUnrepresentable, target.Slug));
+            return false;
+        }
+
+        if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? parsed)
+            || !parsed.IsAbsoluteUri
+            || parsed.Scheme is not ("http" or "https"))
+        {
+            diagnostics.Add(new ExecutionDiagnostic(
+                ResponseProjectionCodes.UrlUnrepresentable, target.Slug));
+            return false;
+        }
+
+        if (!string.IsNullOrEmpty(parsed.UserInfo))
+        {
+            diagnostics.Add(new ExecutionDiagnostic(
+                ResponseProjectionCodes.LinkCredentialsRefused, target.Slug));
+            return false;
+        }
+
+        if (effectiveUri is not null && !SameOrigin(parsed, effectiveUri))
+        {
+            diagnostics.Add(new ExecutionDiagnostic(
+                ResponseProjectionCodes.LinkCrossOrigin, target.Slug));
+            return false;
+        }
+
+        if (HasSensitiveQuery(parsed, sensitiveQueryNames ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase)))
+        {
+            diagnostics.Add(new ExecutionDiagnostic(
+                ResponseProjectionCodes.ValueSensitive, target.Slug));
             return false;
         }
 
@@ -213,7 +317,8 @@ internal sealed class SurfaceContinuationResolver : IContinuationResolver
         // parameters, so a continuation URL that changed anything else — a different path
         // template instance, an unmapped query parameter, a different origin — no longer
         // describes the request the binding would build.
-        if (string.Equals(parsed.AbsolutePath, compiled.Uri.AbsolutePath, StringComparison.Ordinal)
+        if (SameOrigin(parsed, compiled.Uri)
+            && string.Equals(parsed.AbsolutePath, compiled.Uri.AbsolutePath, StringComparison.Ordinal)
             && string.Equals(parsed.Query, compiled.Uri.Query, StringComparison.Ordinal))
         {
             return true;
@@ -221,6 +326,38 @@ internal sealed class SurfaceContinuationResolver : IContinuationResolver
 
         diagnostics.Add(new ExecutionDiagnostic(
             ResponseProjectionCodes.UrlUnrepresentable, target.Slug));
+
+        return false;
+    }
+
+    private static bool SameOrigin(Uri left, Uri right)
+        => string.Equals(Origin(left), Origin(right), StringComparison.OrdinalIgnoreCase);
+
+    private static string Origin(Uri uri)
+        => $"{uri.Scheme.ToLowerInvariant()}://{uri.IdnHost.ToLowerInvariant()}"
+            + (uri.IsDefaultPort ? string.Empty : $":{uri.Port}");
+
+    private static bool HasSensitiveQuery(Uri uri, IReadOnlySet<string> names)
+    {
+        foreach (string pair in uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int separator = pair.IndexOf('=', StringComparison.Ordinal);
+            string rawName = separator < 0 ? pair : pair[..separator];
+            string name;
+            try
+            {
+                name = Uri.UnescapeDataString(rawName);
+            }
+            catch (UriFormatException)
+            {
+                return true;
+            }
+
+            if (names.Contains(name))
+            {
+                return true;
+            }
+        }
 
         return false;
     }

@@ -393,7 +393,8 @@ public sealed class ManagedGenerationLoader : IDisposable
             _files,
             _options.AllowInlineSecrets,
             _runtimeState,
-            _options.ResponseCache.ClampToHardMaxima());
+            _options.ResponseCache.ClampToHardMaxima(),
+            _options.ProjectionWorker);
 
         EngineExecution execution;
 

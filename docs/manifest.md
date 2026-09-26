@@ -765,10 +765,10 @@ described.
 **Engine declares an explicit supported range.** This Engine supports manifest
 format `0.3`. Section versions are not uniform, because they move
 independently: `agentSurface` is at `5`, `credentials` is at `4`, `authentication`
-is at `2`, while `server`, `policy`, `operations`, `tools` and `search` are still
-at `1`. A section that omits `formatVersion` is accepted at whatever version this
-Engine supports for it. A refusal always names the version observed and the range
-supported. Hostile input echoed for context is truncated.
+is at `2`, `server` and `policy` are at `2`, while `operations`, `tools` and
+`search` are still at `1`. A section that omits `formatVersion` is accepted at
+whatever version this Engine supports for it. A refusal always names the version
+observed and the range supported. Hostile input echoed for context is truncated.
 
 **While MAJOR is 0 there is no compatibility promise.** The remedy for an old
 manifest is to produce it again, not to migrate it. There is no alpha migrator,
@@ -893,6 +893,9 @@ The following codes are always warnings; every other code is an error:
 | `binding/compound-binding-version-unsupported` | An unsupported `bindingVersion`. |
 | `binding/type-unknown` | A binding type outside the vocabulary. |
 | `binding/transform-invalid` | A transformation program is not a valid program. |
+| `binding/projection-invalid` | A JMESPath projection is invalid or cannot be checked in confined isolation. |
+| `binding/projection-limit-out-of-range` | Projection limits are missing, non-positive, or above the policy ceiling. |
+| `binding/projection-version-unsupported` | A projection declares a language version this Engine does not implement. |
 | `binding/pointer-root-not-allowed` | A pointer addresses a root not allowed in that position. |
 | `binding/credential-ref-unknown` | A `credentialRef` names a credential `credentials` does not declare. |
 | `binding/credential-basic-incomplete` | A binding references one half of a `basic` pair. |

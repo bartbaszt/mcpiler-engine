@@ -36,6 +36,7 @@ public sealed class PolicyNarrowingTests
         [
             typeof(ExecutionLimits),
             typeof(TransformCeiling),
+            typeof(JmesPathCeiling),
             typeof(CompoundBounds),
             typeof(SchemaBounds),
             typeof(FilePolicy),
@@ -117,6 +118,65 @@ public sealed class PolicyNarrowingTests
 
         Assert.Empty(_diagnostics);
         Assert.Equal(TimeSpan.FromSeconds(5), narrowed.EffectiveLimits.UpstreamRequestTimeout);
+    }
+
+    /// <summary>
+    /// A JMESPath ceiling narrows like every other bound, in all seven dimensions.
+    /// </summary>
+    /// <remarks>
+    /// The projection's own limits are declared by a Manifest and bounded by this ceiling, so
+    /// the ceiling is the operator's only lever over a projection an author already published.
+    /// Each dimension is exercised because they are compared independently: a rule that was
+    /// written for the wrong member would still accept a narrower value somewhere.
+    /// </remarks>
+    [Fact]
+    public void A_narrower_jmespath_ceiling_is_accepted_in_every_dimension()
+    {
+        PolicySection compiled = Compiled();
+
+        PolicySection narrowed = PolicyNarrowing.Apply(
+            compiled,
+            new PolicyOverrides
+            {
+                JmesPathMaxExpressionBytes = 1024,
+                JmesPathMaxInputNodes = 1000,
+                JmesPathMaxInputDepth = 16,
+                JmesPathMaxResultNodes = 1000,
+                JmesPathMaxResultDepth = 16,
+                JmesPathMaxOutputBytes = 4096,
+                JmesPathMaxEvaluationMilliseconds = TimeSpan.FromSeconds(5),
+            },
+            _diagnostics);
+
+        Assert.Empty(_diagnostics);
+
+        JmesPathCeiling effective = narrowed.EffectiveJmesPathCeiling;
+
+        Assert.Equal(1024, effective.MaxExpressionBytes);
+        Assert.Equal(1000, effective.MaxInputNodes);
+        Assert.Equal(16, effective.MaxInputDepth);
+        Assert.Equal(1000, effective.MaxResultNodes);
+        Assert.Equal(16, effective.MaxResultDepth);
+        Assert.Equal(4096, effective.MaxOutputBytes);
+        Assert.Equal(5000, effective.MaxEvaluationMilliseconds);
+    }
+
+    [Fact]
+    public void A_wider_jmespath_ceiling_is_refused_and_the_compiled_value_survives()
+    {
+        PolicySection compiled = Compiled();
+        int compiledLimit = compiled.EffectiveJmesPathCeiling.MaxInputNodes > int.MaxValue
+            ? int.MaxValue
+            : (int)compiled.EffectiveJmesPathCeiling.MaxInputNodes;
+
+        PolicySection result = PolicyNarrowing.Apply(
+            compiled,
+            new PolicyOverrides { JmesPathMaxInputNodes = compiled.EffectiveJmesPathCeiling.MaxInputNodes + 1 },
+            _diagnostics);
+
+        Assert.Equal([ManifestDiagnosticCodes.LimitWidened], ErrorCodes);
+        Assert.Equal(compiled.EffectiveJmesPathCeiling.MaxInputNodes, result.EffectiveJmesPathCeiling.MaxInputNodes);
+        Assert.True(compiledLimit > 0);
     }
 
     [Fact]

@@ -16,6 +16,7 @@ using MCPiler.Engine.Execution.Projection;
 using MCPiler.Engine.Files;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Runtime;
+using MCPiler.Engine.Runtime.Projection;
 using MCPiler.Engine.Transform;
 
 namespace MCPiler.Engine.Execution;
@@ -132,6 +133,8 @@ public sealed class ExecutionService
     /// </remarks>
     private readonly byte[] _identityKey;
 
+    private readonly IProjectionWorker? _projections;
+
     /// <summary>Creates a service over the supplied ports.</summary>
     /// <param name="transport">How an exchange reaches an upstream.</param>
     /// <param name="secrets">How credential references become values.</param>
@@ -147,8 +150,9 @@ public sealed class ExecutionService
         IUpstreamTransport transport,
         IManifestSecretResolver secrets,
         FileHandleStore? files = null,
-        AuthenticationRuntime? authentication = null)
-        : this(transport, secrets, files, authentication, responseCache: null, identityKey: null)
+        AuthenticationRuntime? authentication = null,
+        IProjectionWorker? projections = null)
+        : this(transport, secrets, files, authentication, responseCache: null, identityKey: null, projections)
     {
     }
 
@@ -159,7 +163,8 @@ public sealed class ExecutionService
         FileHandleStore? files,
         AuthenticationRuntime? authentication,
         ResponseCache? responseCache,
-        byte[]? identityKey)
+        byte[]? identityKey,
+        IProjectionWorker? projections = null)
     {
         ArgumentNullException.ThrowIfNull(transport);
         ArgumentNullException.ThrowIfNull(secrets);
@@ -170,6 +175,7 @@ public sealed class ExecutionService
         _authentication = authentication;
         _responseCache = responseCache;
         _identityKey = identityKey ?? CacheIdentity.NewKey();
+        _projections = projections;
     }
 
     /// <summary>The optional mount cache; null means this library execution is uncached.</summary>
@@ -742,19 +748,30 @@ public sealed class ExecutionService
             }
 
             byte[]? projectionRawBody = outcome.ResponseBody;
-            if (!TransformStage.TryOutput(manifest, entry, outcome, out byte[]? body, out transformFailure))
+            OutputProjectionResult outputProjection = await OutputProjectionStage
+                .ApplyAsync(
+                    manifest,
+                    entry,
+                    operation,
+                    outcome,
+                    _projections,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            if (!outputProjection.Succeeded)
             {
                 observation.Reason = ResponseCacheDecisionReason.Failed;
                 return outcome with
                 {
-                    Failure = ExecutionFailureKind.Transformation,
-                    FailureReason = transformFailure,
+                    Failure = outputProjection.FailureKind,
+                    FailureReason = outputProjection.FailureReason,
+                    FailureDetail = outputProjection.FailureDetail,
                 };
             }
 
-            EngineExecutionResult transformed = ReferenceEquals(body, outcome.ResponseBody)
+            EngineExecutionResult transformed = ReferenceEquals(outputProjection.Body, outcome.ResponseBody)
                 ? outcome
-                : outcome with { ResponseBody = body };
+                : outcome with { ResponseBody = outputProjection.Body };
 
             ResponseCacheEnvelope? admitted = null;
             if (cachedEnvelope is null
@@ -838,7 +855,7 @@ public sealed class ExecutionService
             // the caller cannot receive. Apply projection after cache admission so cache entries
             // remain raw upstream responses and both hits and live responses share one result path.
             return entry.OutputProjection is { } projection && transformed.ResponseFile is null
-                ? Project(projection, transformed, arguments, projectionRawBody, credentials, request)
+                ? Project(projection, transformed, arguments, projectionRawBody, credentials, profile, authentication, request)
                 : transformed;
         }
         finally
@@ -870,6 +887,8 @@ public sealed class ExecutionService
         JsonObject currentArguments,
         byte[]? rawBody,
         IReadOnlyList<ResolvedCredential> credentials,
+        AuthenticationProfile? profile,
+        ResolvedAuthentication? authentication,
         ExecutionRequest request)
     {
         ResponseProjectionOutcome outcome = ResponseProjectionEvaluator.Evaluate(
@@ -880,13 +899,31 @@ public sealed class ExecutionService
             Parse(shaped.ResponseBody),
             Parse(rawBody),
             currentArguments,
-            SensitiveHeaderNames.For(credentials),
+            SensitiveHeaderNames.For(profile, credentials, authentication),
             request.Continuations,
-            shaped.ResponseBody is { Length: > 0 });
+            shaped.ResponseBody is { Length: > 0 },
+            SensitiveHeaderNames.QueryFor(profile, credentials, authentication));
+
+        IReadOnlyDictionary<string, string[]>? responseHeaders = shaped.ResponseHeaders;
+        if (outcome.Diagnostics.Any(static diagnostic => diagnostic.Code == ResponseProjectionCodes.ValueSensitive)
+            && projection.Pagination?.Source is LinkHeaderPaginationSource link)
+        {
+            responseHeaders = shaped.ResponseHeaders?
+                .Where(entry => !string.Equals(entry.Key, link.Header, StringComparison.OrdinalIgnoreCase))
+                .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase);
+        }
+        else if (outcome.Diagnostics.Any(static diagnostic => diagnostic.Code == ResponseProjectionCodes.ValueSensitive)
+            && projection.Pagination?.Source is ResponseHeaderPaginationSource header)
+        {
+            responseHeaders = shaped.ResponseHeaders?
+                .Where(entry => !string.Equals(entry.Key, header.Name, StringComparison.OrdinalIgnoreCase))
+                .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase);
+        }
 
         return shaped with
         {
             ResponseBody = outcome.Value is null ? shaped.ResponseBody : Encoding.UTF8.GetBytes(outcome.Value.ToJsonString()),
+            ResponseHeaders = responseHeaders,
             Diagnostics = [.. shaped.Diagnostics, .. outcome.Diagnostics],
         };
     }

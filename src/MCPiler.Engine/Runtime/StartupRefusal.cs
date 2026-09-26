@@ -2,6 +2,7 @@ using MCPiler.Engine.Execution.Files;
 using MCPiler.Engine.Execution.Secrets.RuntimeState;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Mcp.Navigator;
+using MCPiler.Engine.Runtime.Projection;
 
 namespace MCPiler.Engine.Runtime;
 
@@ -267,6 +268,16 @@ public sealed class RuntimeStartResult
     /// <summary>The effective host-only response-cache ceilings reported at startup.</summary>
     public ResponseCacheOptions ResponseCache { get; private init; } = ResponseCacheOptions.Default;
 
+    /// <summary>
+    /// The confined evaluator every JMESPath output projection is invoked through.
+    /// </summary>
+    /// <remarks>
+    /// Carried from the options the runtime was started with, so the pool an operator configured
+    /// is the pool the served projections use. Null means the process has none, and an operation
+    /// declaring JMESPath is then refused at invocation rather than evaluated in place.
+    /// </remarks>
+    internal IProjectionWorker? ProjectionWorker { get; private init; }
+
     /// <summary>Every mount, in configuration order. Empty when the process is refused.</summary>
     public IReadOnlyList<MountedManifest> Mounts { get; }
 
@@ -296,13 +307,15 @@ public sealed class RuntimeStartResult
         FileHandleStore files,
         bool allowInlineSecrets,
         RuntimeStateLocation? runtimeState,
-        ResponseCacheOptions responseCache)
+        ResponseCacheOptions responseCache,
+        IProjectionWorker? projectionWorker = null)
         => new(mounts, [], warnings)
         {
             Files = files,
             AllowInlineSecrets = allowInlineSecrets,
             RuntimeState = runtimeState,
             ResponseCache = responseCache,
+            ProjectionWorker = projectionWorker,
         };
 
     internal static RuntimeStartResult Refused(IReadOnlyList<StartupRefusal> refusals, IReadOnlyList<StartupRefusal> warnings)

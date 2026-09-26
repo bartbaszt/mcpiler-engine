@@ -65,6 +65,27 @@ public sealed record PolicyOverrides
     /// <summary>Narrowed transformation array fan-out ceiling.</summary>
     public int? TransformMaxArrayFanout { get; init; }
 
+    /// <summary>Narrowed JMESPath expression byte ceiling.</summary>
+    public int? JmesPathMaxExpressionBytes { get; init; }
+
+    /// <summary>Narrowed JMESPath input node ceiling.</summary>
+    public long? JmesPathMaxInputNodes { get; init; }
+
+    /// <summary>Narrowed JMESPath input depth ceiling.</summary>
+    public int? JmesPathMaxInputDepth { get; init; }
+
+    /// <summary>Narrowed JMESPath completed result node ceiling.</summary>
+    public long? JmesPathMaxResultNodes { get; init; }
+
+    /// <summary>Narrowed JMESPath completed result depth ceiling.</summary>
+    public int? JmesPathMaxResultDepth { get; init; }
+
+    /// <summary>Narrowed JMESPath serialized output byte ceiling.</summary>
+    public long? JmesPathMaxOutputBytes { get; init; }
+
+    /// <summary>Narrowed JMESPath evaluation deadline ceiling.</summary>
+    public TimeSpan? JmesPathMaxEvaluationMilliseconds { get; init; }
+
     /// <summary>Narrowed compound total response budget.</summary>
     public long? CompoundMaxTotalResponseBytes { get; init; }
 

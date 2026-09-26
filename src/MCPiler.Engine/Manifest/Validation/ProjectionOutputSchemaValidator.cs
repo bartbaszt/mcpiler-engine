@@ -108,7 +108,7 @@ internal static class ProjectionOutputSchemaValidator
                 errors);
             if (paginationSchema is not null)
             {
-                ValidatePaginationShape(paginationSchema, resolver, errors);
+                ValidatePaginationShape(paginationSchema, resolver, pagination.ExposeUrl, errors);
             }
         }
 
@@ -211,37 +211,177 @@ internal static class ProjectionOutputSchemaValidator
         return current;
     }
 
-    private static void ValidatePaginationShape(JsonObject schema, SchemaReferenceResolver? resolver, List<string> errors)
+    private static void ValidatePaginationShape(
+        JsonObject schema,
+        SchemaReferenceResolver? resolver,
+        bool exposeUrl,
+        List<string> errors)
     {
         if (IsRequired(schema, "next") || IsRequired(schema, "hasNext"))
         {
             errors.Add("outputProjection.pagination: OutputSchema cannot require 'next' or 'hasNext'; end/unavailable states omit them.");
         }
 
-        if (schema["properties"] is not JsonObject properties
-            || ResolveObject(properties["state"], resolver) is not { } stateSchema)
+        if (schema["properties"] is not JsonObject properties)
         {
+            if (schema["additionalProperties"] is JsonValue additional
+                && additional.TryGetValue<bool>(out var allowed)
+                && !allowed)
+            {
+                errors.Add("outputProjection.pagination: OutputSchema closes the object without allowing required 'state'.");
+            }
             return;
         }
 
-        if (DefinitelyNotString(stateSchema))
+        if (properties.TryGetPropertyValue("state", out JsonNode? stateNode))
         {
-            errors.Add("outputProjection.pagination: OutputSchema 'state' must accept strings.");
+            if (ResolveObject(stateNode, resolver) is { } stateSchema)
+            {
+                ValidateType(stateSchema, "string", "outputProjection.pagination", "/state", resolver, errors);
+                if (stateSchema["enum"] is JsonArray values)
+                {
+                    HashSet<string> declared = values.OfType<JsonValue>()
+                        .Select(value => value.TryGetValue<string>(out string? state) ? state : null)
+                        .Where(static state => state is not null)
+                        .Select(static state => state!)
+                        .ToHashSet(StringComparer.Ordinal);
+                    foreach (string state in PaginationStates)
+                    {
+                        if (!declared.Contains(state))
+                        {
+                            errors.Add($"outputProjection.pagination: OutputSchema 'state' enum must include '{state}'.");
+                        }
+                    }
+                }
+            }
+            else
+            {
+                errors.Add("outputProjection.pagination: OutputSchema 'state' must accept strings.");
+            }
+        }
+        else if (schema["additionalProperties"] is JsonValue closedState
+            && closedState.TryGetValue<bool>(out var stateClosed)
+            && stateClosed)
+        {
+            errors.Add("outputProjection.pagination: OutputSchema must declare 'state' when the object is closed.");
         }
 
-        if (stateSchema["enum"] is JsonArray values)
+        if (properties.TryGetPropertyValue("hasNext", out JsonNode? hasNextNode))
         {
-            HashSet<string> declared = values.OfType<JsonValue>()
-                .Select(value => value.TryGetValue<string>(out string? state) ? state : null)
-                .Where(static state => state is not null)
-                .Select(static state => state!)
-                .ToHashSet(StringComparer.Ordinal);
-            foreach (string state in PaginationStates)
+            if (ResolveObject(hasNextNode, resolver) is { } hasNextSchema)
             {
-                if (!declared.Contains(state))
+                ValidateType(hasNextSchema, "boolean", "outputProjection.pagination", "/hasNext", resolver, errors);
+            }
+            else
+            {
+                errors.Add("outputProjection.pagination: OutputSchema 'hasNext' must accept booleans.");
+            }
+        }
+        else if (schema["additionalProperties"] is JsonValue closedHasNext
+            && closedHasNext.TryGetValue<bool>(out var hasNextClosed)
+            && hasNextClosed)
+        {
+            errors.Add("outputProjection.pagination: OutputSchema must declare 'hasNext' when the object is closed.");
+        }
+
+        if (properties.TryGetPropertyValue("next", out JsonNode? nextNode))
+        {
+            if (ResolveObject(nextNode, resolver) is { } nextSchema)
+            {
+                ValidateNextShape(nextSchema, resolver, exposeUrl, errors);
+            }
+            else
+            {
+                errors.Add("outputProjection.pagination.next: OutputSchema must accept an object.");
+            }
+        }
+        else if (schema["additionalProperties"] is JsonValue closedNext
+            && closedNext.TryGetValue<bool>(out var nextClosed)
+            && nextClosed)
+        {
+            errors.Add("outputProjection.pagination: OutputSchema must declare 'next' when the object is closed.");
+        }
+    }
+
+    private static void ValidateNextShape(
+        JsonObject schema,
+        SchemaReferenceResolver? resolver,
+        bool exposeUrl,
+        List<string> errors)
+    {
+        if (DefinitelyNotObject(schema))
+        {
+            errors.Add("outputProjection.pagination.next: OutputSchema must accept an object.");
+            return;
+        }
+
+        if (schema["required"] is JsonArray required)
+        {
+            foreach (JsonValue value in required.OfType<JsonValue>())
+            {
+                if (!value.TryGetValue<string>(out var property))
                 {
-                    errors.Add($"outputProjection.pagination: OutputSchema 'state' enum must include '{state}'.");
+                    continue;
                 }
+
+                if (property == "url" && !exposeUrl)
+                {
+                    errors.Add("outputProjection.pagination.next: OutputSchema cannot require optional 'url' when ExposeUrl is disabled.");
+                }
+                else if (property is not ("operation" or "tool" or "arguments" or "url"))
+                {
+                    errors.Add($"outputProjection.pagination.next: OutputSchema requires unsupported member '{property}'.");
+                }
+            }
+        }
+
+        if (schema["properties"] is not JsonObject properties)
+        {
+            if (schema["additionalProperties"] is JsonValue additional
+                && additional.TryGetValue<bool>(out var allowed)
+                && !allowed)
+            {
+                errors.Add("outputProjection.pagination.next: OutputSchema closes the object without allowing continuation members.");
+            }
+            return;
+        }
+
+        foreach ((string property, string expectedType) in new[]
+        {
+            ("operation", "string"),
+            ("tool", "string"),
+            ("arguments", "object"),
+            ("url", "string"),
+        })
+        {
+            if (property == "url" && exposeUrl
+                && schema["additionalProperties"] is JsonValue closedUrl
+                && closedUrl.TryGetValue<bool>(out var urlClosed)
+                && urlClosed
+                && !properties.ContainsKey("url"))
+            {
+                errors.Add("outputProjection.pagination.next: OutputSchema must declare 'url' when ExposeUrl is enabled and the object is closed.");
+            }
+
+            if (properties.TryGetPropertyValue(property, out JsonNode? propertyNode))
+            {
+                if (ResolveObject(propertyNode, resolver) is { } propertySchema)
+                {
+                    ValidateType(
+                        propertySchema,
+                        expectedType,
+                        "outputProjection.pagination.next",
+                        $"/{property}",
+                        resolver,
+                        errors);
+                }
+            }
+            else if (schema["additionalProperties"] is JsonValue closed
+                && closed.TryGetValue<bool>(out var isClosed)
+                && isClosed
+                && property is "operation" or "tool" or "arguments")
+            {
+                errors.Add($"outputProjection.pagination.next: OutputSchema must declare '{property}' when the object is closed.");
             }
         }
     }

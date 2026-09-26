@@ -2,8 +2,11 @@ using System.Globalization;
 using System.Text.Json.Nodes;
 
 using MCPiler.Engine.Authentication.OAuth1;
+using MCPiler.Engine.Execution.Projection;
+using MCPiler.Engine.JmesPath;
 using MCPiler.Engine.Manifest.Loading;
 using MCPiler.Engine.Manifest.Model;
+using MCPiler.Engine.Runtime.Projection;
 using MCPiler.Engine.Transform;
 
 namespace MCPiler.Engine.Manifest.Validation;
@@ -29,7 +32,11 @@ public static class ManifestValidator
     /// <summary>
     /// Returns every cross-section problem in <paramref name="manifest"/>.
     /// </summary>
-    public static IReadOnlyList<ManifestDiagnostic> Validate(ManifestDocument manifest)
+    /// <param name="manifest">The document to validate.</param>
+    /// <param name="expressionValidator">The confined JMESPath expression validator.</param>
+    public static IReadOnlyList<ManifestDiagnostic> Validate(
+        ManifestDocument manifest,
+        IProjectionExpressionValidator? expressionValidator = null)
     {
         ArgumentNullException.ThrowIfNull(manifest);
 
@@ -50,6 +57,7 @@ public static class ManifestValidator
         ValidateDeclaredTools(manifest, diagnostics);
         ValidateTransformPrograms(manifest, diagnostics);
         ValidateOutputProjections(manifest, diagnostics);
+        ValidateJmesPathProjections(manifest, expressionValidator, diagnostics);
 
         return diagnostics;
     }
@@ -83,6 +91,23 @@ public static class ManifestValidator
                 continue;
             }
 
+            if (ManifestBindingDispatcher.TryResolveHttp(operation.Binding) is null)
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.ProjectionInvalid,
+                    $"Operation '{DiagnosticText.Echo(operation.Slug)}' declares an output projection, but its execution binding is not HTTP-backed. Compound and non-HTTP bindings cannot produce one upstream response for projection.",
+                    section: ManifestSectionName.AgentSurface,
+                    pointer: JsonPointer.Build("operations", Segment(index), "outputProjection")));
+                continue;
+            }
+
+            ValidateProjectionSensitiveHeaders(
+                manifest,
+                operation,
+                projection,
+                index,
+                diagnostics);
+
             foreach (string error in ProjectionOutputSchemaValidator.Validate(
                 projection,
                 operation,
@@ -95,14 +120,18 @@ public static class ManifestValidator
                     pointer: JsonPointer.Build("operations", Segment(index), "outputProjection")));
             }
 
-            if (projection.Pagination is not { } pagination
-                || pagination.NextOperation is not { } nextSlug
-                || string.Equals(nextSlug, operation.Slug, StringComparison.Ordinal))
+            if (projection.Pagination is not { } pagination)
             {
                 continue;
             }
 
-            if (manifest.AgentSurface.Operation(nextSlug) is not { } target)
+            string nextSlug = pagination.NextOperation ?? operation.Slug;
+            bool self = string.Equals(nextSlug, operation.Slug, StringComparison.Ordinal);
+            AgentOperationEntry? target = self
+                ? operation
+                : manifest.AgentSurface.Operation(nextSlug);
+
+            if (target is null)
             {
                 diagnostics.Add(ManifestDiagnostic.Error(
                     ManifestDiagnosticCodes.ProjectionTargetUnknown,
@@ -136,8 +165,145 @@ public static class ManifestValidator
                 continue;
             }
 
+            ValidateProjectionContinuationSensitivity(
+                manifest,
+                target,
+                pagination,
+                index,
+                diagnostics);
+
+            if (self)
+            {
+                continue;
+            }
+
             ValidateProjectionMappings(operation, target, pagination, index, schemaResolver, diagnostics);
             ValidateProjectionReachability(manifest, operation, nextSlug, index, diagnostics);
+        }
+    }
+
+    private static void ValidateProjectionSensitiveHeaders(
+        ManifestDocument manifest,
+        AgentOperationEntry operation,
+        AgentOutputProjection projection,
+        int operationIndex,
+        List<ManifestDiagnostic> diagnostics)
+    {
+        AuthenticationProfile? profile = ManifestBindingDispatcher.AuthenticationRefOf(operation.Binding) is { } profileId
+            ? manifest.EffectiveAuthentication.Profile(profileId)
+            : null;
+        var effective = new HashSet<string>(AgentOutputProjectionSafety.HardDeniedHeaders, StringComparer.Ordinal);
+        foreach (string name in SensitiveHeaderNames.For(profile, manifest.EffectiveCredentials.Credentials))
+        {
+            effective.Add(name);
+        }
+
+        foreach (ResponseMetadataMapping mapping in projection.Metadata)
+        {
+            if (mapping.Source is not ResponseHeaderMetadataSource header
+                || AgentOutputProjectionSafety.IsHardDenied(header.Name)
+                || !effective.Contains(header.Name.ToLowerInvariant()))
+            {
+                continue;
+            }
+
+            diagnostics.Add(ManifestDiagnostic.Error(
+                ManifestDiagnosticCodes.ProjectionHeaderSensitive,
+                $"Response header '{DiagnosticText.Echo(header.Name)}' is classified sensitive by the effective authentication configuration and cannot be projected.",
+                section: ManifestSectionName.AgentSurface,
+                pointer: JsonPointer.Build("operations", Segment(operationIndex), "outputProjection", "metadata")));
+        }
+
+        string? paginationHeader = projection.Pagination?.Source switch
+        {
+            LinkHeaderPaginationSource link => link.Header,
+            ResponseHeaderPaginationSource header => header.Name,
+            _ => null,
+        };
+        if (paginationHeader is not null
+            && !AgentOutputProjectionSafety.IsHardDenied(paginationHeader)
+            && effective.Contains(paginationHeader.ToLowerInvariant()))
+        {
+            diagnostics.Add(ManifestDiagnostic.Error(
+                ManifestDiagnosticCodes.ProjectionHeaderSensitive,
+                $"Response header '{DiagnosticText.Echo(paginationHeader)}' is classified sensitive by the effective authentication configuration and cannot be used for pagination.",
+                section: ManifestSectionName.AgentSurface,
+                pointer: JsonPointer.Build("operations", Segment(operationIndex), "outputProjection", "pagination", "source")));
+        }
+    }
+
+    private static void ValidateProjectionContinuationSensitivity(
+        ManifestDocument manifest,
+        AgentOperationEntry target,
+        PaginationPolicy pagination,
+        int operationIndex,
+        List<ManifestDiagnostic> diagnostics)
+    {
+        if (ManifestBindingDispatcher.TryResolveOperationKey(target.Binding) is not { } operationKey
+            || manifest.Operations.Operation(operationKey) is not { } operation)
+        {
+            return;
+        }
+
+        var effective = SensitiveHeaderNames.ForBinding(manifest, target.Binding);
+        bool transformed = ManifestBindingDispatcher.TryResolveInputProgram(target.Binding) is { } inputProgram
+            && inputProgram["steps"] is JsonArray { Count: > 0 };
+        var sensitiveParameters = operation.Parameters
+            .Where(parameter => SensitiveHeaderNames.IsSensitiveParameter(
+                parameter,
+                effective.Headers,
+                effective.Queries))
+            .ToList();
+        for (int mappingIndex = 0; mappingIndex < pagination.NextArguments.Count; mappingIndex++)
+        {
+            PaginationArgumentMapping mapping = pagination.NextArguments[mappingIndex];
+            ManifestParameter parameter;
+            if (transformed)
+            {
+                if (sensitiveParameters.Count == 0)
+                {
+                    continue;
+                }
+
+                parameter = sensitiveParameters[0];
+            }
+            else
+            {
+                string[] segments = mapping.Target
+                    .Split('/', StringSplitOptions.RemoveEmptyEntries)
+                    .Select(JsonPointer.Unescape)
+                    .ToArray();
+                if (segments.Length == 0
+                    || operation.Parameters.FirstOrDefault(candidate =>
+                        string.Equals(candidate.Name, segments[0], StringComparison.Ordinal)) is not { } direct
+                    || !SensitiveHeaderNames.IsSensitiveParameter(
+                        direct,
+                        effective.Headers,
+                        effective.Queries))
+                {
+                    continue;
+                }
+
+                parameter = direct;
+            }
+
+            string route = transformed
+                ? " can be routed by the target input transformation to a "
+                : " writes to a ";
+            diagnostics.Add(ManifestDiagnostic.Error(
+                ManifestDiagnosticCodes.ProjectionInvalid,
+                $"Pagination mapping target '{DiagnosticText.Echo(mapping.Target)}'{route}"
+                + $"{Vocabulary.Write(parameter.In)} destination classified sensitive by effective "
+                + $"authentication on target '{DiagnosticText.Echo(target.Slug)}'.",
+                section: ManifestSectionName.AgentSurface,
+                pointer: JsonPointer.Build(
+                    "operations",
+                    Segment(operationIndex),
+                    "outputProjection",
+                    "pagination",
+                    "nextArguments",
+                    Segment(mappingIndex),
+                    "target")));
         }
     }
 
@@ -452,6 +618,89 @@ public static class ManifestValidator
         }
     }
 
+    private static void ValidateJmesPathProjections(
+        ManifestDocument manifest,
+        IProjectionExpressionValidator? validator,
+        List<ManifestDiagnostic> diagnostics)
+    {
+        JmesPathCeiling ceiling = manifest.Policy.EffectiveJmesPathCeiling;
+
+        for (int index = 0; index < manifest.AgentSurface.Operations.Count; index++)
+        {
+            AgentOperationEntry operation = manifest.AgentSurface.Operations[index];
+            if (operation.Binding is not TransformedHttpBinding
+                {
+                    Output: ManifestOutputProjection.JmesPathVariant projection,
+                })
+            {
+                continue;
+            }
+
+            string binding = JsonPointer.Build("operations", Segment(index), "binding");
+            string projectionPointer = binding + JsonPointer.Build("outputProjection");
+
+            if (projection.LanguageVersion != JmesPathProfile.SupportedLanguageVersion)
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.ProjectionVersionUnsupported,
+                    $"JMESPath language version {projection.LanguageVersion} is not supported. This Engine implements version {JmesPathProfile.SupportedLanguageVersion}.",
+                    section: ManifestSectionName.AgentSurface,
+                    pointer: projectionPointer + JsonPointer.Build("languageVersion")));
+                continue;
+            }
+
+            var exceeds = projection.Limits.ExceedingDimensions(ToLimits(ceiling));
+            foreach (string dimension in exceeds)
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.ProjectionLimitOutOfRange,
+                    $"The projection's '{dimension}' exceeds the compiled ceiling for it.",
+                    section: ManifestSectionName.AgentSurface,
+                    pointer: projectionPointer + JsonPointer.Build("limits", dimension)));
+            }
+
+            if (exceeds.Count > 0)
+            {
+                continue;
+            }
+
+            if (validator is null)
+            {
+                diagnostics.Add(ManifestDiagnostic.Error(
+                    ManifestDiagnosticCodes.ProjectionInvalid,
+                    "The JMESPath expression was not validated: this host can only classify a projection inside a confined worker, and none is available.",
+                    section: ManifestSectionName.AgentSurface,
+                    pointer: projectionPointer + JsonPointer.Build("expression")));
+                continue;
+            }
+
+            ProjectionExpressionValidity validity = validator.Validate(projection.Expression, projection.Limits);
+            if (validity.Status == ProjectionExpressionValidityStatus.Valid)
+            {
+                continue;
+            }
+
+            diagnostics.Add(new ManifestDiagnostic(
+                ManifestDiagnosticCodes.ProjectionInvalid,
+                DiagnosticSeverity.Error,
+                validity.Failure?.Message ?? "The JMESPath expression is not valid.",
+                ManifestSectionName.AgentSurface,
+                projectionPointer + JsonPointer.Build("expression"))
+            {
+                ProgramCode = validity.Failure?.Code,
+            });
+        }
+    }
+
+    private static JmesPathLimits ToLimits(JmesPathCeiling ceiling)
+        => new(
+            ceiling.MaxExpressionBytes,
+            ceiling.MaxInputNodes,
+            ceiling.MaxInputDepth,
+            ceiling.MaxResultNodes,
+            ceiling.MaxResultDepth,
+            ceiling.MaxOutputBytes,
+            ceiling.MaxEvaluationMilliseconds);
 
     /// <summary>
     /// Authentication profile identity, credential references, and kind compatibility.
@@ -787,9 +1036,9 @@ public static class ManifestValidator
                     yield return (JsonPointer.Build("inputProgram"), input, TransformDirection.Input);
                 }
 
-                if (transformed.OutputProgram is { } output)
+                if (transformed.Output is ManifestOutputProjection.TransformProgramVariant output)
                 {
-                    yield return (JsonPointer.Build("outputProgram"), output, TransformDirection.Output);
+                    yield return (JsonPointer.Build("outputProjection", "program"), output.Program, TransformDirection.Output);
                 }
 
                 break;

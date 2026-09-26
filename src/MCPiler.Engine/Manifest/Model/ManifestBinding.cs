@@ -77,7 +77,12 @@ public sealed record HttpBinding(
 /// program grammar is a separate versioned contract with its own validator and its own
 /// diagnostic codes.
 /// </param>
-/// <param name="OutputProgram">The output transformation program.</param>
+/// <param name="Output">
+/// The single optional output projection: absent is passthrough, and the projection's own kind
+/// decides whether it is a transformation program or a JMESPath expression. The pre-union
+/// <c>outputProgram</c> member is not a synonym in format 4; it is refused rather than accepted
+/// and normalized, so the wire has exactly one spelling per meaning.
+/// </param>
 /// <remarks>
 /// The authoring-time dry-run samples that accompany a transformation in Studio are
 /// validation evidence, not execution input, and are excluded from the manifest.
@@ -85,7 +90,7 @@ public sealed record HttpBinding(
 public sealed record TransformedHttpBinding(
     HttpBinding Base,
     JsonObject? InputProgram = null,
-    JsonObject? OutputProgram = null) : ManifestBinding
+    ManifestOutputProjection? Output = null) : ManifestBinding
 {
     /// <summary>The wire discriminator.</summary>
     public const string TypeName = "transformedHttp";

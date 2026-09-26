@@ -15,3 +15,9 @@ tests/fixtures/managed/** -text
 # OAuth1 protocol and Manifest fixtures are byte contracts shared with Platform.
 tests/fixtures/oauth1/** -text
 tests/fixtures/manifests/manifest-0.3/oauth1-authorization/** -text
+
+# The frozen JMESPath profile corpus is duplicated byte for byte into the MCPiler Platform tree.
+# The corpus tests compare the two copies with File.ReadAllBytes and the authored expectations are
+# canonical JSON output bytes, so a checkout that materialized them as CRLF would change what the
+# tests assert and break the cross-repository comparison in one step.
+tests/fixtures/jmespath/** -text

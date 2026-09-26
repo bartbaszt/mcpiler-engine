@@ -376,6 +376,45 @@ public sealed class ResponseProjectionValidationTests
     }
 
     [Fact]
+    public void Pagination_next_shape_is_checked_against_the_output_schema()
+    {
+        JsonObject outputSchema = new()
+        {
+            ["type"] = "object",
+            ["properties"] = new JsonObject
+            {
+                ["data"] = new JsonObject { ["type"] = "object" },
+                ["pagination"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["state"] = new JsonObject { ["type"] = "string" },
+                        ["hasNext"] = new JsonObject { ["type"] = "boolean" },
+                        ["next"] = new JsonObject
+                        {
+                            ["type"] = "object",
+                            ["properties"] = new JsonObject
+                            {
+                                ["operation"] = new JsonObject { ["type"] = "integer" },
+                                ["tool"] = new JsonObject { ["type"] = "string" },
+                                ["arguments"] = new JsonObject { ["type"] = "object" },
+                            },
+                            ["additionalProperties"] = false,
+                        },
+                    },
+                    ["additionalProperties"] = false,
+                },
+            },
+            ["additionalProperties"] = false,
+        };
+
+        Assert.Contains(
+            ManifestDiagnosticCodes.ProjectionOutputSchemaInvalid,
+            ErrorCodes(WithOutputSchema(Build(), outputSchema)));
+    }
+
+    [Fact]
     public void An_disabled_output_schema_does_not_constrain_a_projection()
     {
         JsonObject outputSchema = new() { ["type"] = "string" };
@@ -404,6 +443,96 @@ public sealed class ResponseProjectionValidationTests
         Assert.Contains(
             ManifestDiagnosticCodes.ProjectionOutputSchemaInvalid,
             ErrorCodes(WithOutputSchema(Build(), outputSchema)));
+    }
+
+    [Fact]
+    public void A_credential_header_selected_by_projection_is_refused_at_load()
+    {
+        var operations = new List<AgentOperationEntry>
+        {
+            new(
+                Slug: "list-items",
+                Name: "List items",
+                Binding: new HttpBinding("GET /items", CredentialRef: ["session"]),
+                InputSchema: Schema("cursor"),
+                OutputProjection: new AgentOutputProjection(
+                    "/data",
+                    [new ResponseMetadataMapping(
+                        new ResponseHeaderMetadataSource("X-Session-Token", HeaderValueMode.First),
+                        "/token")],
+                    null)),
+            new(
+                Slug: "items-page",
+                Name: "Items page",
+                Binding: new HttpBinding("GET /page"),
+                InputSchema: Schema("cursor")),
+        };
+
+        ManifestDocument manifest = Build(operations: operations) with
+        {
+            Credentials = new CredentialsSection(
+            [
+                new ManifestCredential(
+                    "session",
+                    CredentialScheme.Header,
+                    "X-Session-Token",
+                    CredentialReference.Literal("secret"),
+                    CredentialLocation.Header),
+            ]),
+        };
+
+        Assert.Contains(ManifestDiagnosticCodes.ProjectionHeaderSensitive, ErrorCodes(manifest));
+    }
+
+    [Fact]
+    public void A_response_derived_challenge_header_is_refused_at_load()
+    {
+        var operations = new List<AgentOperationEntry>
+        {
+            new(
+                Slug: "list-items",
+                Name: "List items",
+                Binding: new HttpBinding("GET /items", AuthenticationRef: "challenge"),
+                InputSchema: Schema("cursor"),
+                OutputProjection: new AgentOutputProjection(
+                    "/data",
+                    [new ResponseMetadataMapping(
+                        new ResponseHeaderMetadataSource("X-Challenge-Session", HeaderValueMode.First),
+                        "/token")],
+                    null)),
+            new(
+                Slug: "items-page",
+                Name: "Items page",
+                Binding: new HttpBinding("GET /page"),
+                InputSchema: Schema("cursor")),
+        };
+
+        var profile = new AuthenticationProfile(
+            "challenge",
+            AuthenticationKind.ChallengeSession,
+            new JsonObject
+            {
+                ["challenge"] = new JsonObject
+                {
+                    ["source"] = "header",
+                    ["selector"] = "X-Challenge-Session",
+                },
+                ["injection"] = new JsonObject
+                {
+                    ["location"] = "header",
+                    ["name"] = "X-Challenge-Session",
+                },
+            },
+            [],
+            [],
+            []);
+
+        ManifestDocument manifest = Build(operations: operations) with
+        {
+            Authentication = new AuthenticationSection([profile]),
+        };
+
+        Assert.Contains(ManifestDiagnosticCodes.ProjectionHeaderSensitive, ErrorCodes(manifest));
     }
 
     private static ManifestDocument WithOutputSchema(

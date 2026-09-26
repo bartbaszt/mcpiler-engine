@@ -35,14 +35,16 @@ public enum ExecutionFailureKind
     Compilation,
 
     /// <summary>
-    /// A transformation program declared on the operation was refused or aborted.
+    /// An output transformation program or projection declared on the operation was refused or
+    /// aborted.
     /// </summary>
     /// <remarks>
     /// Distinct from <see cref="Compilation"/> because the two send an operator to different
-    /// places: compilation is about the arguments a caller supplied, a transformation is about
-    /// a program the manifest author wrote. An input-direction abort contacted nothing; an
-    /// output-direction abort happened after a complete, in-bounds response arrived, which is
-    /// why a caller is told the program failed rather than that the upstream did.
+    /// places: compilation is about the arguments a caller supplied, a transformation or output
+    /// projection is about a program the manifest author wrote. An input-direction abort
+    /// contacted nothing; an output-direction abort happened after a complete, in-bounds
+    /// response arrived, which is why a caller is told the declared operation failed rather than
+    /// that the upstream did.
     /// </remarks>
     Transformation,
 

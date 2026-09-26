@@ -7,7 +7,7 @@
   "required": ["operations"],
   "additionalProperties": false,
   "properties": {
-    "formatVersion": { "const": 5, "description": "Version 5 retains version 4 responseCache and adds outputProjection." },
+    "formatVersion": { "enum": [4, 5], "description": "Version 4 carries response cache; version 5 adds operation-level response metadata projection." },
     "groups": {
       "type": "array",
       "items": { "$ref": "#/$defs/group" }
@@ -21,6 +21,25 @@
       "items": { "$ref": "#/$defs/operation" }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "formatVersion": { "const": 4 } },
+        "required": ["formatVersion"]
+      },
+      "then": {
+        "properties": {
+          "operations": {
+            "items": {
+                "not": {
+                  "required": ["outputProjection"]
+                }
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "group": {
       "type": "object",
@@ -79,7 +98,7 @@
           }
         },
         "binding": { "$ref": "#/$defs/binding" },
-        "outputProjection": { "$ref": "#/$defs/outputProjection" },
+        "outputProjection": { "$ref": "#/$defs/agentOutputProjection" },
         "responseCache": {
           "type": "object",
           "additionalProperties": false,
@@ -90,7 +109,7 @@
         }
       }
     },
-    "outputProjection": {
+    "agentOutputProjection": {
       "description": "The reviewed agent-facing output policy (ADR-0071). Absence preserves the legacy result shape exactly.",
       "type": "object",
       "required": ["bodyTarget"],
@@ -314,7 +333,59 @@
           }
         },
         "inputProgram": { "type": ["object", "null"] },
-        "outputProgram": { "type": ["object", "null"] }
+        "outputProjection": { "$ref": "#/$defs/transformedOutputProjection" }
+      }
+    },
+    "transformedOutputProjection": {
+      "$comment": "Closed union. Absence is passthrough and is the only way to say it; there is no 'none' kind, and no kind contains another.",
+      "type": "object",
+      "required": ["kind"],
+      "oneOf": [
+        { "$ref": "#/$defs/transformProgramProjection" },
+        { "$ref": "#/$defs/jmesPathProjection" }
+      ]
+    },
+    "transformProgramProjection": {
+      "type": "object",
+      "required": ["kind", "program"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "transformProgram" },
+        "program": { "type": "object" }
+      }
+    },
+    "jmesPathProjection": {
+      "type": "object",
+      "required": ["kind", "languageVersion", "expression", "limits"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "jmespath" },
+        "languageVersion": { "const": 1 },
+        "expression": { "type": "string", "minLength": 1 },
+        "limits": { "$ref": "#/$defs/jmesPathLimits" }
+      }
+    },
+    "jmesPathLimits": {
+      "$comment": "All seven dimensions are required and positive. An omitted dimension would fall back to a build-dependent default, which is not an explicit limit.",
+      "type": "object",
+      "required": [
+        "maxExpressionBytes",
+        "maxInputNodes",
+        "maxInputDepth",
+        "maxResultNodes",
+        "maxResultDepth",
+        "maxOutputBytes",
+        "maxEvaluationMilliseconds"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "maxExpressionBytes": { "type": "integer", "minimum": 1 },
+        "maxInputNodes": { "type": "integer", "minimum": 1 },
+        "maxInputDepth": { "type": "integer", "minimum": 1 },
+        "maxResultNodes": { "type": "integer", "minimum": 1 },
+        "maxResultDepth": { "type": "integer", "minimum": 1 },
+        "maxOutputBytes": { "type": "integer", "minimum": 1 },
+        "maxEvaluationMilliseconds": { "type": "integer", "minimum": 1 }
       }
     },
     "compoundBinding": {

@@ -29,7 +29,7 @@
     },
     "policy": {
       "inline": {
-        "formatVersion": 1,
+        "formatVersion": 2,
         "baseUrl": "https://api.example.com"
       }
     },

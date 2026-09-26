@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.IO;
 using System.Text.Json.Nodes;
+using MCPiler.Engine.Manifest.Model;
 using Xunit;
 
 namespace MCPiler.Engine.IntegrationTests.Mcp;
@@ -645,6 +646,184 @@ internal static class ServedManifests
               }
             }
             """;
+    }
+
+    public static string SensitiveContinuation(
+        Uri upstream,
+        ParameterLocation location,
+        string destination,
+        string canary)
+    {
+        ArgumentNullException.ThrowIfNull(upstream);
+        string wireLocation = location == ParameterLocation.Header ? "header" : "query";
+
+        return $$"""
+            {
+              "manifestFormatVersion": "0.3",
+              "sections": {
+                "server": { "inline": {
+                  "name": "Continuation API",
+                  "authenticationRequired": false,
+                  "surfaces": [
+                    { "slug": "full", "isDefault": true,
+                      "operations": [ { "operation": "list-items" }, { "operation": "next-page" } ] }
+                  ]
+                } },
+                "policy": { "inline": { "baseUrl": "{{upstream.AbsoluteUri}}" } },
+                "operations": { "inline": { "operations": [
+                  {
+                    "key": "GET /items",
+                    "method": "GET",
+                    "path": "/items",
+                    "parameters": [ { "name": "status", "in": "query", "required": true, "schema": { "type": "string" } } ]
+                  },
+                  {
+                    "key": "GET /next",
+                    "method": "GET",
+                    "path": "/next",
+                    "parameters": [ { "name": "{{destination}}", "in": "{{wireLocation}}", "schema": { "type": "string" } } ]
+                  }
+                ] } },
+                "agentSurface": { "inline": {
+                  "formatVersion": 5,
+                  "operations": [
+                    {
+                      "slug": "list-items",
+                      "name": "List items",
+                      "inputSchema": {
+                        "type": "object",
+                        "required": ["status"],
+                        "properties": { "status": { "type": "string" } }
+                      },
+                      "binding": { "type": "http", "operation": "GET /items" },
+                      "outputProjection": {
+                        "bodyTarget": "/data",
+                        "pagination": {
+                          "target": "/pagination",
+                          "source": { "kind": "linkHeader", "header": "link", "relation": "next" },
+                          "nextOperation": "next-page",
+                          "nextArguments": [
+                            {
+                              "target": "/{{destination}}",
+                              "from": { "kind": "literal", "value": "{{canary}}" },
+                              "as": "string"
+                            }
+                          ]
+                        }
+                      }
+                    },
+                    {
+                      "slug": "next-page",
+                      "name": "Next page",
+                      "inputSchema": {
+                        "type": "object",
+                        "required": ["{{destination}}"],
+                        "properties": { "{{destination}}": { "type": "string" } }
+                      },
+                      "binding": {
+                        "type": "http",
+                        "operation": "GET /next",
+                        "credentialRef": ["continuation-secret"]
+                      }
+                    }
+                  ]
+                } },
+                "credentials": { "inline": { "formatVersion": 4, "credentials": [
+                  {
+                    "id": "continuation-secret",
+                    "scheme": "apiKey",
+                    "slot": "{{destination}}",
+                    "location": "{{wireLocation}}",
+                    "value": { "fromEnv": "MCPILER_AC065_UNUSED_SECRET" }
+                  }
+                ] } }
+              }
+            }
+            """;
+    }
+
+    public static string TransformedSensitiveContinuation(
+        Uri upstream,
+        ParameterLocation location,
+        string destination,
+        string canary)
+    {
+        var root = JsonNode.Parse(SensitiveContinuation(upstream, location, destination, canary))!.AsObject();
+        var operations = root["sections"]!["agentSurface"]!["inline"]!["operations"]!.AsArray();
+        var source = operations[0]!.AsObject();
+        var target = operations[1]!.AsObject();
+        string part = location == ParameterLocation.Header ? "headers" : "query";
+
+        source["outputProjection"]!["pagination"]!["nextArguments"]![0]!["target"] = "/cursor";
+        target["inputSchema"] = new JsonObject
+        {
+            ["type"] = "object",
+            ["required"] = new JsonArray("cursor"),
+            ["properties"] = new JsonObject { ["cursor"] = new JsonObject { ["type"] = "string" } },
+        };
+        target["binding"] = new JsonObject
+        {
+            ["type"] = "transformedHttp",
+            ["base"] = new JsonObject
+            {
+                ["operation"] = "GET /next",
+                ["credentialRef"] = new JsonArray("continuation-secret"),
+            },
+            ["inputProgram"] = new JsonObject
+            {
+                ["transformVersion"] = 1,
+                ["direction"] = "input",
+                ["base"] = "passthrough",
+                ["limits"] = new JsonObject
+                {
+                    ["maxSteps"] = 32,
+                    ["maxDepth"] = 16,
+                    ["maxNodes"] = 4096,
+                    ["maxOutputBytes"] = 131072,
+                    ["maxArrayFanout"] = 256,
+                },
+                ["steps"] = new JsonArray(new JsonObject
+                {
+                    ["op"] = "copy",
+                    ["source"] = "/cursor",
+                    ["target"] = $"/{part}/{destination}",
+                    ["onMissing"] = "skip",
+                }),
+            },
+        };
+
+        return root.ToJsonString();
+    }
+
+    public static string SelfSensitiveContinuation(Uri upstream, string canary)
+    {
+        var root = JsonNode.Parse(SensitiveContinuation(
+            upstream,
+            ParameterLocation.Query,
+            "api_key",
+            canary))!.AsObject();
+        var manifestOperations = root["sections"]!["operations"]!["inline"]!["operations"]!.AsArray();
+        var sourceOperation = manifestOperations[0]!.AsObject();
+        var parameters = sourceOperation["parameters"]!.AsArray();
+        parameters.Add(new JsonObject
+        {
+            ["name"] = "api_key",
+            ["in"] = "query",
+            ["schema"] = new JsonObject { ["type"] = "string" },
+        });
+        var operations = root["sections"]!["agentSurface"]!["inline"]!["operations"]!.AsArray();
+        var source = operations[0]!.AsObject();
+        source["inputSchema"] = new JsonObject
+        {
+            ["type"] = "object",
+            ["required"] = new JsonArray("api_key"),
+            ["properties"] = new JsonObject { ["api_key"] = new JsonObject { ["type"] = "string" } },
+        };
+        source["binding"]!["credentialRef"] = new JsonArray("continuation-secret");
+        var pagination = source["outputProjection"]!["pagination"]!.AsObject();
+        pagination.Remove("nextOperation");
+
+        return root.ToJsonString();
     }
 
     public static string PaginatingWithUnreachableTarget(Uri upstream)

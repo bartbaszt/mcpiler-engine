@@ -255,8 +255,44 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
         Assert.DoesNotContain("\"authority\":\"captured\"", replayedCall.Body, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task A_retained_continuation_cannot_invoke_a_target_removed_by_the_next_generation()
+    {
+        int upstreamArrivals = 0;
+        await using LoopbackHost upstream = await LoopbackHost.StartAsync(
+            async context =>
+            {
+                Interlocked.Increment(ref upstreamArrivals);
+                context.Response.StatusCode = 200;
+                context.Response.ContentType = "application/json";
+                context.Response.Headers["Link"] = "</pets/p-7>; rel=\"next\"";
+                await context.Response.WriteAsync("{\"id\":\"p-7\"}", context.RequestAborted);
+            },
+            Token);
+
+        await using ManagedListener listener = await StartAsync(ServedManifests.Paginating(upstream.Address));
+        using McpHttpSession session = await McpHttpSession.OpenAsync(listener.At("/api/full"), Token);
+        McpExchange page = await session.CallAsync("list-pets", "{\"status\":\"available\"}", 2, Token);
+        JsonObject next = JsonNode.Parse(Text(page))!["pagination"]!["next"]!.AsObject();
+
+        await listener.ActivateAsync(Load("/api", ServedManifests.OneSurface));
+
+        McpExchange listed = await session.RequestAsync("tools/list", 3, Token);
+        McpExchange refused = await session.CallAsync(
+            next["tool"]!.GetValue<string>(),
+            next["arguments"]!.ToJsonString(),
+            4,
+            Token);
+
+        Assert.DoesNotContain("get-pet", listed.Payload, StringComparison.Ordinal);
+        Assert.Contains("\"isError\":true", refused.Payload, StringComparison.Ordinal);
+        Assert.DoesNotContain("/pets/p-7", refused.Payload, StringComparison.Ordinal);
+        Assert.Equal(1, Volatile.Read(ref upstreamArrivals));
+    }
+
     /// <summary>
     /// A protected tools/list request stays on the generation that authorization admitted even
+
     /// when activation happens while token introspection is waiting.
     /// </summary>
     [Fact]
@@ -752,6 +788,10 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
             await content.PrefixWritten.WaitAsync(Token);
 
             EngineGeneration superseded = listener.Manager.Current!;
+            // The client-side write completing does not prove the server has admitted this HTTP
+            // request yet. Wait for the generation's actual lease so activation cannot race ahead
+            // of request admission on slower or differently scheduled hosts.
+            await WaitForGenerationLeaseAsync(superseded);
             EngineGeneration candidate = listener.NewGeneration(
                 Load(
                     "/api",
@@ -1258,6 +1298,16 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
     private static bool ContainsBytes(string root, byte[] expected)
         => Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories)
             .Any(path => File.ReadAllBytes(path).SequenceEqual(expected));
+
+    private static async Task WaitForGenerationLeaseAsync(EngineGeneration generation)
+    {
+        for (var attempt = 0; attempt < 5_000 && generation.LeaseCount == 0; attempt++)
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(1), Token);
+        }
+
+        Assert.True(generation.LeaseCount > 0, "The streamed HTTP request never acquired its generation lease.");
+    }
 
     private sealed class StreamingRequestContent : HttpContent
     {

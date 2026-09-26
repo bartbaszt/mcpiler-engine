@@ -1379,7 +1379,10 @@ public sealed class SectionReaderTests
                         "type": "transformedHttp",
                         "base": { "operation": "POST /pets" },
                         "inputProgram": { "transformVersion": 1, "direction": "input", "base": "passthrough", "steps": [] },
-                        "outputProgram": { "transformVersion": 1, "direction": "output", "base": "empty", "steps": [] }
+                        "outputProjection": {
+                          "kind": "transformProgram",
+                          "program": { "transformVersion": 1, "direction": "output", "base": "empty", "steps": [] }
+                        }
                       }
                     }
                   ]
@@ -1393,7 +1396,46 @@ public sealed class SectionReaderTests
 
         Assert.Equal("POST /pets", binding.Base.Operation);
         Assert.Equal(1, binding.InputProgram!["transformVersion"]!.GetValue<int>());
-        Assert.Equal("empty", binding.OutputProgram!["base"]!.GetValue<string>());
+
+        var projection = Assert.IsType<ManifestOutputProjection.TransformProgramVariant>(binding.Output);
+
+        Assert.Equal("empty", projection.Program["base"]!.GetValue<string>());
+    }
+
+    /// <summary>
+    /// The pre-union member is refused rather than read as a synonym.
+    /// </summary>
+    /// <remarks>
+    /// Format 4 has one spelling per meaning, and accepting the old one would give an author
+    /// two ways to write the same projection while giving every consumer two shapes to handle.
+    /// The refusal has to be a finding rather than a silent skip, because a document that
+    /// declares a projection and is served without one is the failure an author cannot see.
+    /// </remarks>
+    [Fact]
+    public void AgentSurface_refuses_the_pre_union_outputProgram_member()
+    {
+        var section = SectionReader.ReadAgentSurface(
+            Json(
+                """
+                {
+                  "operations": [
+                    {
+                      "slug": "a", "name": "A",
+                      "binding": {
+                        "type": "transformedHttp",
+                        "base": { "operation": "POST /pets" },
+                        "outputProgram": { "transformVersion": 1, "direction": "output", "base": "empty", "steps": [] }
+                      }
+                    }
+                  ]
+                }
+                """),
+            _diagnostics);
+
+        Assert.Contains(
+            _diagnostics,
+            static diagnostic => diagnostic.Code == ManifestDiagnosticCodes.UnknownMember
+                && diagnostic.Pointer!.Contains("outputProgram", StringComparison.Ordinal));
     }
 
     // ---- credential scope on a binding --------------------------------------------------
@@ -1979,3 +2021,4 @@ public sealed class SectionReaderTests
             $"The diagnostic echoed {diagnostic.Message.Length} characters of hostile input.");
     }
 }
+

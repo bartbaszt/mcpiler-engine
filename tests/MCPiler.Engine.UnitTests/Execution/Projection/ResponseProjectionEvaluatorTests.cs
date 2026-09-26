@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Text.Json.Nodes;
 
+using MCPiler.Engine.Authentication;
 using MCPiler.Engine.Execution;
 using MCPiler.Engine.Execution.Projection;
 using MCPiler.Engine.Manifest.Model;
@@ -152,6 +153,35 @@ public sealed class ResponseProjectionEvaluatorTests
 
         Assert.Contains(outcome.Diagnostics, diagnostic => diagnostic.Code == ResponseProjectionCodes.HeaderSensitive);
         Assert.DoesNotContain("tenant-secret", outcome.Value!.ToJsonString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Dynamic_authentication_destinations_are_included_in_runtime_sensitivity()
+    {
+        var oauth = new AuthenticationProfile(
+            "oauth",
+            AuthenticationKind.OAuth2ClientCredentials,
+            new JsonObject(),
+            [],
+            [],
+            []);
+        var resolved = new ResolvedAuthentication(
+        [
+            new ResolvedCredential(
+                new ManifestCredential("derived", CredentialScheme.Bearer, "token", CredentialReference.Literal("secret")),
+                "secret"),
+        ]);
+
+        Assert.Contains("authorization", SensitiveHeaderNames.For(oauth, Array.Empty<ResolvedCredential>(), resolved));
+
+        var subsonic = new AuthenticationProfile(
+            "subsonic",
+            AuthenticationKind.RequestSigning,
+            new JsonObject { ["strategyId"] = "request-signing-subsonic-md5" },
+            [],
+            [],
+            []);
+        Assert.Contains("u", SensitiveHeaderNames.QueryFor(subsonic, Array.Empty<ResolvedCredential>()));
     }
 
     [Fact]
@@ -482,6 +512,53 @@ public sealed class ResponseProjectionEvaluatorTests
     }
 
     [Fact]
+    public void Local_component_refs_are_resolved_while_assembling_nested_arguments()
+    {
+        var schema = new JsonObject
+        {
+            ["type"] = "object",
+            ["properties"] = new JsonObject
+            {
+                ["rows"] = new JsonObject { ["$ref"] = "#/$defs/rows" },
+            },
+            ["$defs"] = new JsonObject
+            {
+                ["rows"] = new JsonObject
+                {
+                    ["type"] = "array",
+                    ["items"] = new JsonObject { ["$ref"] = "#/$defs/row" },
+                },
+                ["row"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject { ["value"] = new JsonObject { ["type"] = "string" } },
+                },
+            },
+        };
+        var projection = new AgentOutputProjection(
+            "/data",
+            [],
+            new PaginationPolicy(
+                "/pagination",
+                new ResponseHeaderPaginationSource("x-next-cursor", PaginationScalarType.String),
+                "list_items_page",
+                [new PaginationArgumentMapping(
+                    "/rows/0/value", new ExtractedPaginationArgument(), PaginationConversion.String)],
+                ExposeUrl: false,
+                LinkRelations: []));
+
+        ResponseProjectionOutcome outcome = ResponseProjectionEvaluator.Evaluate(
+            projection, 200, Headers(("X-Next-Cursor", ["c-ref"])), Effective,
+            new JsonObject(), rawBody: null, Arguments(), NoSensitiveHeaders,
+            new SelfResolver("list_items_page", schema));
+
+        var arguments = Assert.IsType<JsonObject>(
+            Assert.IsType<JsonObject>(Assert.IsType<JsonObject>(outcome.Value)["pagination"])["next"]!["arguments"]!);
+        var rows = Assert.IsType<JsonArray>(arguments["rows"]);
+        Assert.Equal("c-ref", Assert.IsType<JsonObject>(rows[0])["value"]!.GetValue<string>());
+    }
+
+    [Fact]
     public void A_navigator_only_target_is_wrapped_in_the_navigator_payload()
     {
         var projection = new AgentOutputProjection(
@@ -707,6 +784,120 @@ public sealed class ResponseProjectionEvaluatorTests
     }
 
     [Fact]
+    public void An_anchor_with_a_different_query_is_a_context_mismatch()
+    {
+        var projection = new AgentOutputProjection(
+            "/data",
+            [],
+            new PaginationPolicy(
+                "/pagination",
+                new LinkHeaderPaginationSource("link", PaginationRelation.Next),
+                NextOperation: null,
+                [new PaginationArgumentMapping(
+                    "/cursor", new UrlQueryPaginationArgument("cursor"), PaginationConversion.String)],
+                ExposeUrl: false,
+                LinkRelations: []));
+
+        ResponseProjectionOutcome outcome = ResponseProjectionEvaluator.Evaluate(
+            projection, 200,
+            Headers(("Link", ["<items?cursor=c9>; rel=next; anchor=\"/metadata?sig=2\""])),
+            Effective, new JsonObject(), rawBody: null, Arguments(), NoSensitiveHeaders, new SelfResolver("x"));
+
+        Assert.Contains(outcome.Diagnostics, diagnostic => diagnostic.Code == ResponseProjectionCodes.LinkContextMismatch);
+    }
+
+    [Fact]
+    public void A_json_pointer_url_cannot_cross_the_response_origin()
+    {
+        var projection = new AgentOutputProjection(
+            "/data",
+            [],
+            new PaginationPolicy(
+                "/pagination",
+                new JsonPointerPaginationSource("/nextUrl", JsonPointerInterpretation.Url),
+                "items-page",
+                [new PaginationArgumentMapping(
+                    "/cursor", new UrlQueryPaginationArgument("cursor"), PaginationConversion.String)],
+                ExposeUrl: false,
+                LinkRelations: []));
+
+        ResponseProjectionOutcome outcome = ResponseProjectionEvaluator.Evaluate(
+            projection,
+            200,
+            Headers(),
+            Effective,
+            new JsonObject(),
+            new JsonObject { ["nextUrl"] = "https://evil.example/items?cursor=secret" },
+            Arguments(),
+            NoSensitiveHeaders,
+            new SelfResolver("items-page"));
+
+        Assert.Contains(outcome.Diagnostics, diagnostic => diagnostic.Code == ResponseProjectionCodes.LinkCrossOrigin);
+        Assert.DoesNotContain("secret", outcome.Value!.ToJsonString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ExposeUrl_adds_next_url_only_after_validation()
+    {
+        var projection = new AgentOutputProjection(
+            "/data",
+            [],
+            new PaginationPolicy(
+                "/pagination",
+                new JsonPointerPaginationSource("/nextUrl", JsonPointerInterpretation.Url),
+                "items-page",
+                [new PaginationArgumentMapping(
+                    "/cursor", new UrlQueryPaginationArgument("cursor"), PaginationConversion.String)],
+                ExposeUrl: true,
+                LinkRelations: []));
+
+        ResponseProjectionOutcome outcome = ResponseProjectionEvaluator.Evaluate(
+            projection,
+            200,
+            Headers(),
+            Effective,
+            new JsonObject(),
+            new JsonObject { ["nextUrl"] = "https://api.example/items?cursor=next" },
+            Arguments(),
+            NoSensitiveHeaders,
+            new UrlResolver("https://api.example/items?cursor=next"));
+
+        var next = Assert.IsType<JsonObject>(Assert.IsType<JsonObject>(outcome.Value)["pagination"]!["next"]);
+        Assert.Equal("https://api.example/items?cursor=next", next["url"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void A_sensitive_query_name_is_refused_before_url_mapping()
+    {
+        var projection = new AgentOutputProjection(
+            "/data",
+            [],
+            new PaginationPolicy(
+                "/pagination",
+                new JsonPointerPaginationSource("/nextUrl", JsonPointerInterpretation.Url),
+                "items-page",
+                [new PaginationArgumentMapping(
+                    "/cursor", new UrlQueryPaginationArgument("cursor"), PaginationConversion.String)],
+                ExposeUrl: true,
+                LinkRelations: []));
+
+        ResponseProjectionOutcome outcome = ResponseProjectionEvaluator.Evaluate(
+            projection,
+            200,
+            Headers(),
+            Effective,
+            new JsonObject(),
+            new JsonObject { ["nextUrl"] = "https://api.example/items?cursor=secret" },
+            Arguments(),
+            NoSensitiveHeaders,
+            new UrlResolver("https://api.example/items?cursor=secret"),
+            sensitiveQueryNames: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "cursor" });
+
+        Assert.Contains(outcome.Diagnostics, diagnostic => diagnostic.Code == ResponseProjectionCodes.ValueSensitive);
+        Assert.DoesNotContain("secret", outcome.Value!.ToJsonString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void A_sensitive_pagination_source_is_unavailable()
     {
         var projection = new AgentOutputProjection(
@@ -752,6 +943,68 @@ public sealed class ResponseProjectionEvaluatorTests
             new UrlResolver(url));
 
         Assert.Contains(outcome.Diagnostics, diagnostic => diagnostic.Code == ResponseProjectionCodes.MetadataOversized);
+    }
+
+    [Fact]
+    public void Response_header_pagination_applies_header_safety_ceilings()
+    {
+        var projection = new AgentOutputProjection(
+            "/data",
+            [],
+            new PaginationPolicy(
+                "/pagination",
+                new ResponseHeaderPaginationSource("x-next-cursor", PaginationScalarType.String),
+                NextOperation: null,
+                [new PaginationArgumentMapping(
+                    "/cursor", new ExtractedPaginationArgument(), PaginationConversion.String)],
+                ExposeUrl: false,
+                LinkRelations: []));
+
+        ResponseProjectionOutcome outcome = ResponseProjectionEvaluator.Evaluate(
+            projection,
+            200,
+            Headers(("X-Next-Cursor", [.. Enumerable.Repeat("x", ResponseProjectionLimits.MaxHeaderValues + 1)])),
+            Effective,
+            new JsonObject(),
+            rawBody: null,
+            Arguments(),
+            NoSensitiveHeaders,
+            new SelfResolver("list_items"));
+
+        Assert.Contains(outcome.Diagnostics, diagnostic => diagnostic.Code == ResponseProjectionCodes.HeaderOversized);
+        Assert.Equal("unavailable", Assert.IsType<JsonObject>(Assert.IsType<JsonObject>(outcome.Value)["pagination"]!)["state"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void Combined_metadata_and_pagination_budget_refuses_pagination()
+    {
+        var projection = new AgentOutputProjection(
+            "/data",
+            [new ResponseMetadataMapping(
+                new ResponseHeaderMetadataSource("x-large", HeaderValueMode.All),
+                "/metadata/large")],
+            new PaginationPolicy(
+                "/pagination",
+                new JsonPointerPaginationSource("/cursor", JsonPointerInterpretation.Value),
+                NextOperation: null,
+                [new PaginationArgumentMapping(
+                    "/cursor", new ExtractedPaginationArgument(), PaginationConversion.String)],
+                ExposeUrl: false,
+                LinkRelations: []));
+
+        ResponseProjectionOutcome outcome = ResponseProjectionEvaluator.Evaluate(
+            projection,
+            200,
+            Headers(("X-Large", [new string('m', 16_350), new string('m', 16_350)])),
+            Effective,
+            new JsonObject { ["cursor"] = new string('c', 32_700) },
+            rawBody: new JsonObject { ["cursor"] = new string('c', 32_700) },
+            Arguments(),
+            NoSensitiveHeaders,
+            new SelfResolver("list_items"));
+
+        Assert.Contains(outcome.Diagnostics, diagnostic => diagnostic.Code == ResponseProjectionCodes.MetadataOversized);
+        Assert.Equal("unavailable", Assert.IsType<JsonObject>(Assert.IsType<JsonObject>(outcome.Value)["pagination"]!)["state"]!.GetValue<string>());
     }
 
     [Fact]
@@ -809,13 +1062,17 @@ public sealed class ResponseProjectionEvaluatorTests
             => new(slug, slug, NavigatorOnly: false);
 
         public bool ValidateArguments(
-            ContinuationTarget _, JsonObject _1, ICollection<ExecutionDiagnostic> diagnostics)
+            ContinuationTarget _,
+            JsonObject _1,
+            ICollection<ExecutionDiagnostic> diagnostics,
+            IReadOnlySet<string>? _3 = null,
+            IReadOnlySet<string>? _4 = null)
         {
             diagnostics.Add(new ExecutionDiagnostic(ResponseProjectionCodes.ArgumentUnmappable));
             return false;
         }
 
-        public bool ValidateUrl(ContinuationTarget _, JsonObject _1, string _2, ICollection<ExecutionDiagnostic> _3)
+        public bool ValidateUrl(ContinuationTarget _, JsonObject _1, string _2, ICollection<ExecutionDiagnostic> _3, Uri? _4 = null, IReadOnlySet<string>? _5 = null)
             => true;
     }
 
@@ -825,10 +1082,15 @@ public sealed class ResponseProjectionEvaluatorTests
         public ContinuationTarget? Resolve(string _1, ICollection<ExecutionDiagnostic> _2)
             => new(slug, slug, NavigatorOnly: false, InputSchema: inputSchema);
 
-        public bool ValidateArguments(ContinuationTarget _, JsonObject _1, ICollection<ExecutionDiagnostic> _2)
+        public bool ValidateArguments(
+            ContinuationTarget _,
+            JsonObject _1,
+            ICollection<ExecutionDiagnostic> _2,
+            IReadOnlySet<string>? _3 = null,
+            IReadOnlySet<string>? _4 = null)
             => true;
 
-        public bool ValidateUrl(ContinuationTarget _, JsonObject _1, string _2, ICollection<ExecutionDiagnostic> _3)
+        public bool ValidateUrl(ContinuationTarget _, JsonObject _1, string _2, ICollection<ExecutionDiagnostic> _3, Uri? _4 = null, IReadOnlySet<string>? _5 = null)
             => true;
     }
 
@@ -838,10 +1100,15 @@ public sealed class ResponseProjectionEvaluatorTests
         public ContinuationTarget? Resolve(string slug, ICollection<ExecutionDiagnostic> _)
             => new(slug, ManifestTool.NavigatorInvoke, NavigatorOnly: true);
 
-        public bool ValidateArguments(ContinuationTarget _, JsonObject _1, ICollection<ExecutionDiagnostic> _2)
+        public bool ValidateArguments(
+            ContinuationTarget _,
+            JsonObject _1,
+            ICollection<ExecutionDiagnostic> _2,
+            IReadOnlySet<string>? _3 = null,
+            IReadOnlySet<string>? _4 = null)
             => true;
 
-        public bool ValidateUrl(ContinuationTarget _, JsonObject _1, string _2, ICollection<ExecutionDiagnostic> _3)
+        public bool ValidateUrl(ContinuationTarget _, JsonObject _1, string _2, ICollection<ExecutionDiagnostic> _3, Uri? _4 = null, IReadOnlySet<string>? _5 = null)
             => true;
     }
 
@@ -851,11 +1118,17 @@ public sealed class ResponseProjectionEvaluatorTests
         public ContinuationTarget? Resolve(string slug, ICollection<ExecutionDiagnostic> _)
             => new(slug, slug, NavigatorOnly: false);
 
-        public bool ValidateArguments(ContinuationTarget _, JsonObject _1, ICollection<ExecutionDiagnostic> _2)
+        public bool ValidateArguments(
+            ContinuationTarget _,
+            JsonObject _1,
+            ICollection<ExecutionDiagnostic> _2,
+            IReadOnlySet<string>? _3 = null,
+            IReadOnlySet<string>? _4 = null)
             => true;
 
         public bool ValidateUrl(
-            ContinuationTarget _, JsonObject _1, string url, ICollection<ExecutionDiagnostic> diagnostics)
+            ContinuationTarget _, JsonObject _1, string url, ICollection<ExecutionDiagnostic> diagnostics,
+            Uri? _4 = null, IReadOnlySet<string>? _5 = null)
         {
             if (expected is not null && string.Equals(url, expected, StringComparison.Ordinal))
             {

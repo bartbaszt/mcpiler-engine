@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 
 using MCPiler.Engine.Manifest.Loading;
+using MCPiler.Engine.Runtime.Projection;
 
 namespace MCPiler.Engine.UnitTests.Manifest;
 
@@ -43,6 +44,28 @@ internal static class ManifestCorpus
 
     /// <summary>The corpus root.</summary>
     public static string Root => TestRepository.Fixture("manifests");
+
+    /// <summary>
+    /// The compiled JMESPath fixture. Its projection expression is evaluated by a confined worker
+    /// in a real host, which a unit corpus cannot start, so <see cref="ValidatorFor"/> supplies a
+    /// permissive classification for this one fixture.
+    /// </summary>
+    public const string JmesPathProfileFixture = "jmespath-profile-1";
+
+    /// <summary>
+    /// The expression validator a fixture needs when it is loaded through the reader.
+    /// </summary>
+    /// <remarks>
+    /// Every fixture but the JMESPath one carries no output projection, so the reader's refusal
+    /// for an unvalidated expression never triggers and no validator is needed. The JMESPath
+    /// fixture is structurally authorable and schema-valid, which is what these corpus tests
+    /// assert; whether its expression is valid language is decided by a confined worker, and that
+    /// is covered where a worker can actually run.
+    /// </remarks>
+    public static IProjectionExpressionValidator? ValidatorFor(string fixture) =>
+        string.Equals(fixture, JmesPathProfileFixture, StringComparison.Ordinal)
+            ? PermissiveProjectionValidator.Instance
+            : null;
 
     /// <summary>The hostile-case subtree.</summary>
     public static string HostileRoot => Path.Combine(Root, "hostile");

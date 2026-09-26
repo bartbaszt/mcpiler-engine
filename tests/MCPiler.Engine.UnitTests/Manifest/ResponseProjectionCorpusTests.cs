@@ -50,12 +50,17 @@ public sealed class ResponseProjectionCorpusTests
         "pagination.link-anchor-context-mismatch",
         "pagination.cross-origin-url-refused",
         "pagination.target-url-mismatch-refused",
+        "pagination.query-only-unmapped-change-refused",
         "pagination.non-success-skips-link-but-keeps-retry-after",
+        "pagination.non-success-401-challenge-body-preserved",
         "pagination.body-transform-does-not-remove-link-next",
         "pagination.body-url-at-16k",
         "pagination.body-url-over-16k",
+        "pagination.body-url-exposed",
         "pagination.link-values-at-128",
         "pagination.link-values-over-128",
+        "pagination.header-values-over-32",
+        "pagination.header-control-refused",
         "pagination.object-over-32k",
         "pagination.direct-name-collision-continuation",
         "pagination.profile-target-removed-refusal",
@@ -75,6 +80,7 @@ public sealed class ResponseProjectionCorpusTests
         "pagination.number-refuses-leading-zero",
         "pagination.number-refuses-leading-whitespace",
         "pagination.number-refuses-trailing-whitespace",
+        "pagination.body-url-cross-origin-refused",
     ];
 
     private static readonly string[] RequiredDirectives =

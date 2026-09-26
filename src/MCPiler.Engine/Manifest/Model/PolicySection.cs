@@ -22,6 +22,7 @@ namespace MCPiler.Engine.Manifest.Model;
 /// </param>
 /// <param name="Limits">Transport limits.</param>
 /// <param name="TransformCeiling">Upper bound on any transformation program's own limits.</param>
+/// <param name="JmesPathCeiling">Upper bound on any JMESPath projection's own limits.</param>
 /// <param name="Compound">Compound workflow bounds.</param>
 /// <param name="SchemaBounds">Bounds on schema reference resolution.</param>
 /// <param name="Files">File handle and upload behavior.</param>
@@ -30,12 +31,17 @@ public sealed record PolicySection(
     IReadOnlyList<string> AllowedOrigins = null!,
     ExecutionLimits? Limits = null,
     TransformCeiling? TransformCeiling = null,
+    JmesPathCeiling? JmesPathCeiling = null,
     CompoundBounds? Compound = null,
     SchemaBounds? SchemaBounds = null,
     FilePolicy? Files = null)
 {
     /// <summary>The section format version this model represents.</summary>
-    public const int FormatVersion = 1;
+    /// <remarks>
+    /// Version 2 adds <c>jmesPathCeiling</c>: the bounds a JMESPath projection's own explicit
+    /// limits are measured against, and which local configuration may narrow but not widen.
+    /// </remarks>
+    public const int FormatVersion = 2;
 
     /// <summary>
     /// The declared origins, or the single origin derived from <see cref="BaseUrl"/>.
@@ -48,6 +54,9 @@ public sealed record PolicySection(
 
     /// <summary>The effective transformation ceiling.</summary>
     public TransformCeiling EffectiveTransformCeiling => TransformCeiling ?? TransformCeiling.Default;
+
+    /// <summary>The effective JMESPath projection ceiling.</summary>
+    public JmesPathCeiling EffectiveJmesPathCeiling => JmesPathCeiling ?? JmesPathCeiling.Default;
 
     /// <summary>The effective compound bounds.</summary>
     public CompoundBounds EffectiveCompound => Compound ?? CompoundBounds.Default;
@@ -117,6 +126,54 @@ public sealed record TransformCeiling(
         MaxNodes: 8192,
         MaxOutputBytes: 256L * 1024,
         MaxArrayFanout: 1024);
+}
+
+/// <summary>
+/// The upper bound a JMESPath projection's own declared limits may not exceed.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The seven dimensions are exactly the ones a projection declares, deliberately. A ceiling
+/// that bounded something a projection cannot state would be enforcing a limit nothing can
+/// request; a dimension a projection can state and no ceiling bounds would be a widening path
+/// the format forgot to close.
+/// </para>
+/// <para>
+/// The evaluation deadline is a wall budget rather than a language bound: it is what terminates
+/// an expression whose cost the evaluator cannot be asked about, so it is a ceiling like the
+/// others and narrows the same way.
+/// </para>
+/// </remarks>
+/// <param name="MaxExpressionBytes">Maximum expression UTF-8 bytes.</param>
+/// <param name="MaxInputNodes">Maximum nodes in the parsed response body.</param>
+/// <param name="MaxInputDepth">Maximum nesting depth of the parsed response body.</param>
+/// <param name="MaxResultNodes">Maximum nodes in the completed result value.</param>
+/// <param name="MaxResultDepth">Maximum nesting depth of the completed result value.</param>
+/// <param name="MaxOutputBytes">Maximum serialized projected result bytes.</param>
+/// <param name="MaxEvaluationMilliseconds">Maximum worker call wall budget.</param>
+public sealed record JmesPathCeiling(
+    int MaxExpressionBytes,
+    long MaxInputNodes,
+    int MaxInputDepth,
+    long MaxResultNodes,
+    int MaxResultDepth,
+    long MaxOutputBytes,
+    int MaxEvaluationMilliseconds)
+{
+    /// <summary>The current Platform projection defaults.</summary>
+    /// <remarks>
+    /// These are the calibrated administrator ceilings from the profile research, not the
+    /// conservative values a new projection starts with. The two are separate so a new
+    /// projection does not silently consume the ceiling's headroom.
+    /// </remarks>
+    public static JmesPathCeiling Default { get; } = new(
+        MaxExpressionBytes: 16384,
+        MaxInputNodes: 1_000_000,
+        MaxInputDepth: 64,
+        MaxResultNodes: 65_536,
+        MaxResultDepth: 64,
+        MaxOutputBytes: 1L * 1024 * 1024,
+        MaxEvaluationMilliseconds: 60_000);
 }
 
 /// <summary>Bounds applied to a compound workflow as a whole.</summary>
