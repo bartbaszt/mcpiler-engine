@@ -10,6 +10,9 @@
           {
             "slug": "default",
             "isDefault": true,
+            "navigator": {
+              "enabled": true
+            },
             "operations": [
               {
                 "operation": "search"
@@ -142,7 +145,7 @@
     },
     "agentSurface": {
       "inline": {
-        "formatVersion": 4,
+        "formatVersion": 5,
         "operations": [
           {
             "slug": "search",
@@ -187,7 +190,7 @@
   },
   "completeness": {
     "algorithm": "sha256",
-    "value": "8dffb2bc97e2251d623dad1a34fbff06d2daf104d1d7f581c59c4dc99f6a250f"
+    "value": "cee50dcb87b4ce1a1d125f879c6c691ce8b075ad3cfde97b7f76eacb8988e447"
   },
   "provenance": {
     "connectorId": "7a1c0000000040008000000000000001",
