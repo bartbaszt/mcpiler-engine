@@ -108,7 +108,8 @@ public static class EngineRuntime
                 files,
                 options.AllowInlineSecrets,
                 runtimeState,
-                options.ResponseCache.ClampToHardMaxima());
+                options.ResponseCache.ClampToHardMaxima(),
+                options.ProjectionWorker);
     }
 
     /// <summary>
@@ -223,7 +224,9 @@ public static class EngineRuntime
                 RequireSealed = options.RequireSealed,
                 AllowInlineSecrets = options.AllowInlineSecrets,
                 AllowProviderReferences = allowProviderReferences,
-            });
+            },
+            overrides: null,
+            expressionValidator: options.ExpressionValidator);
 
         foreach (ManifestDiagnostic diagnostic in loaded.Warnings)
         {

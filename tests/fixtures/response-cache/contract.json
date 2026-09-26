@@ -8,7 +8,7 @@
     {
       "name": "disabled-absent",
       "section": {
-        "formatVersion": 4,
+        "formatVersion": 5,
         "operations": [
           {
             "slug": "list-pets",
@@ -23,7 +23,7 @@
     {
       "name": "enabled-get",
       "section": {
-        "formatVersion": 4,
+        "formatVersion": 5,
         "operations": [
           {
             "slug": "list-pets",
@@ -41,7 +41,7 @@
     {
       "name": "ttl-zero",
       "section": {
-        "formatVersion": 4,
+        "formatVersion": 5,
         "operations": [
           {
             "slug": "list-pets",
@@ -57,7 +57,7 @@
     {
       "name": "ttl-fraction",
       "section": {
-        "formatVersion": 4,
+        "formatVersion": 5,
         "operations": [
           {
             "slug": "list-pets",
@@ -73,7 +73,7 @@
     {
       "name": "ttl-missing",
       "section": {
-        "formatVersion": 4,
+        "formatVersion": 5,
         "operations": [
           {
             "slug": "list-pets",
@@ -89,7 +89,7 @@
     {
       "name": "unknown-policy-member",
       "section": {
-        "formatVersion": 4,
+        "formatVersion": 5,
         "operations": [
           {
             "slug": "list-pets",
@@ -105,7 +105,7 @@
     {
       "name": "effective-post-binding",
       "section": {
-        "formatVersion": 4,
+        "formatVersion": 5,
         "operations": [
           {
             "slug": "create-pet",
@@ -121,7 +121,7 @@
     {
       "name": "compound-binding",
       "section": {
-        "formatVersion": 4,
+        "formatVersion": 5,
         "operations": [
           {
             "slug": "list-pets",

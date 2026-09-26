@@ -416,12 +416,15 @@ null"; and numeric bounds keep their original lexical token.
 
 ### `agentSurface`
 
+Format version 5 retains version 4's optional per-operation `responseCache` member and adds `outputProjection` for response metadata and pagination.
+
 The operations as an agent sees them.
 
 Each entry carries `slug` (unique, and the reference key used by surface exposure
 lists, compound steps and the derivable sections), `name`, and `binding`.
 Optionally `kind`, `summary`, `description`, `groups`, `tags`, `inputSchema`,
-`outputSchema`, `outputSchemaPolicy`, `annotations`, `risk`, `search`, `responseCache`.
+`outputSchema`, `outputSchemaPolicy`, `annotations`, `risk`, `search`,
+`outputProjection`, `responseCache`.
 
 `responseCache` is the explicit opt-in to caching the operation's upstream response.
 When present it is an object containing exactly one member, `ttlSeconds`, a whole
@@ -481,6 +484,49 @@ A step naming an operation the same surface marks `hidden` is refused at load
 (`binding/compound-step-excluded`), because the composition would otherwise be a
 tunnel to an operation that surface withheld. An operation simply absent from a
 surface's list is not an exclusion.
+
+### Output projection and pagination
+
+`outputProjection` is the reviewed agent-facing output policy of one operation. It
+is optional; **absence preserves the operation's pre-existing result bytes
+exactly**, which is the compatibility contract of this member.
+
+The projection declares a non-root RFC 6901 `bodyTarget` receiving the final body,
+and optionally `metadata` mappings and one `pagination` policy:
+
+- a metadata mapping selects a `responseHeader` (`first` or `all` values) or the
+  `statusCode`, and writes it to an explicit target. There is no wildcard. Header
+  names are canonical lower-case ASCII and lookup is case-insensitive. No target
+  may overlap `bodyTarget`, another mapping or the pagination target
+  (`agent/projection-target-overlap`).
+- a `pagination` policy has a closed source vocabulary: `linkHeader` (a
+  standards-compatible Link source with the `next` relation), `responseHeader` (a
+  cursor/offset carried in a header) or `jsonPointer` (a value or URL read from the
+  bounded upstream body). No expression language, regex or runtime provider
+  heuristic exists.
+- `nextArguments` maps an extracted value, a named URL query/path component, a
+  reviewed current-invocation argument or a reviewed literal into the target
+  operation's input schema. `nextOperation` names another `agentSurface` slug in
+  the same manifest; absent, the target is the invoking operation.
+- When an operation declares a modelled `outputSchema`, it must accept the final
+  projected envelope, including every target the policy writes and each pagination
+  state (`next`, `end`, and `unavailable`). A schema that requires an optional
+  header-derived value or excludes a projected target is refused.
+
+The hard-denied header set (`authorization`, `proxy-authorization`, `cookie`,
+`set-cookie`, `set-cookie2`, `www-authenticate`, `proxy-authenticate`,
+`authentication-info`, `proxy-authentication-info`) cannot be selected for
+projection or pagination, in either casing, and no policy can override that
+(`agent/projection-header-sensitive`).
+
+A cross-operation target must be HTTP-backed, must declare the mapped arguments in
+its input schema, must have every required input mapped, and must be reachable on
+every enabled surface that publishes the paginating source
+(`agent/projection-target-unknown`, `agent/projection-target-not-http`,
+`agent/projection-mapping-invalid`, `agent/projection-mapping-incomplete`,
+`agent/projection-target-unreachable`). A continuation never executes
+automatically: it names the callable tool and its exact arguments, and the
+subsequent call goes through the ordinary admission and outbound policy.
 
 Two bounds belong to the workflow rather than to any step. `maxTotalResponseBytes`
 is the aggregate across every step and is enforced in addition to each step's own
@@ -718,11 +764,11 @@ described.
 
 **Engine declares an explicit supported range.** This Engine supports manifest
 format `0.3`. Section versions are not uniform, because they move
-independently: `credentials` is at `3`, `agentSurface` is at `4`, `authentication`
-is at `1`, while `server`, `policy`, `operations`, `tools` and `search` are still
-at `1`. A section that omits `formatVersion` is accepted at whatever version this
-Engine supports for it. A refusal always names the version observed and the range
-supported. Hostile input echoed for context is truncated.
+independently: `agentSurface` is at `5`, `credentials` is at `4`, `authentication`
+is at `2`, `server` and `policy` are at `2`, while `operations`, `tools` and
+`search` are still at `1`. A section that omits `formatVersion` is accepted at
+whatever version this Engine supports for it. A refusal always names the version
+observed and the range supported. Hostile input echoed for context is truncated.
 
 **While MAJOR is 0 there is no compatibility promise.** The remedy for an old
 manifest is to produce it again, not to migrate it. There is no alpha migrator,
@@ -817,6 +863,20 @@ The following codes are always warnings; every other code is an error:
 | `agent/duplicate-slug` | Two operations share a slug. |
 | `agent/unknown-group` | An operation names a group the section does not declare. |
 | `agent/kind-binding-mismatch` | A declared `kind` contradicts the binding. |
+| `agent/projection-unknown-member` | An output projection or pagination policy declares a member this format defines nowhere. |
+| `agent/projection-unknown-value` | A source kind, value mode, relation, scalar type or conversion is outside the closed vocabulary. |
+| `agent/projection-pointer-invalid` | A projection pointer is malformed or is the document root where a non-root pointer is required. |
+| `agent/projection-target-overlap` | Two projection/pagination targets overlap, so one value would overwrite the other. |
+| `agent/projection-header-sensitive` | A selected response header is classified sensitive and cannot be agent-visible. |
+| `agent/projection-header-name-invalid` | A response header source name is empty or not a printable ASCII token. |
+| `agent/projection-url-source-required` | A URL-derived argument mapping is declared without a URL-valued pagination source. |
+| `agent/projection-shape-invalid` | A required projection member is absent or empty. |
+| `agent/projection-target-unknown` | A pagination policy names a next-operation slug the surface does not declare. |
+| `agent/projection-target-not-http` | A pagination policy names a next operation that is not HTTP-backed. |
+| `agent/projection-target-unreachable` | A surface that publishes the paginating source does not expose its cross-operation target. |
+| `agent/projection-mapping-invalid` | A mapped next-argument target is absent from the target operation's input schema. |
+| `agent/projection-mapping-incomplete` | The mappings cannot supply every required input of the resolved target operation. |
+| `agent/projection-output-schema-invalid` | The declared output schema cannot accept the final projected envelope or one of its valid pagination states. |
 | `agent/response-cache-policy-invalid` | A response-cache TTL is missing, malformed or outside 1..86,400, or the operation resolves to a compound or non-`GET`/`HEAD` binding. |
 
 ### `binding` — execution bindings
@@ -833,6 +893,9 @@ The following codes are always warnings; every other code is an error:
 | `binding/compound-binding-version-unsupported` | An unsupported `bindingVersion`. |
 | `binding/type-unknown` | A binding type outside the vocabulary. |
 | `binding/transform-invalid` | A transformation program is not a valid program. |
+| `binding/projection-invalid` | A JMESPath projection is invalid or cannot be checked in confined isolation. |
+| `binding/projection-limit-out-of-range` | Projection limits are missing, non-positive, or above the policy ceiling. |
+| `binding/projection-version-unsupported` | A projection declares a language version this Engine does not implement. |
 | `binding/pointer-root-not-allowed` | A pointer addresses a root not allowed in that position. |
 | `binding/credential-ref-unknown` | A `credentialRef` names a credential `credentials` does not declare. |
 | `binding/credential-basic-incomplete` | A binding references one half of a `basic` pair. |

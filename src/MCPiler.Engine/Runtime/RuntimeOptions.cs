@@ -1,3 +1,5 @@
+using MCPiler.Engine.Runtime.Projection;
+
 namespace MCPiler.Engine.Runtime;
 
 /// <summary>
@@ -74,6 +76,39 @@ public sealed record RuntimeOptions(IReadOnlyList<MountRequest> Mounts, string F
     /// content, while this one holds a secret and never serves anything.
     /// </remarks>
     public string? RuntimeStateRoot { get; init; }
+
+    /// <summary>
+    /// How a manifest's JMESPath expressions are classified at load, or null when this process
+    /// cannot confine an evaluation.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Loading a manifest with a JMESPath projection means compiling the expression, and the
+    /// profile forbids compiling one in the process that answers. A host that owns the confined
+    /// worker supplies this; a host that does not leaves it null, and a manifest carrying a
+    /// projection is then refused rather than checked here. That refusal is the intended
+    /// outcome, not a degraded one: a manifest admitted without its expression ever being
+    /// compiled is a manifest whose projections fail at the first call.
+    /// </para>
+    /// <para>
+    /// The port is deliberately synchronous because loading is: a manifest is read, validated
+    /// and mounted before a listener exists.
+    /// </para>
+    /// </remarks>
+    public IProjectionExpressionValidator? ExpressionValidator { get; init; }
+
+    /// <summary>
+    /// The confined evaluator an output projection is invoked through.
+    /// </summary>
+    /// <remarks>
+    /// Separate from <see cref="ExpressionValidator"/> because the two answer different
+    /// questions. Loading asks whether an expression compiles; execution asks what it produces
+    /// for a real body, and the second one runs untrusted work that must not happen in the
+    /// serving process. A host normally supplies one pool for both so the confinement is one
+    /// mechanism rather than two; a process with no worker refuses a JMESPath projection rather
+    /// than evaluating it in place.
+    /// </remarks>
+    public IProjectionWorker? ProjectionWorker { get; init; }
 
     /// <summary>
     /// The file holding the Engine runtime-state key. Required exactly when

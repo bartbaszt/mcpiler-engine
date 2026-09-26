@@ -27,7 +27,8 @@ internal static class ExecutionManifests
         ManifestOperation? operation = null,
         ManifestBinding? binding = null,
         CredentialsSection? credentials = null,
-        ResponseCachePolicySettings? responseCache = null)
+        ResponseCachePolicySettings? responseCache = null,
+        AgentOutputProjection? outputProjection = null)
     {
         var declared = operation ?? Operation();
 
@@ -42,7 +43,8 @@ internal static class ExecutionManifests
                     Slug,
                     "Get thing",
                     binding ?? new HttpBinding(declared.Key),
-                    ResponseCache: responseCache),
+                    ResponseCache: responseCache,
+                    OutputProjection: outputProjection),
             ]),
             credentials);
     }

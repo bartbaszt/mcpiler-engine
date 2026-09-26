@@ -10,6 +10,9 @@
           {
             "slug": "default",
             "isDefault": true,
+            "navigator": {
+              "enabled": true
+            },
             "operations": [
               {
                 "operation": "search"
@@ -21,11 +24,20 @@
     },
     "policy": {
       "inline": {
-        "formatVersion": 1,
+        "formatVersion": 2,
         "baseUrl": "https://styles.example.test/",
         "allowedOrigins": [
           "https://styles.example.test"
-        ]
+        ],
+        "jmesPathCeiling": {
+          "maxExpressionBytes": 16384,
+          "maxInputNodes": 1000000,
+          "maxInputDepth": 64,
+          "maxResultNodes": 65536,
+          "maxResultDepth": 64,
+          "maxOutputBytes": 1048576,
+          "maxEvaluationMilliseconds": 60000
+        }
       }
     },
     "credentials": {
@@ -133,7 +145,7 @@
     },
     "agentSurface": {
       "inline": {
-        "formatVersion": 4,
+        "formatVersion": 5,
         "operations": [
           {
             "slug": "search",
@@ -162,7 +174,7 @@
   },
   "completeness": {
     "algorithm": "sha256",
-    "value": "edbc7f6b1a6b13b77b14fe55d159cd03d458246acc82781178760b96f14d7f04"
+    "value": "700f676a4d209c5b5b1010bc38f0ab9f44354f884a2b5754cbae1068147d28a9"
   },
   "provenance": {
     "connectorId": "7a1c0000000040008000000000000001",

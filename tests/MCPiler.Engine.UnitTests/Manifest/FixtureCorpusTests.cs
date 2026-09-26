@@ -63,7 +63,8 @@ public sealed class FixtureCorpusTests
     {
         var expected = new[]
         {
-            "compiled", "compound", "credentials", "files", "minimal", "multi-surface", "refs", "sealed-bundle",
+            "compiled", "compound", "credentials", "files", "jmespath-profile-1", "minimal",
+            "multi-surface", "refs", "sealed-bundle",
             "search", "transformed", "two-origins",
             "manifest-0.3/challenge-session", "manifest-0.3/exchange", "manifest-0.3/managed-provider",
             "manifest-0.3/oauth-authorization-code", "manifest-0.3/oauth-client-credentials",
@@ -523,7 +524,9 @@ public sealed class FixtureCorpusTests
     private static ManifestReadResult ReadFixture(string fixture, ManifestLoadOptions? options = null) =>
         ManifestReader.Read(
             new DirectoryManifestSource(Path.Combine(CorpusRoot, fixture)),
-            options ?? ManifestCorpus.OptionsFor(fixture));
+            options ?? ManifestCorpus.OptionsFor(fixture),
+            overrides: null,
+            ManifestCorpus.ValidatorFor(fixture));
 
     private static string ReadExpectation(string path)
     {

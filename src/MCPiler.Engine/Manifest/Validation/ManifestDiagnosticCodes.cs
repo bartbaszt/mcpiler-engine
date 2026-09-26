@@ -204,8 +204,79 @@ public static class ManifestDiagnosticCodes
     /// <summary>A transformation program is invalid. Carries the underlying transform code.</summary>
     public const string TransformInvalid = "binding/transform-invalid";
 
+    /// <summary>
+    /// A JMESPath projection is invalid or cannot be checked in confined isolation.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// One code covers every way a projection can be wrong, for the same reason the transform
+    /// code does: the profile's own reason travels beside it in <c>ProgramCode</c>, and an
+    /// operator is told "this projection is refused, and here is the profile reason" rather
+    /// than a different manifest code per family.
+    /// </para>
+    /// <para>
+    /// It also covers an unavailable check. A host that cannot confine an evaluation reports
+    /// that here and the manifest is refused, because validating an expression by interpreting
+    /// it in the serving process is exactly what the profile forbids — an unvalidated manifest
+    /// is a worse outcome than a refused one.
+    /// </para>
+    /// </remarks>
+    public const string ProjectionInvalid = "binding/projection-invalid";
+
+    /// <summary>
+    /// A projection's declared limits are missing, non-positive, or above the policy ceiling.
+    /// </summary>
+    public const string ProjectionLimitOutOfRange = "binding/projection-limit-out-of-range";
+
+    /// <summary>A projection declares a language version this Engine does not implement.</summary>
+    public const string ProjectionVersionUnsupported = "binding/projection-version-unsupported";
+
     /// <summary>A mapping pointer does not start at a permitted scope root.</summary>
     public const string PointerRootNotAllowed = "binding/pointer-root-not-allowed";
+
+    // ---- output projection and pagination --------------------------------------------
+
+    /// <summary>An output projection or pagination policy declares a member this format defines nowhere.</summary>
+    public const string ProjectionUnknownMember = "agent/projection-unknown-member";
+
+    /// <summary>A projection source kind, value mode, relation, scalar type or conversion is outside the closed vocabulary.</summary>
+    public const string ProjectionUnknownValue = "agent/projection-unknown-value";
+
+    /// <summary>A projection pointer is malformed or is the document root where a non-root pointer is required.</summary>
+    public const string ProjectionPointerInvalid = "agent/projection-pointer-invalid";
+
+    /// <summary>Two projection/pagination targets overlap, so one would silently overwrite the other.</summary>
+    public const string ProjectionTargetOverlap = "agent/projection-target-overlap";
+
+    /// <summary>A selected header source is classified sensitive and cannot be agent-visible.</summary>
+    public const string ProjectionHeaderSensitive = "agent/projection-header-sensitive";
+
+    /// <summary>A response header source name is empty or not a printable ASCII token.</summary>
+    public const string ProjectionHeaderNameInvalid = "agent/projection-header-name-invalid";
+
+    /// <summary>A URL-derived argument mapping is declared without a URL-valued pagination source.</summary>
+    public const string ProjectionUrlSourceRequired = "agent/projection-url-source-required";
+
+    /// <summary>A required projection member is absent or empty.</summary>
+    public const string ProjectionShapeInvalid = "agent/projection-shape-invalid";
+
+    /// <summary>A projected envelope or pagination state is incompatible with its declared output schema.</summary>
+    public const string ProjectionOutputSchemaInvalid = "agent/projection-output-schema-invalid";
+
+    /// <summary>A pagination policy names a next-operation slug the surface does not declare.</summary>
+    public const string ProjectionTargetUnknown = "agent/projection-target-unknown";
+
+    /// <summary>A pagination policy names a next operation that is not HTTP-backed.</summary>
+    public const string ProjectionTargetNotHttp = "agent/projection-target-not-http";
+
+    /// <summary>A surface that publishes the paginating source does not expose its cross-operation target.</summary>
+    public const string ProjectionTargetUnreachable = "agent/projection-target-unreachable";
+
+    /// <summary>A mapped next-argument target is absent from the target operation's input schema.</summary>
+    public const string ProjectionMappingInvalid = "agent/projection-mapping-invalid";
+
+    /// <summary>The mappings cannot supply every required input of the resolved target operation.</summary>
+    public const string ProjectionMappingIncomplete = "agent/projection-mapping-incomplete";
 
     /// <summary>A binding references a credential id the credentials section does not declare.</summary>
     /// <remarks>
@@ -556,7 +627,24 @@ public static class ManifestDiagnosticCodes
         CompoundBindingVersionUnsupported,
         BindingTypeUnknown,
         TransformInvalid,
+        ProjectionInvalid,
+        ProjectionLimitOutOfRange,
+        ProjectionVersionUnsupported,
         PointerRootNotAllowed,
+        ProjectionUnknownMember,
+        ProjectionUnknownValue,
+        ProjectionPointerInvalid,
+        ProjectionTargetOverlap,
+        ProjectionHeaderSensitive,
+        ProjectionHeaderNameInvalid,
+        ProjectionUrlSourceRequired,
+        ProjectionShapeInvalid,
+        ProjectionOutputSchemaInvalid,
+        ProjectionTargetUnknown,
+        ProjectionTargetNotHttp,
+        ProjectionTargetUnreachable,
+        ProjectionMappingInvalid,
+        ProjectionMappingIncomplete,
         BindingCredentialRefUnknown,
         BindingCredentialBasicIncomplete,
         DuplicateSurfaceSlug,

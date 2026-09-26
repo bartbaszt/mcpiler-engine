@@ -29,7 +29,7 @@
     },
     "policy": {
       "inline": {
-        "formatVersion": 1,
+        "formatVersion": 2,
         "baseUrl": "https://api.example.com"
       }
     },
@@ -58,7 +58,7 @@
     },
     "agentSurface": {
       "inline": {
-        "formatVersion": 4,
+        "formatVersion": 5,
         "operations": [
           {
             "slug": "ping",

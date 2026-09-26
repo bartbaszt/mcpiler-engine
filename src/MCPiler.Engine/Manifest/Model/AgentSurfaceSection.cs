@@ -17,11 +17,14 @@ public sealed record AgentSurfaceSection(
     /// <summary>The section format version this model represents.</summary>
     /// <remarks>
     /// Version 2 added the credential scope an <c>http</c> binding authorizes. Version 3 adds
-    /// the authentication profile reference an <c>http</c> binding names. The section version
-    /// moved rather than only the root version because each change is confined to this
-    /// section's payload.
+    /// the authentication profile reference an <c>http</c> binding names. Version 4 replaces
+    /// <c>outputProgram</c> with the closed transformed-HTTP <c>outputProjection</c> union and
+    /// carries the optional response cache. Version 5 retains both and adds the reviewed
+    /// operation-level output projection and pagination policy. The section version moved rather
+    /// than only the root version because each change is confined to this section's payload.
     /// </remarks>
-    public const int FormatVersion = 4;
+    public const int MinimumFormatVersion = 4;
+    public const int FormatVersion = 5;
 
     /// <summary>The declared operations, never null.</summary>
     public IReadOnlyList<AgentOperationEntry> Operations { get; init; } = Operations ?? [];
@@ -71,6 +74,12 @@ public sealed record AgentSurfaceSection(
 /// boundary.
 /// </param>
 /// <param name="Search">Search metadata, never advertised to clients.</param>
+/// <param name="OutputProjection">
+/// The reviewed agent-facing output policy, or <c>null</c> when the operation keeps
+/// its legacy result shape. Absence is the compatibility contract: an operation without one
+/// returns exactly the bytes it returned before this format version existed.
+/// </param>
+/// <param name="ResponseCache">The opt-in upstream response-cache policy, or <c>null</c> when uncached.</param>
 public sealed record AgentOperationEntry(
     string Slug,
     string Name,
@@ -86,6 +95,7 @@ public sealed record AgentOperationEntry(
     ToolAnnotations? Annotations = null,
     string? Risk = null,
     SearchMetadataEntry? Search = null,
+    AgentOutputProjection? OutputProjection = null,
     ResponseCachePolicySettings? ResponseCache = null)
 {
     /// <summary>The risk string meaning "no risk flags set".</summary>

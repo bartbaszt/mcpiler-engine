@@ -1,5 +1,6 @@
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Manifest.Validation;
+using MCPiler.Engine.Runtime.Projection;
 
 namespace MCPiler.Engine.Manifest.Loading;
 
@@ -66,10 +67,19 @@ public static class ManifestReader
     /// <summary>
     /// Reads <paramref name="source"/> into a validated manifest.
     /// </summary>
+    /// <param name="source">Where the bundle bytes come from.</param>
+    /// <param name="options">Operator-controlled loading behavior.</param>
+    /// <param name="overrides">Local narrowing applied before validation.</param>
+    /// <param name="expressionValidator">
+    /// How to classify a JMESPath expression without interpreting it in this process. A host
+    /// that can confine an evaluation supplies one; when it is null, a manifest carrying a
+    /// JMESPath projection is refused.
+    /// </param>
     public static ManifestReadResult Read(
         IManifestSource source,
         ManifestLoadOptions? options = null,
-        PolicyOverrides? overrides = null)
+        PolicyOverrides? overrides = null,
+        IProjectionExpressionValidator? expressionValidator = null)
     {
         ArgumentNullException.ThrowIfNull(source);
 
@@ -161,7 +171,7 @@ public static class ManifestReader
             AgentSurfaceDocument = Document(loaded, ManifestSectionName.AgentSurface),
         };
 
-        diagnostics.AddRange(ManifestValidator.Validate(manifest));
+        diagnostics.AddRange(ManifestValidator.Validate(manifest, expressionValidator));
 
         return new ManifestReadResult(manifest, diagnostics);
     }

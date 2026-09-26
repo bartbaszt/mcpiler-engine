@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Reflection;
 
 using MCPiler.Engine.Host.Cli;
+using MCPiler.Engine.Host.ProjectionWorker;
 using MCPiler.Engine.Runtime;
 
 namespace MCPiler.Engine.Host;
@@ -28,12 +29,25 @@ namespace MCPiler.Engine.Host;
 /// runner and writes what comes back, so every verb is reachable from a test without a
 /// process.
 /// </para>
+/// <para>
+/// One argument is not a verb and is checked before the command runner sees the line: the
+/// internal projection-worker mode. A worker is a short-lived child of the serving process
+/// rather than a command an operator runs, and its one argument is deliberately not part of
+/// the documented verb set.
+/// </para>
 /// </remarks>
 internal static class Program
 {
     internal static async Task<int> Main(string[] args)
     {
         ArgumentNullException.ThrowIfNull(args);
+
+        if (args.Length > 0 && string.Equals(args[0], WorkerProtocol.ModeArgument, StringComparison.Ordinal))
+        {
+            return await ProjectionWorkerEntry
+                .RunAsync(Console.OpenStandardInput(), Console.OpenStandardOutput(), Console.OpenStandardError(), WorkerLimitsFromEnvironment(), CancellationToken.None)
+                .ConfigureAwait(false);
+        }
 
         CommandOutcome outcome = await HostCommands
             .RunAsync(args, Identity(), CancellationToken.None, Console.Error)
@@ -45,6 +59,33 @@ internal static class Program
         Console.Out.Write(outcome.Output);
 
         return outcome.ExitCode;
+    }
+
+    /// <summary>
+    /// The confinement a worker applies to itself, taken from the parent's environment or from
+    /// the calibrated defaults when the environment does not carry a value.
+    /// </summary>
+    /// <remarks>
+    /// The defaults are the same numbers the parent uses, so a directly-launched worker is
+    /// confined too. The parent passes its own values through the environment so a deployment
+    /// that narrowed the policy narrows the child identically.
+    /// </remarks>
+    private static WorkerLimits WorkerLimitsFromEnvironment()
+    {
+        long committed = ReadLimit(WorkerResourceLimits.CommittedBytesVariable, WorkerResourceLimits.DefaultCommittedBytes);
+        long addressSpace = ReadLimit(WorkerResourceLimits.AddressSpaceBytesVariable, WorkerResourceLimits.DefaultAddressSpaceBytes);
+        long inputBody = ReadLimit(WorkerResourceLimits.InputBodyBytesVariable, WorkerResourceLimits.DefaultInputBodyLimitBytes);
+
+        return new WorkerLimits(committed, addressSpace, inputBody);
+
+        static long ReadLimit(string name, long fallback)
+        {
+            string? text = Environment.GetEnvironmentVariable(name);
+
+            return long.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out long value) && value > 0
+                ? value
+                : fallback;
+        }
     }
 
     /// <summary>The one fact this build can state about itself without reading anything.</summary>

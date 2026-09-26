@@ -36,7 +36,7 @@
     },
     "policy": {
       "inline": {
-        "formatVersion": 1,
+        "formatVersion": 2,
         "baseUrl": "https://api.example.com/v1",
         "allowedOrigins": ["https://api.example.com", "https://eu.example.com"],
         "limits": {
@@ -122,7 +122,7 @@
     },
     "agentSurface": {
       "inline": {
-        "formatVersion": 4,
+        "formatVersion": 5,
         "groups": [
           { "name": "pets", "priority": 10 },
           { "name": "admin", "priority": 1 }

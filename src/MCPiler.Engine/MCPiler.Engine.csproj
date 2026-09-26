@@ -8,6 +8,18 @@
 
   <ItemGroup>
     <PackageReference Include="JsonSchema.Net" />
+
+    <!--
+      The JMESPath evaluator is consumed unmodified and is never called in-process by a
+      serving path. The reference lives here because profile semantics, failure
+      classification and result canonicalization are product decisions; the process that
+      hosts the call is the deployable's worker adapter, reached only through
+      MCPiler.Engine.Runtime.
+
+      The package's analyzer asset is removed for the whole solution by the
+      RemoveDependencyAnalyzers target in Directory.Build.props; see the comment there.
+    -->
+    <PackageReference Include="Corvus.Text.Json.JMESPath" />
   </ItemGroup>
 
   <ItemGroup>

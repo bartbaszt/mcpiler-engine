@@ -194,7 +194,8 @@ public sealed class EngineExecution : IDisposable
                     started.Files,
                     authentication,
                     responseCache,
-                    identityKey);
+                    identityKey,
+                    started.ProjectionWorker);
 
                 try
                 {

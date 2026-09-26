@@ -104,11 +104,29 @@ public static class ManifestBindingDispatcher
         => binding is TransformedHttpBinding transformed ? transformed.InputProgram : null;
 
     /// <summary>
-    /// Returns the program that maps the response onto the agent-facing value, or <c>null</c>
-    /// when the binding declares none.
+    /// Returns the output transformation program, or <c>null</c> when the binding declares a
+    /// different projection or none at all.
     /// </summary>
+    /// <remarks>
+    /// The program grammar is a separate versioned contract, so a JMESPath projection is not a
+    /// program and must never be handed to the transformation validator as one. This resolves
+    /// only the transformProgram variant; <see cref="TryResolveOutputProjection"/> answers what
+    /// kind a binding actually carries.
+    /// </remarks>
     public static JsonObject? TryResolveOutputProgram(ManifestBinding? binding)
-        => binding is TransformedHttpBinding transformed ? transformed.OutputProgram : null;
+        => binding is TransformedHttpBinding { Output: ManifestOutputProjection.TransformProgramVariant program }
+            ? program.Program
+            : null;
+
+    /// <summary>
+    /// Returns the output projection a binding carries, or <c>null</c> for passthrough.
+    /// </summary>
+    /// <remarks>
+    /// Resolved here, with everything else about a binding's shape, so nothing outside this
+    /// type has to know that a transformation is a wrapper rather than a kind.
+    /// </remarks>
+    public static ManifestOutputProjection? TryResolveOutputProjection(ManifestBinding? binding)
+        => binding is TransformedHttpBinding transformed ? transformed.Output : null;
 
     /// <summary>
     /// Returns the workflow <paramref name="binding"/> runs, or <c>null</c> when it runs none.

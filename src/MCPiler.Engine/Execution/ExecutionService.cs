@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -11,9 +12,11 @@ using MCPiler.Engine.Execution.ResponseCaching;
 using MCPiler.Engine.Authentication.Signing;
 using MCPiler.Engine.Compound;
 using MCPiler.Engine.Execution.Files;
+using MCPiler.Engine.Execution.Projection;
 using MCPiler.Engine.Files;
 using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Runtime;
+using MCPiler.Engine.Runtime.Projection;
 using MCPiler.Engine.Transform;
 
 namespace MCPiler.Engine.Execution;
@@ -22,7 +25,12 @@ namespace MCPiler.Engine.Execution;
 /// <param name="Manifest">The compiled manifest that governs the execution.</param>
 /// <param name="Slug">The agent operation to execute.</param>
 /// <param name="Arguments">The arguments as the caller supplied them.</param>
-public sealed record ExecutionRequest(ManifestDocument Manifest, string Slug, JsonObject Arguments)
+/// <param name="EffectivePolicy">The policy after mount narrowing, governing this invocation and any compound steps it starts.</param>
+public sealed record ExecutionRequest(
+    ManifestDocument Manifest,
+    string Slug,
+    JsonObject Arguments,
+    PolicySection EffectivePolicy)
 {
     /// <summary>
     /// File payloads by agent-facing slot name. The execution owns these sources and disposes
@@ -53,6 +61,16 @@ public sealed record ExecutionRequest(ManifestDocument Manifest, string Slug, Js
     public long? ResponseSizeLimitBytes { get; init; }
 
     /// <summary>
+    /// The serving layer's continuation resolution, when the caller can supply one.
+    /// </summary>
+    /// <remarks>
+    /// Projection itself is protocol-neutral, but deciding whether a continuation names a target
+    /// the addressed surface can actually call is not: it needs the mounted surface and its
+    /// exposure table. The resolver is supplied rather than derived so this service keeps
+    /// reaching nothing, and so a workflow step, which has no one addressed surface, can omit it
+    /// and receive an <c>unavailable</c> continuation instead of a guessed one.
+    /// </remarks>
+    public IContinuationResolver? Continuations { get; init; }
     /// The authorization scope the current request was admitted under, when the host proved one.
     /// </summary>
     /// <remarks>
@@ -120,6 +138,8 @@ public sealed class ExecutionService
     /// </remarks>
     private readonly byte[] _identityKey;
 
+    private readonly IProjectionWorker? _projections;
+
     /// <summary>Creates a service over the supplied ports.</summary>
     /// <param name="transport">How an exchange reaches an upstream.</param>
     /// <param name="secrets">How credential references become values.</param>
@@ -135,8 +155,9 @@ public sealed class ExecutionService
         IUpstreamTransport transport,
         IManifestSecretResolver secrets,
         FileHandleStore? files = null,
-        AuthenticationRuntime? authentication = null)
-        : this(transport, secrets, files, authentication, responseCache: null, identityKey: null)
+        AuthenticationRuntime? authentication = null,
+        IProjectionWorker? projections = null)
+        : this(transport, secrets, files, authentication, responseCache: null, identityKey: null, projections)
     {
     }
 
@@ -147,7 +168,8 @@ public sealed class ExecutionService
         FileHandleStore? files,
         AuthenticationRuntime? authentication,
         ResponseCache? responseCache,
-        byte[]? identityKey)
+        byte[]? identityKey,
+        IProjectionWorker? projections = null)
     {
         ArgumentNullException.ThrowIfNull(transport);
         ArgumentNullException.ThrowIfNull(secrets);
@@ -158,6 +180,7 @@ public sealed class ExecutionService
         _authentication = authentication;
         _responseCache = responseCache;
         _identityKey = identityKey ?? CacheIdentity.NewKey();
+        _projections = projections;
     }
 
     /// <summary>The optional mount cache; null means this library execution is uncached.</summary>
@@ -311,6 +334,7 @@ public sealed class ExecutionService
         await using var ownedFiles = new ExecutionFileLease(request.Files);
 
         var manifest = request.Manifest;
+        var policy = request.EffectivePolicy;
         var entry = manifest.AgentSurface.Operation(request.Slug);
 
         if (entry is null)
@@ -339,7 +363,6 @@ public sealed class ExecutionService
                 $"Operation '{request.Slug}' has no HTTP binding this runtime can execute.");
         }
 
-        var policy = manifest.Policy;
         var limits = policy.EffectiveLimits;
 
         OriginAllowList origins;
@@ -387,6 +410,7 @@ public sealed class ExecutionService
 
         if (!TransformStage.TryInput(
                 manifest,
+                policy,
                 entry,
                 operation,
                 request.Arguments,
@@ -685,7 +709,6 @@ public sealed class ExecutionService
         }
 
         try
-
         {
             // Lookup authority is known before cache lookup. Re-derive after the exchange as
             // response-driven negotiation can replace it; a challenge replay never admits a
@@ -730,19 +753,32 @@ public sealed class ExecutionService
                 return outcome;
             }
 
-            if (!TransformStage.TryOutput(manifest, entry, outcome, out byte[]? body, out transformFailure))
+            byte[]? projectionRawBody = outcome.ResponseBody;
+            OutputProjectionResult outputProjection = await OutputProjectionStage
+                .ApplyAsync(
+                    manifest,
+                    policy,
+                    entry,
+                    operation,
+                    outcome,
+                    _projections,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            if (!outputProjection.Succeeded)
             {
                 observation.Reason = ResponseCacheDecisionReason.Failed;
                 return outcome with
                 {
-                    Failure = ExecutionFailureKind.Transformation,
-                    FailureReason = transformFailure,
+                    Failure = outputProjection.FailureKind,
+                    FailureReason = outputProjection.FailureReason,
+                    FailureDetail = outputProjection.FailureDetail,
                 };
             }
 
-            EngineExecutionResult transformed = ReferenceEquals(body, outcome.ResponseBody)
+            EngineExecutionResult transformed = ReferenceEquals(outputProjection.Body, outcome.ResponseBody)
                 ? outcome
-                : outcome with { ResponseBody = body };
+                : outcome with { ResponseBody = outputProjection.Body };
 
             ResponseCacheEnvelope? admitted = null;
             if (cachedEnvelope is null
@@ -821,7 +857,13 @@ public sealed class ExecutionService
             }
 
             producerFlight?.Publish(admitted);
-            return transformed;
+            // A stored binary response is never projected: its bytes were deliberately not
+            // materialized, and an envelope around a file handle would advertise structured content
+            // the caller cannot receive. Apply projection after cache admission so cache entries
+            // remain raw upstream responses and both hits and live responses share one result path.
+            return entry.OutputProjection is { } projection && transformed.ResponseFile is null
+                ? Project(projection, transformed, arguments, projectionRawBody, credentials, profile, authentication, request)
+                : transformed;
         }
         finally
         {
@@ -836,6 +878,87 @@ public sealed class ExecutionService
         }
     }
 
+
+    /// <summary>
+    /// Builds the agent-facing projection envelope over one completed response.
+    /// </summary>
+    /// <remarks>
+    /// The body is the final value after any accepted output transformation; a declared
+    /// <c>jsonPointer</c> extraction reads the bounded raw upstream body instead. A refusal
+    /// inside the projection becomes an <c>unavailable</c> state or an omitted mapping plus a
+    /// diagnostic, never a failed call: the upstream answered, and the answer is the result.
+    /// </remarks>
+    private static EngineExecutionResult Project(
+        AgentOutputProjection projection,
+        EngineExecutionResult shaped,
+        JsonObject currentArguments,
+        byte[]? rawBody,
+        IReadOnlyList<ResolvedCredential> credentials,
+        AuthenticationProfile? profile,
+        ResolvedAuthentication? authentication,
+        ExecutionRequest request)
+    {
+        ResponseProjectionOutcome outcome = ResponseProjectionEvaluator.Evaluate(
+            projection,
+            shaped.StatusCode ?? 0,
+            shaped.ResponseHeaders ?? new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase),
+            shaped.ResponseEffectiveUri ?? shaped.Request?.Uri,
+            Parse(shaped.ResponseBody),
+            Parse(rawBody),
+            currentArguments,
+            SensitiveHeaderNames.For(profile, credentials, authentication),
+            request.Continuations,
+            shaped.ResponseBody is { Length: > 0 },
+            SensitiveHeaderNames.QueryFor(profile, credentials, authentication));
+
+        IReadOnlyDictionary<string, string[]>? responseHeaders = shaped.ResponseHeaders;
+        if (outcome.Diagnostics.Any(static diagnostic => diagnostic.Code == ResponseProjectionCodes.ValueSensitive)
+            && projection.Pagination?.Source is LinkHeaderPaginationSource link)
+        {
+            responseHeaders = shaped.ResponseHeaders?
+                .Where(entry => !string.Equals(entry.Key, link.Header, StringComparison.OrdinalIgnoreCase))
+                .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase);
+        }
+        else if (outcome.Diagnostics.Any(static diagnostic => diagnostic.Code == ResponseProjectionCodes.ValueSensitive)
+            && projection.Pagination?.Source is ResponseHeaderPaginationSource header)
+        {
+            responseHeaders = shaped.ResponseHeaders?
+                .Where(entry => !string.Equals(entry.Key, header.Name, StringComparison.OrdinalIgnoreCase))
+                .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.OrdinalIgnoreCase);
+        }
+
+        return shaped with
+        {
+            ResponseBody = outcome.Value is null ? shaped.ResponseBody : Encoding.UTF8.GetBytes(outcome.Value.ToJsonString()),
+            ResponseHeaders = responseHeaders,
+            Diagnostics = [.. shaped.Diagnostics, .. outcome.Diagnostics],
+        };
+    }
+
+    /// <summary>
+    /// Parses a materialized body as JSON, or preserves non-empty non-JSON bytes as text.
+    /// </summary>
+    /// <remarks>
+    /// A non-JSON body leaves the envelope's body target as a JSON string rather than failing the
+    /// projection: an operation may legitimately return text, and the metadata half of the
+    /// projection is still meaningful. Empty bytes remain absent.
+    /// </remarks>
+    private static JsonNode? Parse(byte[]? body)
+    {
+        if (body is null || body.Length == 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonNode.Parse(body);
+        }
+        catch (JsonException)
+        {
+            return JsonValue.Create(Encoding.UTF8.GetString(body));
+        }
+    }
 
     private async Task<EngineExecutionResult> SendAsync(
         ExecutionRequest request,
@@ -993,6 +1116,7 @@ public sealed class ExecutionService
                 StatusCode = response.StatusCode,
                 ResponseHeaders = response.Headers,
                 ResponseMediaType = response.MediaType,
+                ResponseEffectiveUri = response.EffectiveUri,
                 ResponseWasRedirected = response.WasRedirected,
             };
 

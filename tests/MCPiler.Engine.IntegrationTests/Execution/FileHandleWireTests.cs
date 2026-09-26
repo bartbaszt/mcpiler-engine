@@ -98,13 +98,10 @@ public sealed class FileHandleWireTests : IDisposable
         var service = new ExecutionService(new UpstreamSender(clients), new ManifestSecretResolver(), store);
 
         var result = await service.ExecuteAsync(
-            new ExecutionRequest(FileSlotManifest(host.Address), UploadSlug, new JsonObject
+            FileSlotRequest(host.Address, new JsonObject
             {
                 ["attachment"] = mineWire,
-            })
-            {
-                Scope = "/api",
-            },
+            }),
             Token);
 
         Assert.Equal(ExecutionFailureKind.None, result.Failure);
@@ -176,13 +173,10 @@ public sealed class FileHandleWireTests : IDisposable
         var service = new ExecutionService(new UpstreamSender(clients), new ManifestSecretResolver(), issuingStore);
 
         var result = await service.ExecuteAsync(
-            new ExecutionRequest(FileSlotManifest(host.Address), UploadSlug, new JsonObject
+            FileSlotRequest(host.Address, new JsonObject
             {
                 ["attachment"] = wire,
-            })
-            {
-                Scope = "/api",
-            },
+            }),
             Token);
 
         // Expiry is a fact about a handle the caller itself was given, not about anyone else's
@@ -251,13 +245,10 @@ public sealed class FileHandleWireTests : IDisposable
         var service = new ExecutionService(new UpstreamSender(clients), new ManifestSecretResolver(), store);
 
         var result = await service.ExecuteAsync(
-            new ExecutionRequest(FileSlotManifest(host.Address), UploadSlug, new JsonObject
+            FileSlotRequest(host.Address, new JsonObject
             {
                 ["attachment"] = mineWire,
-            })
-            {
-                Scope = "/api",
-            },
+            }),
             Token);
 
         Assert.Equal(ExecutionFailureKind.None, result.Failure);
@@ -278,6 +269,15 @@ public sealed class FileHandleWireTests : IDisposable
         public DateTimeOffset Now { get; set; } = now;
 
         public override DateTimeOffset GetUtcNow() => Now;
+    }
+
+    private static ExecutionRequest FileSlotRequest(Uri upstream, JsonObject arguments)
+    {
+        Manifest.Model.ManifestDocument manifest = FileSlotManifest(upstream);
+        return new ExecutionRequest(manifest, UploadSlug, arguments, manifest.Policy)
+        {
+            Scope = "/api",
+        };
     }
 
     private static Manifest.Model.ManifestDocument FileSlotManifest(Uri upstream)
@@ -354,13 +354,10 @@ public sealed class FileHandleWireTests : IDisposable
         var service = new ExecutionService(new UpstreamSender(clients), new ManifestSecretResolver(), store);
 
         return await service.ExecuteAsync(
-            new ExecutionRequest(FileSlotManifest(upstream), UploadSlug, new JsonObject
+            FileSlotRequest(upstream, new JsonObject
             {
                 ["attachment"] = presented,
-            })
-            {
-                Scope = "/api",
-            },
+            }),
             Token);
     }
 

@@ -7,7 +7,7 @@
   "required": ["operations"],
   "additionalProperties": false,
   "properties": {
-    "formatVersion": { "const": 4 },
+    "formatVersion": { "enum": [4, 5], "description": "Version 4 carries response cache; version 5 adds operation-level response metadata projection." },
     "groups": {
       "type": "array",
       "items": { "$ref": "#/$defs/group" }
@@ -21,6 +21,25 @@
       "items": { "$ref": "#/$defs/operation" }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "formatVersion": { "const": 4 } },
+        "required": ["formatVersion"]
+      },
+      "then": {
+        "properties": {
+          "operations": {
+            "items": {
+                "not": {
+                  "required": ["outputProjection"]
+                }
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "group": {
       "type": "object",
@@ -78,6 +97,8 @@
             "exampleIntents": { "type": "array", "items": { "type": "string" } }
           }
         },
+        "binding": { "$ref": "#/$defs/binding" },
+        "outputProjection": { "$ref": "#/$defs/agentOutputProjection" },
         "responseCache": {
           "type": "object",
           "additionalProperties": false,
@@ -85,9 +106,166 @@
           "properties": {
             "ttlSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 }
           }
-        },
-        "binding": { "$ref": "#/$defs/binding" }
+        }
       }
+    },
+    "agentOutputProjection": {
+      "description": "The reviewed agent-facing output policy (ADR-0071). Absence preserves the legacy result shape exactly.",
+      "type": "object",
+      "required": ["bodyTarget"],
+      "additionalProperties": false,
+      "properties": {
+        "bodyTarget": { "$ref": "#/$defs/nonRootPointer" },
+        "metadata": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/metadataMapping" }
+        },
+        "pagination": { "$ref": "#/$defs/paginationPolicy" }
+      }
+    },
+    "nonRootPointer": {
+      "description": "RFC 6901 JSON Pointer that is not the document root.",
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^/([^/~]|~[01])*"
+    },
+    "metadataMapping": {
+      "type": "object",
+      "required": ["source", "target"],
+      "additionalProperties": false,
+      "properties": {
+        "source": { "$ref": "#/$defs/metadataSource" },
+        "target": { "$ref": "#/$defs/nonRootPointer" }
+      }
+    },
+    "metadataSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "name", "valueMode"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "responseHeader" },
+            "name": { "type": "string", "minLength": 1, "pattern": "^[\\x21-\\x7e]+$" },
+            "valueMode": { "enum": ["first", "all"] }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind"],
+          "additionalProperties": false,
+          "properties": { "kind": { "const": "statusCode" } }
+        }
+      ]
+    },
+    "paginationPolicy": {
+      "type": "object",
+      "required": ["target", "source"],
+      "additionalProperties": false,
+      "properties": {
+        "target": { "$ref": "#/$defs/nonRootPointer" },
+        "source": { "$ref": "#/$defs/paginationSource" },
+        "nextOperation": { "type": "string", "minLength": 1 },
+        "nextArguments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/paginationArgumentMapping" }
+        },
+        "exposeUrl": { "type": "boolean" },
+        "linkRelations": {
+          "type": "array",
+          "items": { "enum": ["next", "prev", "first", "last"] }
+        }
+      }
+    },
+    "paginationSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind", "header", "relation"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "linkHeader" },
+            "header": { "type": "string", "minLength": 1, "pattern": "^[\\x21-\\x7e]+$" },
+            "relation": { "$comment": "Version 1 continuation requires 'next'; the other relations are operator inspection only.", "enum": ["next", "prev", "first", "last"] }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "name", "scalarType"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "responseHeader" },
+            "name": { "type": "string", "minLength": 1, "pattern": "^[\\x21-\\x7e]+$" },
+            "scalarType": { "enum": ["string", "integer", "number", "boolean"] }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "pointer", "interpretation"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "jsonPointer" },
+            "pointer": { "$ref": "#/$defs/nonRootPointer" },
+            "interpretation": { "enum": ["value", "url"] }
+          }
+        }
+      ]
+    },
+    "paginationArgumentMapping": {
+      "type": "object",
+      "required": ["target", "from", "as"],
+      "additionalProperties": false,
+      "properties": {
+        "target": { "$ref": "#/$defs/nonRootPointer" },
+        "from": { "$ref": "#/$defs/paginationArgumentSource" },
+        "as": { "enum": ["string", "integer", "number", "boolean", "preserveJson"] }
+      }
+    },
+    "paginationArgumentSource": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind"],
+          "additionalProperties": false,
+          "properties": { "kind": { "const": "extractedValue" } }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "name"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "urlQuery" },
+            "name": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "name"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "urlPathParameter" },
+            "name": { "type": "string", "minLength": 1 }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "pointer"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "currentArgument" },
+            "pointer": { "$ref": "#/$defs/nonRootPointer" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["kind", "value"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "const": "literal" },
+            "value": true
+          }
+        }
+      ]
     },
     "annotations": {
       "type": "object",
@@ -155,7 +333,59 @@
           }
         },
         "inputProgram": { "type": ["object", "null"] },
-        "outputProgram": { "type": ["object", "null"] }
+        "outputProjection": { "$ref": "#/$defs/transformedOutputProjection" }
+      }
+    },
+    "transformedOutputProjection": {
+      "$comment": "Closed union. Absence is passthrough and is the only way to say it; there is no 'none' kind, and no kind contains another.",
+      "type": "object",
+      "required": ["kind"],
+      "oneOf": [
+        { "$ref": "#/$defs/transformProgramProjection" },
+        { "$ref": "#/$defs/jmesPathProjection" }
+      ]
+    },
+    "transformProgramProjection": {
+      "type": "object",
+      "required": ["kind", "program"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "transformProgram" },
+        "program": { "type": "object" }
+      }
+    },
+    "jmesPathProjection": {
+      "type": "object",
+      "required": ["kind", "languageVersion", "expression", "limits"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "jmespath" },
+        "languageVersion": { "const": 1 },
+        "expression": { "type": "string", "minLength": 1 },
+        "limits": { "$ref": "#/$defs/jmesPathLimits" }
+      }
+    },
+    "jmesPathLimits": {
+      "$comment": "All seven dimensions are required and positive. An omitted dimension would fall back to a build-dependent default, which is not an explicit limit.",
+      "type": "object",
+      "required": [
+        "maxExpressionBytes",
+        "maxInputNodes",
+        "maxInputDepth",
+        "maxResultNodes",
+        "maxResultDepth",
+        "maxOutputBytes",
+        "maxEvaluationMilliseconds"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "maxExpressionBytes": { "type": "integer", "minimum": 1 },
+        "maxInputNodes": { "type": "integer", "minimum": 1 },
+        "maxInputDepth": { "type": "integer", "minimum": 1 },
+        "maxResultNodes": { "type": "integer", "minimum": 1 },
+        "maxResultDepth": { "type": "integer", "minimum": 1 },
+        "maxOutputBytes": { "type": "integer", "minimum": 1 },
+        "maxEvaluationMilliseconds": { "type": "integer", "minimum": 1 }
       }
     },
     "compoundBinding": {

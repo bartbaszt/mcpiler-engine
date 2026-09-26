@@ -165,6 +165,51 @@ public sealed class SchemaReferenceResolver
         return true;
     }
 
+    internal bool TryResolveNode(
+        JsonNode? schema,
+        out JsonNode? resolved,
+        out ManifestDiagnostic? failure)
+    {
+        resolved = schema;
+        failure = null;
+
+        if (schema is not JsonObject schemaObject
+            || schemaObject[ManifestSchema.RefKeyword] is not JsonValue referenceValue
+            || !referenceValue.TryGetValue<string>(out _))
+        {
+            return true;
+        }
+
+        if (!TryResolve(ManifestSchema.From(schema), out var target, out failure))
+        {
+            return false;
+        }
+
+        if (schemaObject.Count == 1)
+        {
+            resolved = target.Node.DeepClone();
+            return true;
+        }
+
+        if (target.Node is not JsonObject targetObject)
+        {
+            resolved = schema;
+            return true;
+        }
+
+        var merged = (JsonObject)targetObject.DeepClone();
+        foreach ((string key, JsonNode? value) in schemaObject)
+        {
+            if (!string.Equals(key, ManifestSchema.RefKeyword, StringComparison.Ordinal))
+            {
+                merged[key] = value?.DeepClone();
+            }
+        }
+
+        resolved = merged;
+        return true;
+    }
+
     /// <summary>
     /// Walks a schema eagerly, reporting every reference and bound problem it can reach.
     /// </summary>

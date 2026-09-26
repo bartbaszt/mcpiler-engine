@@ -13,8 +13,14 @@ using MCPiler.Engine.Authentication.OAuth1;
 using MCPiler.Engine.Execution;
 using MCPiler.Engine.Execution.Files;
 using MCPiler.Engine.Execution.Outbound;
+using MCPiler.Engine.Execution.Projection;
 using MCPiler.Engine.Execution.Secrets;
+using MCPiler.Engine.Manifest;
 using MCPiler.Engine.Manifest.Model;
+using MCPiler.Engine.Manifest.Validation;
+using MCPiler.Engine.Mcp;
+using MCPiler.Engine.Mcp.Navigator;
+using MCPiler.Engine.Runtime;
 
 using Microsoft.AspNetCore.Http;
 
@@ -44,6 +50,7 @@ namespace MCPiler.Engine.IntegrationTests.Execution;
 public sealed class ExecutionServiceTests : IDisposable
 {
     private const string Canary = "CANARY-a91f7c-upstream-token";
+    private const string ContinuationCanary = "AC065-91c7e4a2-engine-runtime-continuation";
 
     private readonly List<string> _roots = [];
     private readonly List<string> _variables = [];
@@ -73,6 +80,100 @@ public sealed class ExecutionServiceTests : IDisposable
         // caller can see either without holding the transport object open.
         Assert.Contains("Content-Type", result.ResponseHeaders.Keys);
         Assert.Equal(["/thing"], arrivals);
+    }
+
+    [Fact]
+    public async Task A_projected_text_body_is_preserved_as_a_json_string()
+    {
+        await using var host = await StartAsync(200, "text/plain", Encoding.UTF8.GetBytes("abc"));
+        var manifest = ExecutionManifests.For(
+            host.Address,
+            outputProjection: new AgentOutputProjection("/data", []));
+
+        var result = await Execute(manifest);
+
+        Assert.Equal(ExecutionFailureKind.None, result.Failure);
+        var projected = JsonNode.Parse(result.ResponseBody!)!.AsObject();
+        Assert.Equal("abc", projected["data"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task A_projected_json_null_body_remains_a_null_value()
+    {
+        await using var host = await StartAsync(200, "application/json", Encoding.UTF8.GetBytes("null"));
+        var manifest = ExecutionManifests.For(
+            host.Address,
+            outputProjection: new AgentOutputProjection("/data", []));
+
+        var result = await Execute(manifest);
+
+        Assert.Equal(ExecutionFailureKind.None, result.Failure);
+        var projected = JsonNode.Parse(result.ResponseBody!)!.AsObject();
+        Assert.True(projected.ContainsKey("data"));
+        Assert.Null(projected["data"]);
+    }
+
+    [Theory]
+    [InlineData(ParameterLocation.Query, "api_key", false)]
+    [InlineData(ParameterLocation.Header, "X-Session-Token", false)]
+    [InlineData(ParameterLocation.Query, "api_key", true)]
+    [InlineData(ParameterLocation.Header, "X-Session-Token", true)]
+    public async Task A_non_sensitive_source_mapped_to_an_auth_sensitive_destination_is_fully_redacted(
+        ParameterLocation location,
+        string destination,
+        bool transformedTarget)
+    {
+        var arrivals = new List<string>();
+        await using var host = await StartAsync(async context =>
+        {
+            arrivals.Add(context.Request.Path + context.Request.QueryString);
+            context.Response.StatusCode = 200;
+            context.Response.ContentType = "application/json";
+            context.Response.Headers["Link"] = $"</next?cursor={ContinuationCanary}>; rel=\"next\"";
+            await context.Response.WriteAsync("{\"items\":[]}", context.RequestAborted);
+        });
+
+        ManifestDocument manifest = ContinuationManifest(
+            host.Address,
+            location,
+            destination,
+            transformedTarget);
+        ManifestSurface surface = manifest.Server.DefaultSurface!;
+        List<ManifestDiagnostic> derivation = [];
+        MountedSurface mounted = SurfaceCatalogue.Build(manifest, surface, derivation);
+        var mount = new MountedManifest(
+            "/api",
+            "(in memory)",
+            manifest,
+            manifest.Policy,
+            [mounted],
+            NavigatorIndex.Resolve(manifest, derivation));
+        using var clients = new UpstreamClientFactory(Permissive());
+        var service = new ExecutionService(new UpstreamSender(clients), new ManifestSecretResolver());
+
+        EngineExecutionResult result = await service.ExecuteAsync(
+            new ExecutionRequest(manifest, "list-items", new JsonObject { ["status"] = "available" }, mount.Policy)
+            {
+                Continuations = new SurfaceContinuationResolver(manifest, mount, mounted, "list-items"),
+            },
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExecutionFailureKind.None, result.Failure);
+        Assert.Equal(["/items?status=available"], arrivals);
+        JsonNode payload = JsonNode.Parse(result.ResponseBody!)!;
+        JsonObject pagination = Assert.IsType<JsonObject>(payload["pagination"]);
+        Assert.Equal("unavailable", pagination["state"]!.GetValue<string>());
+        Assert.False(pagination.ContainsKey("next"));
+        ExecutionDiagnostic diagnostic = Assert.Single(result.Diagnostics);
+        Assert.Equal(ResponseProjectionCodes.ValueSensitive, diagnostic.Code);
+        Assert.DoesNotContain(ContinuationCanary, payload.ToJsonString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            ContinuationCanary,
+            string.Join("\n", result.Diagnostics.Select(item => $"{item.Code}:{item.Pointer}")),
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(ContinuationCanary, Describe(result), StringComparison.Ordinal);
+        Assert.DoesNotContain(ContinuationCanary, result.Request!.ExactUrl, StringComparison.Ordinal);
+        Assert.DoesNotContain(ContinuationCanary, ToolInvocation.Shape(result).Text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -371,7 +472,7 @@ public sealed class ExecutionServiceTests : IDisposable
         var service = new ExecutionService(new UpstreamSender(clients), new ManifestSecretResolver());
 
         var result = await service.ExecuteAsync(
-            new ExecutionRequest(ExecutionManifests.For(host.Address), ExecutionManifests.Slug, []),
+            Request(ExecutionManifests.For(host.Address), ExecutionManifests.Slug, []),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(ExecutionFailureKind.AddressPolicy, result.Failure);
@@ -481,7 +582,7 @@ public sealed class ExecutionServiceTests : IDisposable
         using var runtime = new AuthenticationRuntime(transport);
         var service = new ExecutionService(transport, new ManifestSecretResolver(), authentication: runtime);
         var result = await service.ExecuteAsync(
-            new ExecutionRequest(manifest, ExecutionManifests.Slug, []),
+            Request(manifest, ExecutionManifests.Slug, []),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(ExecutionFailureKind.None, result.Failure);
@@ -544,7 +645,7 @@ public sealed class ExecutionServiceTests : IDisposable
         var service = new ExecutionService(new UpstreamSender(clients), new ManifestSecretResolver());
 
         var result = await service.ExecuteAsync(
-            new ExecutionRequest(ExecutionManifests.For(host.Address), "no-such-operation", []),
+            Request(ExecutionManifests.For(host.Address), "no-such-operation", []),
             TestContext.Current.CancellationToken);
 
         Assert.Equal(ExecutionFailureKind.Compilation, result.Failure);
@@ -560,7 +661,7 @@ public sealed class ExecutionServiceTests : IDisposable
 
         var result = await service.ExecuteAsync(
             WithFile(
-                new ExecutionRequest(
+                Request(
                     ExecutionManifests.For(new Uri("https://api.example.com")),
                     "no-such-operation",
                     []),
@@ -581,7 +682,7 @@ public sealed class ExecutionServiceTests : IDisposable
 
         var result = await service.ExecuteAsync(
             WithFile(
-                new ExecutionRequest(
+                Request(
                     ExecutionManifests.For(new Uri("https://api.example.com")),
                     ExecutionManifests.Slug,
                     []),
@@ -607,7 +708,7 @@ public sealed class ExecutionServiceTests : IDisposable
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.ExecuteAsync(
             WithFile(
-                new ExecutionRequest(
+                Request(
                     ExecutionManifests.For(new Uri("https://api.example.com")),
                     ExecutionManifests.Slug,
                     []),
@@ -616,6 +717,110 @@ public sealed class ExecutionServiceTests : IDisposable
 
         Assert.Equal(1, source.DisposeCount);
     }
+
+    private static ManifestDocument ContinuationManifest(
+        Uri baseUrl,
+        ParameterLocation location,
+        string destination,
+        bool transformedTarget = false)
+    {
+        ManifestOperation sourceOperation = ExecutionManifests.Operation(
+            path: "/items",
+            parameters: [new ManifestParameter("status", ParameterLocation.Query, Required: true)]);
+        ManifestOperation targetOperation = ExecutionManifests.Operation(
+            path: "/next",
+            parameters: [new ManifestParameter(destination, location)]);
+        string targetArgument = transformedTarget ? "cursor" : destination;
+        ManifestBinding targetBinding = transformedTarget
+            ? new TransformedHttpBinding(
+                new HttpBinding(targetOperation.Key, CredentialRef: ["continuation-secret"]),
+                ContinuationInputProgram(location, destination))
+            : new HttpBinding(targetOperation.Key, CredentialRef: ["continuation-secret"]);
+        var source = new AgentOperationEntry(
+            "list-items",
+            "List items",
+            new HttpBinding(sourceOperation.Key),
+            InputSchema: ManifestSchema.From(new JsonObject
+            {
+                ["type"] = "object",
+                ["required"] = new JsonArray("status"),
+                ["properties"] = new JsonObject { ["status"] = new JsonObject { ["type"] = "string" } },
+            }),
+            OutputProjection: new AgentOutputProjection(
+                "/data",
+                [],
+                new PaginationPolicy(
+                    "/pagination",
+                    new LinkHeaderPaginationSource("link", PaginationRelation.Next),
+                    "next-page",
+                    [new PaginationArgumentMapping(
+                        $"/{targetArgument}",
+                        new UrlQueryPaginationArgument("cursor"),
+                        PaginationConversion.String)],
+                    ExposeUrl: true,
+                    LinkRelations: [])));
+        var target = new AgentOperationEntry(
+            "next-page",
+            "Next page",
+            targetBinding,
+            InputSchema: ManifestSchema.From(new JsonObject
+            {
+                ["type"] = "object",
+                ["required"] = new JsonArray(targetArgument),
+                ["properties"] = new JsonObject { [targetArgument] = new JsonObject { ["type"] = "string" } },
+            }));
+        var manifest = new ManifestDocument(
+            ManifestFormatSupport.Maximum,
+            new ServerSection(
+                "Continuation API",
+                Surfaces:
+                [
+                    new ManifestSurface(
+                        "full",
+                        [
+                            new SurfaceOperation("list-items", OperationExposure.Direct),
+                            new SurfaceOperation("next-page", OperationExposure.Direct),
+                        ],
+                        IsDefault: true),
+                ],
+                AuthenticationRequired: false),
+            new PolicySection(baseUrl),
+            new OperationsSection([sourceOperation, targetOperation]),
+            new AgentSurfaceSection([source, target]),
+            new CredentialsSection(
+            [
+                new ManifestCredential(
+                    "continuation-secret",
+                    CredentialScheme.ApiKey,
+                    destination,
+                    CredentialReference.Env("MCPILER_AC065_UNUSED_SECRET"),
+                    location == ParameterLocation.Header ? CredentialLocation.Header : CredentialLocation.Query),
+            ]));
+        return manifest;
+    }
+
+    private static JsonObject ContinuationInputProgram(ParameterLocation location, string destination)
+        => new()
+        {
+            ["transformVersion"] = 1,
+            ["direction"] = "input",
+            ["base"] = "passthrough",
+            ["limits"] = new JsonObject
+            {
+                ["maxSteps"] = 32,
+                ["maxDepth"] = 16,
+                ["maxNodes"] = 4096,
+                ["maxOutputBytes"] = 131072,
+                ["maxArrayFanout"] = 256,
+            },
+            ["steps"] = new JsonArray(new JsonObject
+            {
+                ["op"] = "copy",
+                ["source"] = "/cursor",
+                ["target"] = $"/{(location == ParameterLocation.Header ? "headers" : "query")}/{destination}",
+                ["onMissing"] = "skip",
+            }),
+        };
 
     public void Dispose()
     {
@@ -651,9 +856,15 @@ public sealed class ExecutionServiceTests : IDisposable
         var service = new ExecutionService(new UpstreamSender(clients), new ManifestSecretResolver(), store);
 
         return await service.ExecuteAsync(
-            new ExecutionRequest(manifest, ExecutionManifests.Slug, arguments ?? []),
+            Request(manifest, ExecutionManifests.Slug, arguments ?? []),
             TestContext.Current.CancellationToken);
     }
+
+    private static ExecutionRequest Request(
+        Manifest.Model.ManifestDocument manifest,
+        string slug,
+        JsonObject arguments)
+        => new(manifest, slug, arguments, manifest.Policy);
 
     private static string Describe(EngineExecutionResult result)
         => string.Join(

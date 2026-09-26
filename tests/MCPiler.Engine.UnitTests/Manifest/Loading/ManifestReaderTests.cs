@@ -380,7 +380,7 @@ public sealed class ManifestReaderTests
         => Assert.All(ManifestReader.RequiredSections, name => Assert.True(ManifestSectionName.IsKnown(name)));
 
     [Fact]
-    public void Independently_authored_v4_response_cache_sections_load_or_refuse_by_fixture_contract()
+    public void Independently_authored_v5_response_cache_sections_load_or_refuse_by_fixture_contract()
     {
         var fixture = JsonNode.Parse(File.ReadAllBytes(
             TestRepository.Fixture("response-cache", "contract.json")))!.AsObject();

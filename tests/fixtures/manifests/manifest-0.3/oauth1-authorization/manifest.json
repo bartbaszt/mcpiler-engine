@@ -8,7 +8,7 @@
     },
     "policy": {
       "inline": {
-        "formatVersion": 1,
+        "formatVersion": 2,
         "baseUrl": "https://api.flickr.example/",
         "allowedOrigins": [
           "https://api.flickr.example",

@@ -1,0 +1,996 @@
+{
+  "corpusVersion": 1,
+  "excludedFromExactComparison": [],
+  "directives": {
+    "$repeatUtf8": {
+      "fields": ["text", "bytes"],
+      "meaning": "Resolves to a UTF-8 string produced by repeating the literal 'text' until its UTF-8 byte length equals 'bytes'."
+    },
+    "$repeatArray": {
+      "fields": ["value", "count"],
+      "meaning": "Resolves to an array containing the literal 'value' exactly 'count' times, in order."
+    },
+    "$concatUtf8": {
+      "fields": ["parts"],
+      "meaning": "Resolves to a UTF-8 string produced by concatenating the resolved array elements, in order."
+    },
+    "$rawBody": {
+      "fields": ["text"],
+      "meaning": "Declares response.body as exact UTF-8 response bytes. Replay parses valid JSON while retaining number tokens and represents non-empty non-JSON bytes as a JSON string; response.body set directly to null declares an absent body."
+    }
+  },
+  "semantics": {
+    "evaluation": "Platform preview/compilation and Engine runtime both resolve directives, evaluate the declared Manifest policy against the declared bounded response, and produce the expected final projected JSON value together with the expected stable diagnostic codes. Ordinary directive objects are resolved recursively in both the response fixture and the expected value before evaluation/comparison; $rawBody is resolved only at the response-body boundary.",
+    "responseShape": "response.headers is an ordered list; entries sharing a name contribute their values in order to that field, and name lookup is ASCII case-insensitive. response.status is the upstream status code, response.effectiveUri is the final effective response URI after redirects, and response.body is the bounded upstream body before output transformation under bodyRepresentation.",
+    "bodyRepresentation": "A normal response.body value is an already-parsed JSON value and response.body set directly to null means no body. $rawBody declares exact UTF-8 bytes: valid JSON is parsed with its number tokens retained, while non-empty bytes that are not valid JSON are represented to projection as a JSON string.",
+    "expectedShape": "expected.result is the final projected agent value before MCP text/structured-content framing; it is absent when the case expects a Manifest-load refusal instead. expected.loadRefusal is true when the declared Manifest must be refused before serving. expected.diagnostics lists stable diagnostic codes in the order the implementation must produce them.",
+    "aggregateRefusal": "Per-value and per-count ceilings refuse only the affected mapping. A raw-header-aggregate or serialized-aggregate breach omits every header-derived metadata mapping while non-header generic mappings (such as statusCode) remain. Pagination keeps its own independent ceilings: exceeding the parsed link-value count, the resolved continuation URL size, or the serialized normalized pagination object size makes pagination unavailable without altering generic metadata.",
+    "comparison": "Every expected result is compared to the produced result by canonical serialized JSON bytes: object members are ordered by ordinal member name at every depth, insignificant whitespace is absent, array order is preserved, and number tokens retain the corpus-declared lexical value.",
+    "loadRefusalCodes": "Cases with loadRefusalScope declare exact error diagnostic codes the Engine Manifest reader/validator must emit."
+  },
+  "manifests": {
+    "projection-v5": {
+      "manifestFormatVersion": "0.3",
+      "sections": {
+        "server": {
+          "inline": {
+            "formatVersion": 2,
+            "name": "Response Projection Fixture",
+            "surfaces": [
+              {
+                "slug": "direct",
+                "isDefault": true,
+                "outputSchemas": true,
+                "operations": [
+                  { "operation": "inspect_metadata", "exposure": "direct" },
+                  { "operation": "list_items", "exposure": "direct" },
+                  { "operation": "body_cursor_items", "exposure": "direct" },
+                  { "operation": "search_items", "exposure": "direct" },
+                  { "operation": "next_url_items", "exposure": "direct" },
+                  { "operation": "integer_items", "exposure": "direct" },
+                  { "operation": "number_items", "exposure": "direct" },
+                  { "operation": "list_items_page", "exposure": "direct" }
+                ]
+              },
+              {
+                "slug": "navigator",
+                "navigator": { "enabled": true, "pageSize": 10 },
+                "outputSchemas": true,
+                "operations": [
+                  { "operation": "inspect_metadata", "exposure": "direct" },
+                  { "operation": "list_items", "exposure": "direct" },
+                  { "operation": "body_cursor_items", "exposure": "direct" },
+                  { "operation": "search_items", "exposure": "direct" },
+                  { "operation": "next_url_items", "exposure": "direct" },
+                  { "operation": "integer_items", "exposure": "direct" },
+                  { "operation": "number_items", "exposure": "direct" },
+                  { "operation": "list_items_page", "exposure": "navigator" }
+                ]
+              }
+            ]
+          }
+        },
+        "policy": {
+          "inline": {
+            "formatVersion": 2,
+            "baseUrl": "https://api.example",
+            "allowedOrigins": ["https://api.example"]
+          }
+        },
+        "operations": {
+          "inline": {
+            "formatVersion": 1,
+            "servers": ["https://api.example"],
+            "operations": [
+              {
+                "key": "GET /metadata",
+                "method": "GET",
+                "path": "/metadata",
+                "responses": {
+                  "200": { "content": { "application/json": { "schema": { "type": "object" } } } }
+                }
+              },
+              {
+                "key": "GET /items",
+                "method": "GET",
+                "path": "/items",
+                "parameters": [
+                  { "name": "account", "in": "query", "required": true, "schema": { "type": "string" } },
+                  { "name": "cursor", "in": "query", "schema": { "type": "string" } }
+                ],
+                "responses": {
+                  "200": { "content": { "application/json": { "schema": { "type": "object" } } } }
+                }
+              },
+              {
+                "key": "GET /numeric",
+                "method": "GET",
+                "path": "/numeric",
+                "responses": {
+                  "200": { "content": { "application/json": { "schema": { "type": "object" } } } }
+                }
+              },
+              {
+                "key": "GET /search",
+                "method": "GET",
+                "path": "/search",
+                "parameters": [
+                  { "name": "account", "in": "query", "required": true, "schema": { "type": "string" } },
+                  { "name": "q", "in": "query", "required": true, "schema": { "type": "string" } }
+                ],
+                "responses": {
+                  "200": { "content": { "application/json": { "schema": { "type": "object" } } } }
+                }
+              },
+              {
+                "key": "GET /v2/accounts/{account}/items",
+                "method": "GET",
+                "path": "/v2/accounts/{account}/items",
+                "parameters": [
+                  { "name": "account", "in": "path", "required": true, "schema": { "type": "string" } },
+                  { "name": "cursor", "in": "query", "required": true, "schema": { "type": "string" } }
+                ],
+                "responses": {
+                  "200": { "content": { "application/json": { "schema": { "type": "object" } } } }
+                }
+              }
+            ]
+          }
+        },
+        "agentSurface": {
+          "inline": {
+            "formatVersion": 5,
+            "operations": [
+              {
+                "slug": "inspect_metadata",
+                "name": "Inspect metadata",
+                "inputSchema": { "type": "object", "properties": {} },
+                "outputSchema": { "type": "object" },
+                "outputSchemaPolicy": { "generate": false, "advertise": "yes", "useInternally": true },
+                "binding": { "type": "http", "operation": "GET /metadata" },
+                "outputProjection": {
+                  "bodyTarget": "/data",
+                  "metadata": [
+                    { "source": { "kind": "responseHeader", "name": "etag", "valueMode": "first" }, "target": "/metadata/etag" },
+                    { "source": { "kind": "responseHeader", "name": "x-label", "valueMode": "all" }, "target": "/metadata/labels" },
+                    { "source": { "kind": "responseHeader", "name": "x-large", "valueMode": "first" }, "target": "/metadata/large" },
+                    { "source": { "kind": "responseHeader", "name": "x-other-a", "valueMode": "first" }, "target": "/metadata/a" },
+                    { "source": { "kind": "responseHeader", "name": "x-other-b", "valueMode": "first" }, "target": "/metadata/b" },
+                    { "source": { "kind": "responseHeader", "name": "retry-after", "valueMode": "first" }, "target": "/metadata/retryAfter" },
+                    { "source": { "kind": "statusCode" }, "target": "/metadata/status" }
+                  ]
+                }
+              },
+              {
+                "slug": "list_items",
+                "name": "List items",
+                "inputSchema": {
+                  "type": "object",
+                  "required": ["account"],
+                  "properties": { "account": { "type": "string" }, "cursor": { "type": "string" } }
+                },
+                "outputSchema": { "type": "object" },
+                "outputSchemaPolicy": { "generate": false, "advertise": "yes", "useInternally": true },
+                "binding": { "type": "http", "operation": "GET /items" },
+                "outputProjection": {
+                  "bodyTarget": "/data",
+                  "metadata": [
+                    { "source": { "kind": "responseHeader", "name": "retry-after", "valueMode": "first" }, "target": "/metadata/retryAfter" }
+                  ],
+                  "pagination": {
+                    "target": "/pagination",
+                    "source": { "kind": "responseHeader", "name": "x-next-cursor", "scalarType": "string" },
+                    "nextArguments": [
+                      { "target": "/account", "from": { "kind": "currentArgument", "pointer": "/account" }, "as": "string" },
+                      { "target": "/cursor", "from": { "kind": "extractedValue" }, "as": "string" }
+                    ]
+                  }
+                }
+              },
+              {
+                "slug": "integer_items",
+                "name": "Integer items",
+                "inputSchema": {
+                  "type": "object",
+                  "properties": { "value": { "type": "integer" } }
+                },
+                "outputSchema": { "type": "object" },
+                "outputSchemaPolicy": { "generate": false, "advertise": "yes", "useInternally": true },
+                "binding": { "type": "http", "operation": "GET /numeric" },
+                "outputProjection": {
+                  "bodyTarget": "/data",
+                  "pagination": {
+                    "target": "/pagination",
+                    "source": { "kind": "responseHeader", "name": "x-next-value", "scalarType": "string" },
+                    "nextArguments": [
+                      { "target": "/value", "from": { "kind": "extractedValue" }, "as": "integer" }
+                    ]
+                  }
+                }
+              },
+              {
+                "slug": "number_items",
+                "name": "Number items",
+                "inputSchema": {
+                  "type": "object",
+                  "properties": { "value": { "type": "number" } }
+                },
+                "outputSchema": { "type": "object" },
+                "outputSchemaPolicy": { "generate": false, "advertise": "yes", "useInternally": true },
+                "binding": { "type": "http", "operation": "GET /numeric" },
+                "outputProjection": {
+                  "bodyTarget": "/data",
+                  "pagination": {
+                    "target": "/pagination",
+                    "source": { "kind": "jsonPointer", "pointer": "/value", "interpretation": "value" },
+                    "nextArguments": [
+                      { "target": "/value", "from": { "kind": "extractedValue" }, "as": "number" }
+                    ]
+                  }
+                }
+              },
+              {
+                "slug": "body_cursor_items",
+                "name": "Body cursor items",
+                "inputSchema": {
+                  "type": "object",
+                  "required": ["account"],
+                  "properties": {
+                    "account": { "type": "string" },
+                    "cursor": { "type": "string" },
+                    "tenant": { "type": "string" }
+                  }
+                },
+                "outputSchema": { "type": "object" },
+                "outputSchemaPolicy": { "generate": false, "advertise": "yes", "useInternally": true },
+                "binding": {
+                  "type": "transformedHttp",
+                  "base": { "operation": "GET /items" },
+                  "inputProgram": {
+                    "transformVersion": 1,
+                    "direction": "input",
+                    "base": "empty",
+                    "limits": { "maxSteps": 32, "maxDepth": 16, "maxNodes": 4096, "maxOutputBytes": 131072, "maxArrayFanout": 256 },
+                    "steps": [
+                      { "op": "copy", "source": "/account", "target": "/query/account" },
+                      { "op": "copy", "source": "/cursor", "target": "/query/cursor", "onMissing": "skip" }
+                    ]
+                  },
+                  "outputProjection": {
+                    "kind": "transformProgram",
+                    "program": {
+                    "transformVersion": 1,
+                    "direction": "output",
+                    "base": "passthrough",
+                    "limits": { "maxSteps": 32, "maxDepth": 16, "maxNodes": 4096, "maxOutputBytes": 131072, "maxArrayFanout": 256 },
+                    "steps": [
+                      { "op": "copy", "source": "/body", "target": "" },
+                      { "op": "omit", "target": "/paging" }
+                    ]
+                  }
+                }
+                },
+                "outputProjection": {
+                  "bodyTarget": "/data",
+                  "pagination": {
+                    "target": "/pagination",
+                    "source": { "kind": "jsonPointer", "pointer": "/paging/nextCursor", "interpretation": "value" },
+                    "nextArguments": [
+                      { "target": "/account", "from": { "kind": "currentArgument", "pointer": "/account" }, "as": "string" },
+                      { "target": "/cursor", "from": { "kind": "extractedValue" }, "as": "string" },
+                      { "target": "/tenant", "from": { "kind": "literal", "value": "acme" }, "as": "string" }
+                    ]
+                  }
+                }
+              },
+              {
+                "slug": "search_items",
+                "name": "Search items",
+                "inputSchema": {
+                  "type": "object",
+                  "required": ["account", "q"],
+                  "properties": { "account": { "type": "string" }, "q": { "type": "string" } }
+                },
+                "outputSchema": { "type": "object" },
+                "outputSchemaPolicy": { "generate": false, "advertise": "yes", "useInternally": true },
+                "binding": {
+                  "type": "transformedHttp",
+                  "base": { "operation": "GET /search" },
+                  "inputProgram": {
+                    "transformVersion": 1,
+                    "direction": "input",
+                    "base": "empty",
+                    "limits": { "maxSteps": 32, "maxDepth": 16, "maxNodes": 4096, "maxOutputBytes": 131072, "maxArrayFanout": 256 },
+                    "steps": [
+                      { "op": "copy", "source": "/account", "target": "/query/account" },
+                      { "op": "copy", "source": "/q", "target": "/query/q" }
+                    ]
+                  },
+                  "outputProjection": {
+                    "kind": "transformProgram",
+                    "program": {
+                    "transformVersion": 1,
+                    "direction": "output",
+                    "base": "passthrough",
+                    "limits": { "maxSteps": 32, "maxDepth": 16, "maxNodes": 4096, "maxOutputBytes": 131072, "maxArrayFanout": 256 },
+                    "steps": [
+                      { "op": "copy", "source": "/body", "target": "" },
+                      { "op": "omit", "target": "/paging" }
+                    ]
+                  }
+                }
+                },
+                "outputProjection": {
+                  "bodyTarget": "/data",
+                  "pagination": {
+                    "target": "/pagination",
+                    "source": { "kind": "linkHeader", "header": "link", "relation": "next" },
+                    "nextOperation": "list_items_page",
+                    "nextArguments": [
+                      { "target": "/account", "from": { "kind": "urlPathParameter", "name": "account" }, "as": "string" },
+                      { "target": "/cursor", "from": { "kind": "urlQuery", "name": "cursor" }, "as": "string" }
+                    ]
+                  }
+                }
+              },
+              {
+                "slug": "next_url_items",
+                "name": "Next URL items",
+                "inputSchema": { "type": "object", "properties": {} },
+                "outputSchema": { "type": "object" },
+                "outputSchemaPolicy": { "generate": false, "advertise": "yes", "useInternally": true },
+                "binding": { "type": "http", "operation": "GET /metadata" },
+                "outputProjection": {
+                  "bodyTarget": "/data",
+                  "pagination": {
+                    "target": "/pagination",
+                    "source": { "kind": "jsonPointer", "pointer": "/nextUrl", "interpretation": "url" },
+                    "exposeUrl": true,
+                    "nextOperation": "list_items_page",
+                    "nextArguments": [
+                      { "target": "/account", "from": { "kind": "urlPathParameter", "name": "account" }, "as": "string" },
+                      { "target": "/cursor", "from": { "kind": "urlQuery", "name": "cursor" }, "as": "string" }
+                    ]
+                  }
+                }
+              },
+              {
+                "slug": "list_items_page",
+                "name": "List items page",
+                "inputSchema": {
+                  "type": "object",
+                  "required": ["account", "cursor"],
+                  "properties": { "account": { "type": "string" }, "cursor": { "type": "string" } }
+                },
+                "outputSchema": { "type": "object" },
+                "outputSchemaPolicy": { "generate": false, "advertise": "yes", "useInternally": true },
+                "binding": { "type": "http", "operation": "GET /v2/accounts/{account}/items" }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "direct-name-collision-v5": {
+      "manifestFormatVersion": "0.3",
+      "sections": {
+        "server": {
+          "inline": {
+            "formatVersion": 2,
+            "name": "Direct Tool Name Collision",
+            "surfaces": [
+              {
+                "slug": "direct",
+                "isDefault": true,
+                "outputSchemas": true,
+                "operations": [
+                  { "operation": "start", "exposure": "direct" },
+                  { "operation": "list pets", "exposure": "direct" },
+                  { "operation": "list_pets", "exposure": "direct" }
+                ]
+              }
+            ]
+          }
+        },
+        "policy": { "inline": { "formatVersion": 2, "baseUrl": "https://api.example", "allowedOrigins": ["https://api.example"] } },
+        "operations": {
+          "inline": {
+            "formatVersion": 1,
+            "servers": ["https://api.example"],
+            "operations": [
+              { "key": "GET /start", "method": "GET", "path": "/start", "responses": { "200": { "content": { "application/json": { "schema": { "type": "object" } } } } } },
+              { "key": "GET /pets", "method": "GET", "path": "/pets", "responses": { "200": { "content": { "application/json": { "schema": { "type": "object" } } } } } },
+              { "key": "GET /pets-page", "method": "GET", "path": "/pets-page", "responses": { "200": { "content": { "application/json": { "schema": { "type": "object" } } } } } }
+            ]
+          }
+        },
+        "agentSurface": {
+          "inline": {
+            "formatVersion": 5,
+            "operations": [
+              {
+                "slug": "start",
+                "name": "Start",
+                "inputSchema": { "type": "object", "properties": {} },
+                "outputSchema": { "type": "object" },
+                "outputSchemaPolicy": { "generate": false, "advertise": "yes", "useInternally": true },
+                "binding": { "type": "http", "operation": "GET /start" },
+                "outputProjection": {
+                  "bodyTarget": "/data",
+                  "pagination": {
+                    "target": "/pagination",
+                    "source": { "kind": "responseHeader", "name": "x-next-cursor", "scalarType": "string" },
+                    "nextOperation": "list_pets",
+                    "nextArguments": []
+                  }
+                }
+              },
+              {
+                "slug": "list pets",
+                "name": "List pets (space slug)",
+                "inputSchema": { "type": "object", "properties": {} },
+                "outputSchema": { "type": "object" },
+                "outputSchemaPolicy": { "generate": false, "advertise": "yes", "useInternally": true },
+                "binding": { "type": "http", "operation": "GET /pets" }
+              },
+              {
+                "slug": "list_pets",
+                "name": "List pets (underscore slug)",
+                "inputSchema": { "type": "object", "properties": {} },
+                "outputSchema": { "type": "object" },
+                "outputSchemaPolicy": { "generate": false, "advertise": "yes", "useInternally": true },
+                "binding": { "type": "http", "operation": "GET /pets-page" }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "profile-removal-v5": {
+      "manifestFormatVersion": "0.3",
+      "sections": {
+        "server": {
+          "inline": {
+            "formatVersion": 2,
+            "name": "Removed Continuation Target",
+            "surfaces": [
+              {
+                "slug": "direct-no-target",
+                "isDefault": true,
+                "outputSchemas": true,
+                "operations": [ { "operation": "search_items", "exposure": "direct" } ]
+              }
+            ]
+          }
+        },
+        "policy": { "inline": { "formatVersion": 2, "baseUrl": "https://api.example", "allowedOrigins": ["https://api.example"] } },
+        "operations": {
+          "inline": {
+            "formatVersion": 1,
+            "servers": ["https://api.example"],
+            "operations": [
+              {
+                "key": "GET /search",
+                "method": "GET",
+                "path": "/search",
+                "parameters": [
+                  { "name": "account", "in": "query", "required": true, "schema": { "type": "string" } },
+                  { "name": "q", "in": "query", "required": true, "schema": { "type": "string" } }
+                ],
+                "responses": { "200": { "content": { "application/json": { "schema": { "type": "object" } } } } }
+              },
+              {
+                "key": "GET /v2/accounts/{account}/items",
+                "method": "GET",
+                "path": "/v2/accounts/{account}/items",
+                "parameters": [
+                  { "name": "account", "in": "path", "required": true, "schema": { "type": "string" } },
+                  { "name": "cursor", "in": "query", "required": true, "schema": { "type": "string" } }
+                ],
+                "responses": { "200": { "content": { "application/json": { "schema": { "type": "object" } } } } }
+              }
+            ]
+          }
+        },
+        "agentSurface": {
+          "inline": {
+            "formatVersion": 5,
+            "operations": [
+              {
+                "slug": "search_items",
+                "name": "Search items",
+                "inputSchema": { "type": "object", "required": ["account", "q"], "properties": { "account": { "type": "string" }, "q": { "type": "string" } } },
+                "outputSchema": { "type": "object" },
+                "outputSchemaPolicy": { "generate": false, "advertise": "yes", "useInternally": true },
+                "binding": { "type": "http", "operation": "GET /search" },
+                "outputProjection": {
+                  "bodyTarget": "/data",
+                  "pagination": {
+                    "target": "/pagination",
+                    "source": { "kind": "linkHeader", "header": "link", "relation": "next" },
+                    "nextOperation": "list_items_page",
+                    "nextArguments": [
+                      { "target": "/account", "from": { "kind": "currentArgument", "pointer": "/account" }, "as": "string" },
+                      { "target": "/cursor", "from": { "kind": "urlQuery", "name": "cursor" }, "as": "string" }
+                    ]
+                  }
+                }
+              },
+              {
+                "slug": "list_items_page",
+                "name": "List items page",
+                "inputSchema": { "type": "object", "required": ["account", "cursor"], "properties": { "account": { "type": "string" }, "cursor": { "type": "string" } } },
+                "outputSchema": { "type": "object" },
+                "outputSchemaPolicy": { "generate": false, "advertise": "yes", "useInternally": true },
+                "binding": { "type": "http", "operation": "GET /v2/accounts/{account}/items" }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "sensitive-load-refusal-v5": {
+      "manifestFormatVersion": "0.3",
+      "sections": {
+        "server": { "inline": { "name": "Sensitive Header Refusal" } },
+        "policy": { "inline": { "formatVersion": 2, "baseUrl": "https://api.example" } },
+        "operations": {
+          "inline": {
+            "operations": [
+              { "key": "GET /items", "method": "GET", "path": "/items" }
+            ]
+          }
+        },
+        "agentSurface": {
+          "inline": {
+            "formatVersion": 5,
+            "operations": [
+              {
+                "slug": "expose_auth",
+                "name": "Expose auth",
+                "inputSchema": { "type": "object", "properties": {} },
+                "outputSchema": { "type": "object" },
+                "binding": { "type": "http", "operation": "GET /items" },
+                "outputProjection": {
+                  "bodyTarget": "/data",
+                  "metadata": [
+                    { "source": { "kind": "responseHeader", "name": "authorization", "valueMode": "first" }, "target": "/metadata/auth" }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "legacy.no-projection-plain-body",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "list_items_page", "arguments": { "account": "acme", "cursor": "k1" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/v2/accounts/acme/items?cursor=k1", "headers": [{ "name": "ETag", "values": ["v1"] }], "body": { "items": [{ "id": 1 }], "paging": { "nextCursor": "k2" } } },
+      "expected": { "result": { "items": [{ "id": 1 }], "paging": { "nextCursor": "k2" } }, "diagnostics": [] }
+    },
+    {
+      "id": "metadata.selected-multivalue-unselected-sensitive-status",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "inspect_metadata", "arguments": {} },
+      "response": {
+        "status": 206,
+        "effectiveUri": "https://api.example/metadata",
+        "headers": [
+          { "name": "ETag", "values": ["v1", "v2"] },
+          { "name": "X-Label", "values": ["red", "blue"] },
+          { "name": "Server", "values": ["private-server"] },
+          { "name": "Set-Cookie", "values": ["session=secret"] }
+        ],
+        "body": { "ok": true }
+      },
+      "expected": {
+        "result": { "data": { "ok": true }, "metadata": { "etag": "v1", "labels": ["red", "blue"], "status": 206 } },
+        "diagnostics": []
+      }
+    },
+    {
+      "id": "metadata.missing-selected-header",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "inspect_metadata", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/metadata", "headers": [], "body": { "ok": true } },
+      "expected": { "result": { "data": { "ok": true }, "metadata": { "status": 200 } }, "diagnostics": [] }
+    },
+    {
+      "id": "metadata.header-value-at-16k",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "inspect_metadata", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/metadata", "headers": [{ "name": "X-Large", "values": [{ "$repeatUtf8": { "text": "a", "bytes": 16384 } }] }], "body": { "ok": true } },
+      "expected": { "result": { "data": { "ok": true }, "metadata": { "large": { "$repeatUtf8": { "text": "a", "bytes": 16384 } }, "status": 200 } }, "diagnostics": [] }
+    },
+    {
+      "id": "metadata.header-value-over-16k",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "inspect_metadata", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/metadata", "headers": [{ "name": "X-Large", "values": [{ "$repeatUtf8": { "text": "a", "bytes": 16385 } }] }], "body": { "ok": true } },
+      "expected": { "result": { "data": { "ok": true }, "metadata": { "status": 200 } }, "diagnostics": ["response-metadata/header-oversized"] }
+    },
+    {
+      "id": "metadata.header-values-at-32",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "inspect_metadata", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/metadata", "headers": [{ "name": "X-Label", "values": { "$repeatArray": { "value": "x", "count": 32 } } }], "body": { "ok": true } },
+      "expected": { "result": { "data": { "ok": true }, "metadata": { "labels": { "$repeatArray": { "value": "x", "count": 32 } }, "status": 200 } }, "diagnostics": [] }
+    },
+    {
+      "id": "metadata.header-values-over-32",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "inspect_metadata", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/metadata", "headers": [{ "name": "X-Label", "values": { "$repeatArray": { "value": "x", "count": 33 } } }], "body": { "ok": true } },
+      "expected": { "result": { "data": { "ok": true }, "metadata": { "status": 200 } }, "diagnostics": ["response-metadata/header-oversized"] }
+    },
+    {
+      "id": "metadata.raw-header-aggregate-over-32k",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "inspect_metadata", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/metadata", "headers": [
+        { "name": "X-Large", "values": [{ "$repeatUtf8": { "text": "a", "bytes": 10923 } }] },
+        { "name": "X-Other-A", "values": [{ "$repeatUtf8": { "text": "a", "bytes": 10923 } }] },
+        { "name": "X-Other-B", "values": [{ "$repeatUtf8": { "text": "a", "bytes": 10923 } }] }
+      ], "body": { "ok": true } },
+      "expected": { "result": { "data": { "ok": true }, "metadata": { "status": 200 } }, "diagnostics": ["response-metadata/header-oversized"] }
+    },
+    {
+      "id": "metadata.serialized-aggregate-over-64k",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "inspect_metadata", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/metadata", "headers": [
+          { "name": "X-Large", "values": [{ "$repeatUtf8": { "text": "\"", "bytes": 16384 } }] },
+          { "name": "X-Other-A", "values": [{ "$repeatUtf8": { "text": "\"", "bytes": 16384 } }] },
+          { "name": "X-Other-B", "values": [{ "$repeatUtf8": { "text": "\"", "bytes": 16380 } }] }
+      ], "body": { "ok": true } },
+      "expected": { "result": { "data": { "ok": true }, "metadata": { "status": 200 } }, "diagnostics": ["response-metadata/header-oversized"] }
+    },
+    {
+      "id": "metadata.sensitive-header-load-refusal",
+      "manifest": "sensitive-load-refusal-v5",
+      "invoke": { "surface": "direct", "operation": "expose_auth", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/items", "headers": [], "body": {} },
+      "expected": { "loadRefusal": true, "diagnostics": [] }
+    },
+    {
+      "id": "metadata.non-json-text-body-projected-as-string",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "inspect_metadata", "arguments": {} },
+      "response": {
+        "status": 200,
+        "effectiveUri": "https://api.example/metadata",
+        "headers": [],
+        "body": { "$rawBody": { "text": "plain text response" } }
+      },
+      "expected": {
+        "result": { "data": "plain text response", "metadata": { "status": 200 } },
+        "diagnostics": []
+      }
+    },
+    {
+      "id": "metadata.absent-body-remains-absent",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "inspect_metadata", "arguments": {} },
+      "response": { "status": 204, "effectiveUri": "https://api.example/metadata", "headers": [], "body": { "$rawBody": { "text": "" } } },
+      "expected": { "result": { "metadata": { "status": 204 } }, "diagnostics": [] }
+    },
+    {
+      "id": "metadata.json-null-body-remains-null",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "inspect_metadata", "arguments": {} },
+      "response": {
+        "status": 200,
+        "effectiveUri": "https://api.example/metadata",
+        "headers": [],
+        "body": { "$rawBody": { "text": "null" } }
+      },
+      "expected": { "result": { "data": null, "metadata": { "status": 200 } }, "diagnostics": [] }
+    },
+    {
+      "id": "pagination.self-direct-next-arguments",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "list_items", "arguments": { "account": "acme" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/items?account=acme", "headers": [{ "name": "X-Next-Cursor", "values": ["c2"] }], "body": { "items": [1] } },
+      "expected": { "result": { "data": { "items": [1] }, "pagination": { "state": "next", "hasNext": true, "next": { "operation": "list_items", "tool": "list_items", "arguments": { "account": "acme", "cursor": "c2" } } } }, "diagnostics": [] }
+    },
+    {
+      "id": "pagination.self-final-page",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "list_items", "arguments": { "account": "acme" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/items?account=acme", "headers": [], "body": { "items": [] } },
+      "expected": { "result": { "data": { "items": [] }, "pagination": { "state": "end", "hasNext": false } }, "diagnostics": [] }
+    },
+    {
+      "id": "pagination.body-json-pointer-survives-output-transform",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "body_cursor_items", "arguments": { "account": "acme" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/items?account=acme", "headers": [], "body": { "items": [{ "id": 5 }], "paging": { "nextCursor": "k9" } } },
+      "expected": { "result": { "data": { "items": [{ "id": 5 }] }, "pagination": { "state": "next", "hasNext": true, "next": { "operation": "body_cursor_items", "tool": "body_cursor_items", "arguments": { "account": "acme", "cursor": "k9", "tenant": "acme" } } } }, "diagnostics": [] }
+    },
+    {
+      "id": "pagination.cross-operation-direct-relative-after-redirect",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "search_items", "arguments": { "account": "acme", "q": "blue" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/v2/search", "headers": [{ "name": "Link", "values": ["<accounts/acme/items?cursor=c3>; rel=\"next\""] }], "body": { "items": [{ "id": 3 }] } },
+      "expected": { "result": { "data": { "items": [{ "id": 3 }] }, "pagination": { "state": "next", "hasNext": true, "next": { "operation": "list_items_page", "tool": "list_items_page", "arguments": { "account": "acme", "cursor": "c3" } } } }, "diagnostics": [] }
+    },
+    {
+      "id": "pagination.cross-operation-navigator-payload",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "navigator", "operation": "search_items", "arguments": { "account": "acme", "q": "blue" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/v2/search", "headers": [{ "name": "Link", "values": ["<accounts/acme/items?cursor=c4>; title=\"next, page\"; rel=\"next\""] }], "body": { "items": [] } },
+      "expected": { "result": { "data": { "items": [] }, "pagination": { "state": "next", "hasNext": true, "next": { "operation": "list_items_page", "tool": "catalogue.invoke", "arguments": { "operationKey": "list_items_page", "arguments": { "account": "acme", "cursor": "c4" } } } } }, "diagnostics": [] }
+    },
+    {
+      "id": "pagination.link-no-next-final-page",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "search_items", "arguments": { "account": "acme", "q": "blue" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/v2/search", "headers": [{ "name": "Link", "values": ["</accounts/acme/items?cursor=old>; rel=\"prev\""] }], "body": { "items": [] } },
+      "expected": { "result": { "data": { "items": [] }, "pagination": { "state": "end", "hasNext": false } }, "diagnostics": [] }
+    },
+    {
+      "id": "pagination.link-malformed-unavailable",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "search_items", "arguments": { "account": "acme", "q": "blue" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/v2/search", "headers": [{ "name": "Link", "values": ["<unterminated; rel=\"next\""] }], "body": { "items": [] } },
+      "expected": { "result": { "data": { "items": [] }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/link-malformed"] }
+    },
+    {
+      "id": "pagination.link-duplicate-next-unavailable",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "search_items", "arguments": { "account": "acme", "q": "blue" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/v2/search", "headers": [{ "name": "Link", "values": ["</accounts/acme/items?cursor=a>; rel=next", "</accounts/acme/items?cursor=b>; rel=next"] }], "body": { "items": [] } },
+      "expected": { "result": { "data": { "items": [] }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/link-ambiguous-next"] }
+    },
+    {
+      "id": "pagination.link-anchor-context-mismatch",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "search_items", "arguments": { "account": "acme", "q": "blue" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/v2/search", "headers": [{ "name": "Link", "values": ["</accounts/acme/items?cursor=c5>; rel=next; anchor=\"/different-context\""] }], "body": { "items": [] } },
+      "expected": { "result": { "data": { "items": [] }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/link-context-mismatch"] }
+    },
+    {
+      "id": "pagination.cross-origin-url-refused",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "search_items", "arguments": { "account": "acme", "q": "blue" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/v2/search", "headers": [{ "name": "Link", "values": ["<https://other.example/v2/accounts/acme/items?cursor=c6>; rel=next"] }], "body": { "items": [] } },
+      "expected": { "result": { "data": { "items": [] }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/link-cross-origin"] }
+    },
+    {
+      "id": "pagination.target-url-mismatch-refused",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "search_items", "arguments": { "account": "acme", "q": "blue" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/v2/search", "headers": [{ "name": "Link", "values": ["</wrong/acme/items?cursor=c7>; rel=next"] }], "body": { "items": [] } },
+      "expected": { "result": { "data": { "items": [] }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/url-unrepresentable"] }
+    },
+    {
+      "id": "pagination.query-only-unmapped-change-refused",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "search_items", "arguments": { "account": "acme", "q": "blue" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/v2/search", "headers": [{ "name": "Link", "values": ["</v2/accounts/acme/items?cursor=c10&include=archived>; rel=next"] }], "body": { "items": [] } },
+      "expected": { "result": { "data": { "items": [] }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/url-unrepresentable"] }
+    },
+    {
+      "id": "pagination.non-success-skips-link-but-keeps-retry-after",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "list_items", "arguments": { "account": "acme" } },
+      "response": { "status": 429, "effectiveUri": "https://api.example/items?account=acme", "headers": [{ "name": "Retry-After", "values": ["30"] }, { "name": "Link", "values": ["</accounts/acme/items?cursor=c8>; rel=next"] }], "body": { "error": "slow down" } },
+      "expected": { "result": { "data": { "error": "slow down" }, "metadata": { "retryAfter": "30" }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/non-success-status"] }
+    },
+    {
+      "id": "pagination.non-success-401-challenge-body-preserved",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "next_url_items", "arguments": {} },
+      "response": {
+        "status": 401,
+        "effectiveUri": "https://api.example/metadata",
+        "headers": [
+          { "name": "WWW-Authenticate", "values": ["Bearer realm=\"mcpiler\""] },
+          { "name": "Proxy-Authenticate", "values": ["Basic realm=\"mcpiler\""] }
+        ],
+        "body": { "nextUrl": "https://api.example/v2/accounts/acme/items?cursor=must-not-be-used" }
+      },
+      "expected": { "result": { "data": { "nextUrl": "https://api.example/v2/accounts/acme/items?cursor=must-not-be-used" }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/non-success-status"] }
+    },
+    {
+      "id": "pagination.body-transform-does-not-remove-link-next",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "search_items", "arguments": { "account": "acme", "q": "blue" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/v2/search", "headers": [{ "name": "Link", "values": ["<accounts/acme/items?cursor=c9>; rel=next"] }], "body": { "items": [{ "id": 9, "private": true }] } },
+      "expected": { "result": { "data": { "items": [{ "id": 9, "private": true }] }, "pagination": { "state": "next", "hasNext": true, "next": { "operation": "list_items_page", "tool": "list_items_page", "arguments": { "account": "acme", "cursor": "c9" } } } }, "diagnostics": [] }
+    },
+    {
+      "id": "pagination.body-url-at-16k",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "next_url_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/metadata", "headers": [], "body": { "nextUrl": { "$concatUtf8": ["https://api.example/v2/accounts/acme/items?cursor=", { "$repeatUtf8": { "text": "a", "bytes": 16334 } }] } } },
+      "expected": { "result": { "data": { "nextUrl": { "$concatUtf8": ["https://api.example/v2/accounts/acme/items?cursor=", { "$repeatUtf8": { "text": "a", "bytes": 16334 } }] } }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/metadata-oversized"] }
+    },
+    {
+      "id": "pagination.body-url-over-16k",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "next_url_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/metadata", "headers": [], "body": { "nextUrl": { "$concatUtf8": ["https://api.example/v2/accounts/acme/items?cursor=", { "$repeatUtf8": { "text": "a", "bytes": 16350 } }] } } },
+      "expected": { "result": { "data": { "nextUrl": { "$concatUtf8": ["https://api.example/v2/accounts/acme/items?cursor=", { "$repeatUtf8": { "text": "a", "bytes": 16350 } }] } }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/metadata-oversized"] }
+    },
+    {
+      "id": "pagination.body-url-exposed",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "next_url_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/metadata", "headers": [], "body": { "nextUrl": "https://api.example/v2/accounts/acme/items?cursor=next" } },
+      "expected": { "result": { "data": { "nextUrl": "https://api.example/v2/accounts/acme/items?cursor=next" }, "pagination": { "state": "next", "hasNext": true, "next": { "operation": "list_items_page", "tool": "list_items_page", "arguments": { "account": "acme", "cursor": "next" }, "url": "https://api.example/v2/accounts/acme/items?cursor=next" } } }, "diagnostics": [] }
+    },
+    {
+      "id": "pagination.link-values-at-128",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "search_items", "arguments": { "account": "acme", "q": "blue" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/v2/search", "headers": [{ "name": "Link", "values": { "$repeatArray": { "value": "</accounts/acme/items?cursor=old>; rel=prev", "count": 127 } } }, { "name": "Link", "values": ["<accounts/acme/items?cursor=c128>; rel=next"] }], "body": { "items": [] } },
+      "expected": { "result": { "data": { "items": [] }, "pagination": { "state": "next", "hasNext": true, "next": { "operation": "list_items_page", "tool": "list_items_page", "arguments": { "account": "acme", "cursor": "c128" } } } }, "diagnostics": [] }
+    },
+    {
+      "id": "pagination.link-values-over-128",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "search_items", "arguments": { "account": "acme", "q": "blue" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/v2/search", "headers": [{ "name": "Link", "values": { "$repeatArray": { "value": "</accounts/acme/items?cursor=old>; rel=prev", "count": 128 } } }, { "name": "Link", "values": ["<accounts/acme/items?cursor=c129>; rel=next"] }], "body": { "items": [] } },
+      "expected": { "result": { "data": { "items": [] }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/metadata-oversized"] }
+    },
+    {
+      "id": "pagination.header-values-over-32",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "list_items", "arguments": { "account": "acme" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/items", "headers": [{ "name": "X-Next-Cursor", "values": { "$repeatArray": { "value": "next", "count": 33 } } }], "body": { "items": [] } },
+      "expected": { "result": { "data": { "items": [] }, "pagination": { "state": "unavailable" } }, "diagnostics": ["response-metadata/header-oversized"] }
+    },
+    {
+      "id": "pagination.header-control-refused",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "list_items", "arguments": { "account": "acme" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/items", "headers": [{ "name": "X-Next-Cursor", "values": ["bad\nvalue"] }], "body": { "items": [] } },
+      "expected": { "result": { "data": { "items": [] }, "pagination": { "state": "unavailable" } }, "diagnostics": ["response-metadata/header-invalid-value"] }
+    },
+    {
+      "id": "pagination.object-over-32k",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "list_items", "arguments": { "account": { "$repeatUtf8": { "text": "a", "bytes": 32768 } } } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/items", "headers": [{ "name": "X-Next-Cursor", "values": ["next"] }], "body": { "items": [] } },
+      "expected": { "result": { "data": { "items": [] }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/metadata-oversized"] }
+    },
+    {
+      "id": "pagination.direct-name-collision-continuation",
+      "manifest": "direct-name-collision-v5",
+      "invoke": { "surface": "direct", "operation": "start", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/start", "headers": [{ "name": "X-Next-Cursor", "values": ["c2"] }], "body": { "items": [2] } },
+      "expected": { "result": { "data": { "items": [2] }, "pagination": { "state": "next", "hasNext": true, "next": { "operation": "list_pets", "tool": "list_pets_2", "arguments": {} } } }, "diagnostics": [] }
+    },
+    {
+      "id": "pagination.profile-target-removed-refusal",
+      "manifest": "profile-removal-v5",
+      "invoke": { "surface": "direct-no-target", "operation": "search_items", "arguments": { "account": "acme", "q": "blue" } },
+      "response": { "status": 200, "effectiveUri": "https://api.example/v2/search", "headers": [{ "name": "Link", "values": ["</v2/accounts/acme/items?cursor=c1>; rel=next"] }], "body": { "items": [] } },
+      "expected": { "loadRefusal": true, "loadRefusalScope": "surface-target", "loadRefusalCodes": ["agent/projection-target-unreachable"], "diagnostics": [] }
+    },
+    {
+      "id": "pagination.string-to-integer-exponent-exact",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "integer_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/numeric", "headers": [{ "name": "X-Next-Value", "values": ["1e3"] }], "body": {} },
+      "expected": { "result": { "data": {}, "pagination": { "state": "next", "hasNext": true, "next": { "operation": "integer_items", "tool": "integer_items", "arguments": { "value": 1000 } } } }, "diagnostics": [] }
+    },
+    {
+      "id": "pagination.string-to-integer-int64-max",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "integer_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/numeric", "headers": [{ "name": "X-Next-Value", "values": ["9223372036854775807"] }], "body": {} },
+      "expected": { "result": { "data": {}, "pagination": { "state": "next", "hasNext": true, "next": { "operation": "integer_items", "tool": "integer_items", "arguments": { "value": 9223372036854775807 } } } }, "diagnostics": [] }
+    },
+    {
+      "id": "pagination.string-to-integer-int64-min",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "integer_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/numeric", "headers": [{ "name": "X-Next-Value", "values": ["-9223372036854775808"] }], "body": {} },
+      "expected": { "result": { "data": {}, "pagination": { "state": "next", "hasNext": true, "next": { "operation": "integer_items", "tool": "integer_items", "arguments": { "value": -9223372036854775808 } } } }, "diagnostics": [] }
+    },
+    {
+      "id": "pagination.string-to-integer-overflow-positive",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "integer_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/numeric", "headers": [{ "name": "X-Next-Value", "values": ["9223372036854775808"] }], "body": {} },
+      "expected": { "result": { "data": {}, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/argument-unmappable"] }
+    },
+    {
+      "id": "pagination.string-to-integer-overflow-negative",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "integer_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/numeric", "headers": [{ "name": "X-Next-Value", "values": ["-9223372036854775809"] }], "body": {} },
+      "expected": { "result": { "data": {}, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/argument-unmappable"] }
+    },
+    {
+      "id": "pagination.number-token-negative-zero",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "number_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/numeric", "headers": [], "body": { "value": -0 } },
+      "expected": { "result": { "data": { "value": -0 }, "pagination": { "state": "next", "hasNext": true, "next": { "operation": "number_items", "tool": "number_items", "arguments": { "value": -0 } } } }, "diagnostics": [] }
+    },
+    {
+      "id": "pagination.number-token-exponent",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "number_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/numeric", "headers": [], "body": { "value": 1.2300e+3 } },
+      "expected": { "result": { "data": { "value": 1.2300e+3 }, "pagination": { "state": "next", "hasNext": true, "next": { "operation": "number_items", "tool": "number_items", "arguments": { "value": 1.2300e+3 } } } }, "diagnostics": [] }
+    },
+    {
+      "id": "pagination.number-token-huge-mantissa",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "number_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/numeric", "headers": [], "body": { "value": 123456789012345678901234567890123456789e-10 } },
+      "expected": { "result": { "data": { "value": 123456789012345678901234567890123456789e-10 }, "pagination": { "state": "next", "hasNext": true, "next": { "operation": "number_items", "tool": "number_items", "arguments": { "value": 123456789012345678901234567890123456789e-10 } } } }, "diagnostics": [] }
+    },
+    {
+      "id": "pagination.number-exponent-overflow",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "number_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/numeric", "headers": [], "body": { "value": 1e1000000 } },
+      "expected": { "result": { "data": { "value": 1e1000000 }, "pagination": { "state": "next", "hasNext": true, "next": { "operation": "number_items", "tool": "number_items", "arguments": { "value": 1e1000000 } } } }, "diagnostics": [] }
+    },
+    {
+      "id": "pagination.number-exponent-underflow",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "number_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/numeric", "headers": [], "body": { "value": 1e-1000000 } },
+      "expected": { "result": { "data": { "value": 1e-1000000 }, "pagination": { "state": "next", "hasNext": true, "next": { "operation": "number_items", "tool": "number_items", "arguments": { "value": 1e-1000000 } } } }, "diagnostics": [] }
+    },
+    {
+      "id": "pagination.number-refuses-nan",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "number_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/numeric", "headers": [], "body": { "value": "NaN" } },
+      "expected": { "result": { "data": { "value": "NaN" }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/argument-unmappable"] }
+    },
+    {
+      "id": "pagination.number-refuses-infinity",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "number_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/numeric", "headers": [], "body": { "value": "Infinity" } },
+      "expected": { "result": { "data": { "value": "Infinity" }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/argument-unmappable"] }
+    },
+    {
+      "id": "pagination.number-refuses-negative-infinity",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "number_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/numeric", "headers": [], "body": { "value": "-Infinity" } },
+      "expected": { "result": { "data": { "value": "-Infinity" }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/argument-unmappable"] }
+    },
+    {
+      "id": "pagination.number-refuses-leading-zero",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "number_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/numeric", "headers": [], "body": { "value": "01" } },
+      "expected": { "result": { "data": { "value": "01" }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/argument-unmappable"] }
+    },
+    {
+      "id": "pagination.number-refuses-leading-whitespace",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "number_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/numeric", "headers": [], "body": { "value": " 1" } },
+      "expected": { "result": { "data": { "value": " 1" }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/argument-unmappable"] }
+    },
+    {
+      "id": "pagination.number-refuses-trailing-whitespace",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "number_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/numeric", "headers": [], "body": { "value": "1 " } },
+      "expected": { "result": { "data": { "value": "1 " }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/argument-unmappable"] }
+    },
+    {
+      "id": "pagination.body-url-cross-origin-refused",
+      "manifest": "projection-v5",
+      "invoke": { "surface": "direct", "operation": "next_url_items", "arguments": {} },
+      "response": { "status": 200, "effectiveUri": "https://api.example/metadata", "headers": [], "body": { "nextUrl": "https://evil.example/v2/accounts/acme/items?cursor=opaque" } },
+      "expected": { "result": { "data": { "nextUrl": "https://evil.example/v2/accounts/acme/items?cursor=opaque" }, "pagination": { "state": "unavailable" } }, "diagnostics": ["pagination/link-cross-origin"] }
+    }
+  ]
+}

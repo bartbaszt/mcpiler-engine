@@ -38,4 +38,27 @@
     <AdditionalFiles Include="$(MSBuildThisFileDirectory)BannedSymbols.txt" />
   </ItemGroup>
 
+  <!--
+    The JMESPath evaluator's runtime package ships a production code analyzer (CTJ001 and
+    friends) that activates wherever its runtime assets are consumed. Engine consumes those
+    assets unmodified for language semantics, but the analyzer is not part of this
+    repository's curated analyzer posture: the rules are style and performance opinions
+    about Corvus-specific APIs, and they fire on Engine sources that predate the reference.
+
+    NuGet cannot express this as an exclusion: the analyzer arrives on the evaluator's
+    transitive dependency edge, and ExcludeAssets on the direct reference does not reach a
+    transitive one (verified against the SDK's resolved asset graph). Removing the item at
+    the point the SDK has resolved it is the one place every project in this repository is
+    covered without repeating the rule, and without a per-diagnostic suppression list that
+    would have to grow every time the dependency adds a rule. Runtime IL is untouched;
+    only build-time analysis is.
+  -->
+  <Target Name="RemoveDependencyAnalyzers"
+          AfterTargets="ResolveLockFileAnalyzers"
+          BeforeTargets="CoreCompile">
+    <ItemGroup>
+      <Analyzer Remove="@(Analyzer)" Condition="'%(Analyzer.NuGetPackageId)' == 'Corvus.Text.Json'" />
+    </ItemGroup>
+  </Target>
+
 </Project>

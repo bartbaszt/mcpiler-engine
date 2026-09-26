@@ -47,7 +47,7 @@ public sealed class ResponseCacheExecutionTests
             operation: operation,
             binding: new TransformedHttpBinding(
                 new HttpBinding(operation.Key),
-                OutputProgram: OutputProjection()),
+                Output: new ManifestOutputProjection.TransformProgramVariant(OutputProjection())),
             responseCache: new ResponseCachePolicySettings(300));
 
         using CachedHarness harness = new();
@@ -504,7 +504,7 @@ public sealed class ResponseCacheExecutionTests
         ManifestDocument allowed = DestinationManifest(allowedDestination: true);
         ManifestDocument narrowed = DestinationManifest(allowedDestination: false);
         ExecutionRequest Request(ManifestDocument manifest)
-            => new(manifest, ExecutionManifests.Slug, []) { CallerPartition = CallerPartition.Public };
+            => new(manifest, ExecutionManifests.Slug, [], manifest.Policy) { CallerPartition = CallerPartition.Public };
 
         EngineExecutionResult warmed = await service.ExecuteAsync(Request(allowed), TestContext.Current.CancellationToken);
         Assert.True(warmed.Succeeded, warmed.FailureReason);
@@ -711,7 +711,7 @@ public sealed class ResponseCacheExecutionTests
         long? responseSizeLimitBytes = null,
         string slug = ExecutionManifests.Slug)
         => await harness.Service.ExecuteAsync(
-            new ExecutionRequest(manifest, slug, arguments ?? [])
+            new ExecutionRequest(manifest, slug, arguments ?? [], manifest.Policy)
             {
                 CallerPartition = CallerPartition.Public,
                 ResponseSizeLimitBytes = responseSizeLimitBytes,
