@@ -379,7 +379,8 @@ public sealed class JmesPathProjectionExecutionTests : IDisposable
         int languageVersion,
         JmesPathLimits limits,
         bool projection,
-        ExecutionLimits? policyLimits)
+        ExecutionLimits? policyLimits,
+        AgentOutputProjection? agentProjection = null)
     {
         var operation = ExecutionManifests.Operation();
 
@@ -390,7 +391,12 @@ public sealed class JmesPathProjectionExecutionTests : IDisposable
                 new ManifestOutputProjection.JmesPathVariant(languageVersion, expression, limits))
             : new HttpBinding(operation.Key);
 
-        return ExecutionManifests.For(baseUrl, policyLimits, operation: operation, binding: binding);
+        return ExecutionManifests.For(
+            baseUrl,
+            policyLimits,
+            operation: operation,
+            binding: binding,
+            outputProjection: agentProjection);
     }
 
     /// <summary>
@@ -401,6 +407,39 @@ public sealed class JmesPathProjectionExecutionTests : IDisposable
     /// what the execution receives but what the case asserts about, so the helper deliberately
     /// does not take it. The expression and limits are the only projection inputs here.
     /// </remarks>
+    /// <summary>
+    /// One operation carrying BOTH output mechanisms, invoked for real.
+    /// </summary>
+    /// <remarks>
+    /// The expression reshapes the body, and the member it adds exists only in the projection's
+    /// result. If the agent output projection received the upstream body, or ran before the
+    /// expression, that member would be absent and the body target would hold something else. The
+    /// assertion therefore fails on either wrong order, which is the property the two
+    /// independently specified features had no combined evidence for.
+    /// </remarks>
+    [Fact]
+    public async Task An_agent_output_projection_wraps_the_body_the_expression_produced()
+    {
+        await using var host = await StartJsonAsync("""{"items":[1,2,3],"extra":"decoy"}""");
+
+        var result = await Execute(
+            host.Address,
+            "{items: items, count: length(items)}",
+            worker: Worker(),
+            agentProjection: new AgentOutputProjection("/items", []));
+
+        Assert.Equal(ExecutionFailureKind.None, result.Failure);
+
+        // `count` and the reshaped `items` are the expression's output, and the envelope carries
+        // it under the agent projection's own body target. `extra` is the decoy the expression
+        // dropped.
+        var envelope = JsonNode.Parse(result.ResponseBody!)!.AsObject();
+        Assert.Equal(
+            """{"items":{"count":3,"items":[1,2,3]}}""",
+            envelope.ToJsonString());
+        Assert.Null(envelope["metadata"]);
+    }
+
     private static async Task<EngineExecutionResult> Execute(
         Uri baseUrl,
         string expression = "@",
@@ -409,7 +448,8 @@ public sealed class JmesPathProjectionExecutionTests : IDisposable
         ExecutionLimits? policyLimits = null,
         bool projection = true,
         int languageVersion = 1,
-        FileHandleStore? store = null)
+        FileHandleStore? store = null,
+        AgentOutputProjection? agentProjection = null)
     {
         ManifestDocument manifest = Manifest(
             baseUrl,
@@ -417,7 +457,8 @@ public sealed class JmesPathProjectionExecutionTests : IDisposable
             languageVersion,
             limits ?? JmesPathLimits.AuthoringDefault,
             projection,
-            policyLimits);
+            policyLimits,
+            agentProjection);
 
         using var clients = new UpstreamClientFactory(new OutboundConnectionPolicy(_ => false));
         var service = new ExecutionService(
