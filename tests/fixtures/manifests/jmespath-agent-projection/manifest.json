@@ -1,0 +1,154 @@
+{
+  "manifestFormatVersion": "0.3",
+  "sections": {
+    "server": {
+      "inline": {
+        "formatVersion": 2,
+        "name": "Styles",
+        "authenticationRequired": true,
+        "surfaces": [
+          {
+            "slug": "default",
+            "isDefault": true,
+            "navigator": {
+              "enabled": true
+            },
+            "operations": [
+              {
+                "operation": "search"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "policy": {
+      "inline": {
+        "formatVersion": 2,
+        "baseUrl": "https://styles.example.test/",
+        "allowedOrigins": [
+          "https://styles.example.test"
+        ],
+        "jmesPathCeiling": {
+          "maxExpressionBytes": 16384,
+          "maxInputNodes": 1000000,
+          "maxInputDepth": 64,
+          "maxResultNodes": 65536,
+          "maxResultDepth": 64,
+          "maxOutputBytes": 1048576,
+          "maxEvaluationMilliseconds": 60000
+        }
+      }
+    },
+    "credentials": {
+      "inline": {
+        "formatVersion": 4,
+        "credentials": [
+          {
+            "id": "authorization",
+            "scheme": "bearer",
+            "slot": "Authorization",
+            "value": {
+              "fromEnv": "MCPILER_AUTHORIZATION"
+            }
+          }
+        ]
+      }
+    },
+    "operations": {
+      "inline": {
+        "formatVersion": 1,
+        "operations": [
+          {
+            "key": "GET /search",
+            "method": "GET",
+            "path": "/search",
+            "responses": {
+              "200": {
+                "content": {
+                  "application/json": {
+                    "schema": {
+                      "type": "object"
+                    }
+                  }
+                },
+                "description": "Results"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "formatVersion": 5,
+        "operations": [
+          {
+            "slug": "search",
+            "name": "search",
+            "inputSchema": {
+              "type": "object"
+            },
+            "annotations": {
+              "readOnly": true,
+              "destructive": false,
+              "idempotent": false,
+              "openWorld": true
+            },
+            "binding": {
+              "type": "transformedHttp",
+              "base": {
+                "operation": "GET /search",
+                "credentialRef": [
+                  "authorization"
+                ]
+              },
+              "outputProjection": {
+                "kind": "jmespath",
+                "languageVersion": 1,
+                "expression": "results[*].{id: id, name: name}",
+                "limits": {
+                  "maxExpressionBytes": 4096,
+                  "maxInputNodes": 100000,
+                  "maxInputDepth": 64,
+                  "maxResultNodes": 8192,
+                  "maxResultDepth": 32,
+                  "maxOutputBytes": 262144,
+                  "maxEvaluationMilliseconds": 10000
+                }
+              }
+            },
+            "outputProjection": {
+              "bodyTarget": "/items",
+              "metadata": [
+                {
+                  "source": {
+                    "kind": "statusCode"
+                  },
+                  "target": "/metadata/status"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+  "provenance": {
+    "connectorId": "7a1c0000000040008000000000000011",
+    "connectorRevisionId": "7a1c0000000040008000000000000012",
+    "sourceSpecRevisionId": "7a1c0000000040008000000000000013",
+    "effectiveDocumentHash": "0123456789abcdef",
+    "surfaces": {
+      "default": {
+        "publishedSurfaceId": "7a1c0000000040008000000000000014"
+      }
+    },
+    "operations": {
+      "search": {
+        "agentOperationId": "72616573686300000000000000000011",
+        "bindingId": "search"
+      }
+    }
+  }
+}

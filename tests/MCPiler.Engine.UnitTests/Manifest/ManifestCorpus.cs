@@ -53,17 +53,31 @@ internal static class ManifestCorpus
     public const string JmesPathProfileFixture = "jmespath-profile-1";
 
     /// <summary>
+    /// The bundle that carries BOTH output mechanisms on one operation: a binding-level
+    /// <c>jmespath</c> output projection and an operation-level agent output projection. It needs
+    /// the same permissive classification as <see cref="JmesPathProfileFixture"/> for the same
+    /// reason - the expression is only interpreted by a confined worker, which a unit corpus cannot
+    /// start - and it is listed separately so the combined shape is a stated corpus case rather
+    /// than an accident of the single-member fixture.
+    /// </summary>
+    public const string JmesPathAgentProjectionFixture = "jmespath-agent-projection";
+
+    /// <summary>The corpus fixtures whose JMESPath expression only a real worker can classify.</summary>
+    public static IReadOnlyList<string> JmesPathFixtures { get; } =
+        [JmesPathProfileFixture, JmesPathAgentProjectionFixture];
+
+    /// <summary>
     /// The expression validator a fixture needs when it is loaded through the reader.
     /// </summary>
     /// <remarks>
-    /// Every fixture but the JMESPath one carries no output projection, so the reader's refusal
-    /// for an unvalidated expression never triggers and no validator is needed. The JMESPath
-    /// fixture is structurally authorable and schema-valid, which is what these corpus tests
-    /// assert; whether its expression is valid language is decided by a confined worker, and that
-    /// is covered where a worker can actually run.
+    /// Every fixture outside <see cref="JmesPathFixtures"/> carries no output projection, so the
+    /// reader's refusal for an unvalidated expression never triggers and no validator is needed.
+    /// A JMESPath fixture is structurally authorable and schema-valid, which is what these corpus
+    /// tests assert; whether its expression is valid language is decided by a confined worker, and
+    /// that is covered where a worker can actually run.
     /// </remarks>
     public static IProjectionExpressionValidator? ValidatorFor(string fixture) =>
-        string.Equals(fixture, JmesPathProfileFixture, StringComparison.Ordinal)
+        JmesPathFixtures.Contains(fixture, StringComparer.Ordinal)
             ? PermissiveProjectionValidator.Instance
             : null;
 

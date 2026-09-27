@@ -63,7 +63,8 @@ public sealed class FixtureCorpusTests
     {
         var expected = new[]
         {
-            "compiled", "compound", "credentials", "files", "jmespath-profile-1", "minimal",
+            "compiled", "compound", "credentials", "files", "jmespath-agent-projection",
+            "jmespath-profile-1", "minimal",
             "multi-surface", "refs", "sealed-bundle",
             "search", "transformed", "two-origins",
             "manifest-0.3/challenge-session", "manifest-0.3/exchange", "manifest-0.3/managed-provider",
@@ -161,6 +162,37 @@ public sealed class FixtureCorpusTests
         Assert.Contains(
             result.Errors,
             diagnostic => string.Equals(diagnostic.Code, ManifestDiagnosticCodes.SealRequired, System.StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// One operation carrying BOTH output mechanisms, each accepted under its own rules.
+    /// </summary>
+    /// <remarks>
+    /// The two features were specified independently and met only at integration, so the
+    /// authorable combined shape had no fixture. This is the load-boundary half of that
+    /// composition: the transformation lives under the binding and the agent projection on the
+    /// operation, each read by its own reader, and the load contract is what fixes the order
+    /// rather than the order the members happen to appear in. The execution-order half needs a
+    /// worker and lives with the projection execution tests.
+    /// </remarks>
+    [Fact]
+    public void JmesPathAgentProjectionFixtureCarriesBothMembersUnderTheirOwnKeys()
+    {
+        var manifest = ReadFixture(ManifestCorpus.JmesPathAgentProjectionFixture).Manifest;
+
+        Assert.NotNull(manifest);
+
+        var operation = manifest!.AgentSurface.Operation("search");
+
+        Assert.NotNull(operation);
+
+        var transformed = Assert.IsType<TransformedHttpBinding>(operation!.Binding);
+        var transformation = Assert.IsType<ManifestOutputProjection.JmesPathVariant>(transformed.Output);
+        Assert.Equal("results[*].{id: id, name: name}", transformation.Expression);
+
+        var agent = Assert.IsType<AgentOutputProjection>(operation.OutputProjection);
+        Assert.Equal("/items", agent.BodyTarget);
+        Assert.Single(agent.Metadata);
     }
 
     [Fact]
