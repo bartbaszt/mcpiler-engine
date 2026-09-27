@@ -21,3 +21,9 @@ tests/fixtures/manifests/manifest-0.3/oauth1-authorization/** -text
 # canonical JSON output bytes, so a checkout that materialized them as CRLF would change what the
 # tests assert and break the cross-repository comparison in one step.
 tests/fixtures/jmespath/** -text
+
+# The compatibility contract corpus is duplicated byte for byte into the MCPiler Platform tree.
+# Platform compares these copies with File.ReadAllBytes, so a Windows host with core.autocrlf
+# enabled must not materialize them as CRLF: the descriptor and the failure table would stop
+# being byte-identical to their Platform twins while the committed blobs still match.
+tests/fixtures/compatibility/** -text
