@@ -1,4 +1,5 @@
 using MCPiler.Engine.Host.Hosting;
+using MCPiler.Engine.Host.Mcp;
 using MCPiler.Engine.Runtime;
 
 using Microsoft.AspNetCore.Http;
@@ -33,9 +34,23 @@ internal static class FileTransferEndpoints
     {
         ArgumentNullException.ThrowIfNull(context);
 
-        if (!TransferPath.TryParse(context.Request.Path.Value, out TransferPath transfer))
+        string decodedPath = context.Request.Path.Value ?? "/";
+        if (!TransferPath.TryParse(decodedPath, out _))
         {
             return false;
+        }
+
+        // A decoded transfer-looking path whose raw target encoded or case-folded the Engine-owned
+        // /files/ suffix is not a transfer endpoint. Intercept it here rather than letting the
+        // managed MCP catch-all reinterpret the same request as a surface.
+        if (!RequestAddress.TryResolveCanonicalTransfer(
+                context,
+                out TransferPath transfer,
+                out _))
+        {
+            context.SetEndpoint(null);
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return true;
         }
 
         // The transfer child is dispatched by middleware rather than by an endpoint. Clear any
