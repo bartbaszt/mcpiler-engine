@@ -16,9 +16,12 @@ namespace MCPiler.Engine.Host.Files;
 /// is why the admission matters here as much as on the MCP routes themselves.
 /// </para>
 /// <para>
-/// File mode maps one route per child because the mount set never changes. A managed listener
-/// maps one template, which also matches the children, so the dispatch middleware recognises a
-/// transfer path and serves it there instead. Both paths reach the same handlers.
+/// File mode maps one low-precedence catch-all fallback and recognises transfer children from
+/// the request path at runtime. A literal ASP.NET route cannot represent the double slash that a
+/// slash-terminated parent resource intentionally produces (for example
+/// <c>/api/full//files/upload</c>). The fallback preserves that spelling without weakening the
+/// parent-resource contract. Managed mode already has a catch-all MCP template and recognises the
+/// same transfer path in middleware. Both paths reach the same handlers.
 /// </para>
 /// </remarks>
 internal static class FileTransferEndpoints
@@ -26,35 +29,22 @@ internal static class FileTransferEndpoints
     private const string UploadSuffix = "/files/upload";
     private const string DownloadSuffix = "/files/{capability}";
 
-    public static void Map(WebApplication app, MountSet mounts)
+    public static void Map(WebApplication app)
     {
         ArgumentNullException.ThrowIfNull(app);
-        ArgumentNullException.ThrowIfNull(mounts);
 
-        foreach (MountedSurfaceAddress address in mounts.Addresses)
+        // Specific MCP/health/operator routes outrank this catch-all. Unknown paths still end in a
+        // normal 404; only paths recognised by TransferPath reach the transfer handlers.
+        app.MapPost(McpRegistration.ManagedTemplate, FileModeFallbackAsync);
+        app.MapGet(McpRegistration.ManagedTemplate, FileModeFallbackAsync);
+    }
+
+    private static async Task FileModeFallbackAsync(HttpContext context)
+    {
+        if (!await TryServeAsync(context).ConfigureAwait(false))
         {
-            MapSurface(app, address.Path);
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
         }
-    }
-
-    private static void MapSurface(WebApplication app, string parentPath)
-    {
-        MapParentResource(app, parentPath);
-
-        // A slash-terminated MCP URL is a distinct protected resource. Its transfer children need
-        // a distinct URL spelling too; concatenating "/files/..." to a parent that already ends in
-        // slash intentionally produces the double slash that preserves the exact parent identity.
-        MapParentResource(app, parentPath + "/");
-    }
-
-    private static void MapParentResource(WebApplication app, string parentResourcePath)
-    {
-        SurfaceEndpoint metadata = new(
-            RequestAddress.NormalizeResolutionAddress(parentResourcePath),
-            authorizationResourcePath: parentResourcePath);
-
-        app.MapPost(parentResourcePath + UploadSuffix, UploadAsync).WithMetadata(metadata);
-        app.MapGet(parentResourcePath + DownloadSuffix, DownloadAsync).WithMetadata(metadata);
     }
 
     /// <summary>
