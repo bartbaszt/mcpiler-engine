@@ -18,13 +18,16 @@ internal sealed class EngineRequestGenerationAdmissionMiddleware
 {
     private readonly RequestDelegate _next;
     private readonly EngineGenerationManager _generations;
+    private readonly HostBinding _binding;
 
     public EngineRequestGenerationAdmissionMiddleware(
         RequestDelegate next,
-        EngineGenerationManager generations)
+        EngineGenerationManager generations,
+        HostBinding binding)
     {
         _next = next;
         _generations = generations;
+        _binding = binding;
     }
 
     public async Task InvokeAsync(HttpContext context)
@@ -53,6 +56,13 @@ internal sealed class EngineRequestGenerationAdmissionMiddleware
         {
             if (!lease.Generation.TryResolve(address, out SurfaceResolution? resolved)
                 || resolved is null)
+            {
+                await RefuseSilentlyAsync(context).ConfigureAwait(false);
+                return;
+            }
+
+            if (resolved.Mount.RequiresAuthorization()
+                && !AuthorityAllowed(context.Request.Host.Value, _binding.AllowedHosts))
             {
                 await RefuseSilentlyAsync(context).ConfigureAwait(false);
                 return;
@@ -120,6 +130,11 @@ internal sealed class EngineRequestGenerationAdmissionMiddleware
         authorizationResourcePath = route.ResolveAuthorizationResourcePath(context);
         return true;
     }
+
+    internal static bool AuthorityAllowed(string? authority, IReadOnlyList<string> allowed)
+        => !string.IsNullOrEmpty(authority)
+            && allowed.Any(candidate =>
+                string.Equals(candidate, authority, StringComparison.OrdinalIgnoreCase));
 
     private static Task RefuseSilentlyAsync(HttpContext context)
     {
