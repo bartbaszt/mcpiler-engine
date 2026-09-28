@@ -201,20 +201,30 @@ public sealed class HostCommandsTests : IDisposable
     }
 
     [Fact]
-    public async Task Inspect_refuses_a_surface_that_collides_with_transfer_namespace()
+    public async Task Inspect_and_serve_refuse_a_surface_that_collides_with_transfer_namespace()
     {
-        CommandOutcome outcome = await HostCommands.RunAsync(
-            [
-                "inspect",
-                "--mount", "/api=" + SurfaceSlugManifest("transfer-collision", "files/upload"),
-                "--file-store-root", Store(),
-            ],
+        string manifest = SurfaceSlugManifest("transfer-collision", "files/upload");
+        string store = Store();
+        string[] settings =
+        [
+            "--mount", "/api=" + manifest,
+            "--file-store-root", store,
+        ];
+
+        CommandOutcome inspect = await HostCommands.RunAsync(
+            ["inspect", .. settings],
+            Identity,
+            TestContext.Current.CancellationToken);
+        CommandOutcome serve = await HostCommands.RunAsync(
+            ["serve", .. settings],
             Identity,
             TestContext.Current.CancellationToken);
 
-        Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
-        Assert.Contains("host/surface-address-transfer-collision", outcome.Output, StringComparison.Ordinal);
-        Assert.Contains("fingerprint=", outcome.Output, StringComparison.Ordinal);
+        Assert.Equal(ExitCodes.Configuration, inspect.ExitCode);
+        Assert.Equal(ExitCodes.Configuration, serve.ExitCode);
+        Assert.Contains("host/surface-address-transfer-collision", inspect.Output, StringComparison.Ordinal);
+        Assert.Contains("host/surface-address-transfer-collision", serve.Output, StringComparison.Ordinal);
+        Assert.Contains("fingerprint=", inspect.Output, StringComparison.Ordinal);
     }
 
     [Fact]
