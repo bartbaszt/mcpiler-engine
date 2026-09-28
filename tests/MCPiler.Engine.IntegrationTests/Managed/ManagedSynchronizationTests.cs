@@ -163,6 +163,131 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Open_to_protected_without_an_issuer_is_refused_and_keeps_the_open_generation()
+    {
+        var current = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        await using var platform = await PlatformAsync(_ => Response.Generation(current));
+        await using ManagedProcess engine = await StartAsync(
+            platform,
+            allowedHosts: ["mcp.example.test"]);
+
+        current = Generation("g2", ServedManifests.ProtectedOneSurface, prefix: "/mcp/connector");
+
+        await WaitForAsync(
+            () =>
+            {
+                lock (engine.Diagnostics)
+                {
+                    return engine.Diagnostics.Any(message =>
+                        message.Contains("auth/issuer-missing", StringComparison.Ordinal));
+                }
+            });
+
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+
+        using McpHttpSession session = await McpHttpSession.OpenAsync(
+            engine.At("/mcp/connector/full"),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(
+            ["list-pets", "add-pet"],
+            Names(await session.RequestAsync("tools/list", 2, TestContext.Current.CancellationToken)));
+    }
+
+    [Fact]
+    public async Task Open_to_protected_without_an_allowed_host_is_refused_and_keeps_the_open_generation()
+    {
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(
+            active: true,
+            TestContext.Current.CancellationToken);
+
+        var current = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        await using var platform = await PlatformAsync(_ => Response.Generation(current));
+        await using ManagedProcess engine = await StartAsync(
+            platform,
+            authorization: AuthorizationFor(authorization.Address),
+            allowedHosts: []);
+
+        current = Generation("g2", ServedManifests.ProtectedOneSurface, prefix: "/mcp/connector");
+
+        await WaitForAsync(
+            () =>
+            {
+                lock (engine.Diagnostics)
+                {
+                    return engine.Diagnostics.Any(message =>
+                        message.Contains("auth/allowed-host-missing", StringComparison.Ordinal));
+                }
+            });
+
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+    }
+
+    [Fact]
+    public async Task Open_to_protected_with_issuer_and_allowed_host_activates_and_requires_bearer_authentication()
+    {
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(
+            active: true,
+            TestContext.Current.CancellationToken);
+
+        var current = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        await using var platform = await PlatformAsync(_ => Response.Generation(current));
+        await using ManagedProcess engine = await StartAsync(
+            platform,
+            authorization: AuthorizationFor(authorization.Address));
+
+        current = Generation("g2", ServedManifests.ProtectedOneSurface, prefix: "/mcp/connector");
+        await WaitForAsync(() => engine.Worker.ActiveGenerationId == "g2");
+
+        Uri endpoint = engine.At("/mcp/connector/full");
+        using (HttpClient anonymous = new())
+        using (HttpResponseMessage refused = await anonymous.PostAsync(
+            endpoint,
+            new StringContent(
+                """{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}""",
+                Encoding.UTF8,
+                "application/json"),
+            TestContext.Current.CancellationToken))
+        {
+            Assert.Equal(HttpStatusCode.Unauthorized, refused.StatusCode);
+        }
+
+        string token = authorization.Mint(endpoint.AbsoluteUri.TrimEnd('/'), string.Empty);
+        using McpHttpSession session = await McpHttpSession.OpenAsync(
+            endpoint,
+            TestContext.Current.CancellationToken,
+            bearerToken: token);
+        Assert.Equal(
+            ["list-pets", "add-pet"],
+            Names(await session.RequestAsync("tools/list", 2, TestContext.Current.CancellationToken)));
+    }
+
+    [Fact]
+    public async Task Protected_to_open_activates_and_the_new_generation_serves_without_a_bearer()
+    {
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(
+            active: true,
+            TestContext.Current.CancellationToken);
+
+        var current = Generation("g1", ServedManifests.ProtectedOneSurface, prefix: "/mcp/connector");
+        await using var platform = await PlatformAsync(_ => Response.Generation(current));
+        await using ManagedProcess engine = await StartAsync(
+            platform,
+            authorization: AuthorizationFor(authorization.Address));
+
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+
+        current = Generation("g2", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        await WaitForAsync(() => engine.Worker.ActiveGenerationId == "g2");
+
+        using McpHttpSession session = await McpHttpSession.OpenAsync(
+            engine.At("/mcp/connector/full"),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(
+            ["list-pets", "add-pet"],
+            Names(await session.RequestAsync("tools/list", 2, TestContext.Current.CancellationToken)));
+    }
+
+    [Fact]
     public async Task A_candidate_that_cannot_be_loaded_leaves_the_active_generation_serving()
     {
         var original = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
@@ -902,6 +1027,9 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             answer,
             delay ?? TimeSpan.Zero,
             TestContext.Current.CancellationToken);
+
+    private static HostAuthorizationOptions AuthorizationFor(Uri issuer)
+        => new(issuer.AbsoluteUri, HostTokenValidation.Introspection);
 
     private static Dictionary<string, object?> Generation(
         string id,

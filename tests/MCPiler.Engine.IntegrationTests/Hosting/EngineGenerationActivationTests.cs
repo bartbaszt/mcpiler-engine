@@ -89,6 +89,28 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
         await retired.WaitAsync(TestContext.Current.CancellationToken);
     }
 
+    [Fact]
+    public async Task A_protected_activation_is_hidden_when_the_listener_has_no_authorization_boundary()
+    {
+        await using ManagedListener listener = await StartAsync(
+            ServedManifests.OneSurface,
+            authorization: null,
+            allowHostWithoutAuthorization: true);
+
+        await listener.ActivateAsync(Load("/api", ServedManifests.ProtectedOneSurface));
+
+        using HttpClient http = new();
+        using HttpResponseMessage response = await http.PostAsync(
+            listener.At("/api/full"),
+            new StringContent(
+                """{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}""",
+                Encoding.UTF8,
+                "application/json"),
+            Token);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
     /// <summary>
     /// A surface an activation removed stops being reachable for a brand-new request.
     /// </summary>
@@ -1145,7 +1167,8 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
         string manifest,
         HostAuthorizationOptions? authorization = null,
         string? fileStoreRoot = null,
-        string? operatorSecret = null)
+        string? operatorSecret = null,
+        bool allowHostWithoutAuthorization = false)
     {
         string store = fileStoreRoot ?? Store();
         ManagedListener listener = await ManagedListener.StartAsync(
@@ -1153,7 +1176,8 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
             store,
             TestContext.Current.CancellationToken,
             authorization,
-            operatorSecret);
+            operatorSecret,
+            allowHostWithoutAuthorization);
 
         _listeners.Add(listener);
         return listener;
@@ -1422,7 +1446,8 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
             string fileStoreRoot,
             CancellationToken cancellationToken,
             HostAuthorizationOptions? authorization = null,
-            string? operatorSecret = null)
+            string? operatorSecret = null,
+            bool allowHostWithoutAuthorization = false)
         {
             ArgumentNullException.ThrowIfNull(initial);
 
@@ -1442,7 +1467,9 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
                     Authorization: authorization,
                     HostLifecycleOptions.Default)
                 {
-                    AllowedHosts = authorization is null ? [] : [authority],
+                    AllowedHosts = authorization is null && !allowHostWithoutAuthorization
+                        ? []
+                        : [authority],
                     ResponseCacheOperatorSecret = operatorSecret,
                 },
                 drain,
