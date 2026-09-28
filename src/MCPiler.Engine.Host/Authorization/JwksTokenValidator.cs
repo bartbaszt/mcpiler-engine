@@ -100,7 +100,7 @@ internal sealed class JwksTokenValidator : ITokenValidator
 
     private async Task<TokenVerification> ValidateWithKeysAsync(string token, JsonWebKeySet keys)
     {
-        if (!TrySigningKeys(keys, out IReadOnlyList<SecurityKey>? signingKeys)
+        if (!TrySigningKeys(keys, out IReadOnlyList<SecurityKey> signingKeys)
             || signingKeys.Count == 0)
         {
             return TokenVerification.Inactive;
@@ -172,7 +172,7 @@ internal sealed class JwksTokenValidator : ITokenValidator
             DateTimeOffset now = _clock.GetUtcNow();
 
             if (fetched is not null
-                && TrySigningKeys(fetched, out IReadOnlyList<SecurityKey>? signingKeys)
+                && TrySigningKeys(fetched, out IReadOnlyList<SecurityKey> signingKeys)
                 && signingKeys.Count > 0)
             {
                 _cachedKeys = fetched;
@@ -195,12 +195,12 @@ internal sealed class JwksTokenValidator : ITokenValidator
             : null;
 
     private static bool ContainsKey(JsonWebKeySet keys, string kid)
-        => TrySigningKeys(keys, out IReadOnlyList<SecurityKey>? signingKeys)
+        => TrySigningKeys(keys, out IReadOnlyList<SecurityKey> signingKeys)
             && signingKeys.Any(key => string.Equals(key.KeyId, kid, StringComparison.Ordinal));
 
     private static bool TrySigningKeys(
         JsonWebKeySet keys,
-        out IReadOnlyList<SecurityKey>? signingKeys)
+        out IReadOnlyList<SecurityKey> signingKeys)
     {
         try
         {
@@ -210,7 +210,7 @@ internal sealed class JwksTokenValidator : ITokenValidator
         catch (Exception failure)
             when (failure is ArgumentException or JsonException or SecurityTokenException)
         {
-            signingKeys = null;
+            signingKeys = [];
             return false;
         }
     }
