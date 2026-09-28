@@ -177,11 +177,16 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
                 // that omitted it would not describe the real one.
                 context.Response.StatusCode = 200;
                 context.Response.ContentType = "application/json";
-                await context.Response.WriteAsync(
-                    advertisesIntrospection
-                        ? $"""{ "issuer": "http://{{host}}/", "introspection_endpoint": "http://{{host}}/introspect", "jwks_uri": "http://{{host}}/jwks", "introspection_endpoint_auth_methods_supported": ["client_secret_basic"] }"""
-                        : $"""{ "issuer": "http://{{host}}/", "jwks_uri": "http://{{host}}/jwks" }""",
-                    context.RequestAborted);
+                string issuer = "http://" + host + "/";
+                string metadata = advertisesIntrospection
+                    ? "{\"issuer\":\"" + issuer
+                        + "\",\"introspection_endpoint\":\"http://" + host
+                        + "/introspect\",\"jwks_uri\":\"http://" + host
+                        + "/jwks\",\"introspection_endpoint_auth_methods_supported\":[\"client_secret_basic\"]}"
+                    : "{\"issuer\":\"" + issuer
+                        + "\",\"jwks_uri\":\"http://" + host + "/jwks\"}";
+
+                await context.Response.WriteAsync(metadata, context.RequestAborted);
                 return;
             }
 
