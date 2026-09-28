@@ -859,7 +859,7 @@ public sealed class HostCommandsTests : IDisposable
             Path.Combine(directory, "manifest.json"),
             OpenManifestText.Replace(
                 "\"name\": \"Open API\",",
-                $"\"name\": \"Open API\", \"surfaces\": [{{ \"slug\": \"{slug}\", \"isDefault\": true }}],",
+                $"\"name\": \"Open API\", \"surfaces\": [{{ \"slug\": \"{slug}\", \"isDefault\": true, \"operations\": [{{ \"operation\": \"list-pets\", \"exposure\": \"direct\" }}] }}],",
                 StringComparison.Ordinal));
         return directory;
     }
