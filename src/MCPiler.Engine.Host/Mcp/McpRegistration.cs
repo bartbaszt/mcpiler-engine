@@ -140,6 +140,39 @@ internal static class RequestAddress
             : rawTarget[pathStart..];
     }
 
+    /// <summary>
+    /// Resolves a transfer child only when its protocol-owned spelling is canonical in both the
+    /// decoded routing path and the raw request target.
+    /// </summary>
+    /// <remarks>
+    /// Parent-resource bytes may remain percent-encoded in the raw target, but the Engine-owned
+    /// <c>/files/...</c> suffix must be literal. Otherwise routing and authorization would parse
+    /// two different resources from the same request.
+    /// </remarks>
+    internal static bool TryResolveCanonicalTransfer(
+        HttpContext context,
+        out Files.TransferPath decodedTransfer,
+        out Files.TransferPath rawTransfer)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        string decodedPath = context.Request.Path.Value ?? "/";
+        if (!Files.TransferPath.TryParse(decodedPath, out decodedTransfer))
+        {
+            rawTransfer = default;
+            return false;
+        }
+
+        string rawPath = RawPath(context);
+        if (!Files.TransferPath.TryParse(rawPath, out rawTransfer))
+        {
+            return false;
+        }
+
+        return decodedTransfer.Kind == rawTransfer.Kind
+            && string.Equals(decodedTransfer.Capability, rawTransfer.Capability, StringComparison.Ordinal);
+    }
+
     /// <summary>Resolves the decoded request to the surface address that governs it.</summary>
     internal static string Resolve(HttpContext context, SurfaceEndpoint route)
     {
