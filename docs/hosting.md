@@ -502,6 +502,7 @@ docker run --rm \
   --file-store-root /data \
   --issuer https://idp.example.com \
   --token-validation jwks \
+  --allowed-host mcp.example.com \
   --listen http://0.0.0.0:8080
 ```
 
@@ -528,6 +529,7 @@ docker run --rm \
   --runtime-state-key-file /run/secrets/engine-runtime-state-key \
   --issuer https://idp.example.com \
   --token-validation jwks \
+  --allowed-host mcp.example.com \
   --listen http://0.0.0.0:8080
 ```
 
