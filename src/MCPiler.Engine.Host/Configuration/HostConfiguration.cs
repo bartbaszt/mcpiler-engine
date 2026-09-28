@@ -113,6 +113,16 @@ public sealed record HostBinding(
     public IReadOnlyList<string> AllowedOrigins { get; init; } = [];
 
     /// <summary>
+    /// Authorities accepted in the HTTP Host/:authority field for protected MCP resources.
+    /// </summary>
+    /// <remarks>
+    /// Audience identity includes the authority. Keeping an explicit deployment allow-list prevents
+    /// a caller from choosing that part of the protected-resource identity with an arbitrary Host
+    /// header. Direct concrete listeners derive their own authority when no value is supplied.
+    /// </remarks>
+    public IReadOnlyList<string> AllowedHosts { get; init; } = [];
+
+    /// <summary>
     /// The dedicated response-cache operator secret, or null when the operator channel is absent.
     /// </summary>
     /// <remarks>
@@ -396,6 +406,12 @@ public static class HostConfiguration
     /// </remarks>
     public const string AllowedOriginKey = "allowed-origin";
 
+    /// <summary>
+    /// Repeatable public authority accepted for protected resource identity, for example
+    /// <c>mcp.example.test</c> or <c>mcp.example.test:8443</c>.
+    /// </summary>
+    public const string AllowedHostKey = "allowed-host";
+
     private static readonly string[] Simple =
     [
         FileStoreRootKey,
@@ -425,6 +441,7 @@ public static class HostConfiguration
         DeploymentSecretFileKey,
         TrustedProxyKey,
         AllowedOriginKey,
+        AllowedHostKey,
     ];
 
     /// <summary>Every key this deployable accepts, excluding the two prefixed families.</summary>
@@ -502,6 +519,7 @@ public static class HostConfiguration
         string? deploymentSecretFile = null;
         List<string> trustedProxies = [];
         List<string> allowedOrigins = [];
+        List<string> allowedHosts = [];
 
         foreach ((string key, string value) in settings)
         {
@@ -633,6 +651,13 @@ public static class HostConfiguration
                     }
 
                     break;
+                case AllowedHostKey:
+                    if (PublicAuthority(key, value, rejected) is { } authority)
+                    {
+                        allowedHosts.Add(authority);
+                    }
+
+                    break;
                 default:
                     rejected.Add($"'{key}' is not a setting this host accepts. It accepts {string.Join(", ", Simple)}, '{MountNarrowingPrefix}{{prefix}}:{{bound}}' and '{FloorPrefix}{{bound}}'.");
                     break;
@@ -680,6 +705,23 @@ public static class HostConfiguration
         ManagedSyncOptions? managed = BindManaged(
             mode, managementEndpoint, deploymentId, deploymentSecretFile, rejected);
 
+        if (authorization is not null
+            && transport is HostTransport.Http
+            && allowedHosts.Count == 0
+            && TryListenerAuthority(listen, out string? listenerAuthority))
+        {
+            allowedHosts.Add(listenerAuthority!);
+        }
+
+        if (authorization is not null
+            && transport is HostTransport.Http
+            && allowedHosts.Count == 0)
+        {
+            rejected.Add(
+                $"Protected HTTP serving requires at least one '{AllowedHostKey}' when '{ListenKey}' "
+                + "does not name one concrete authority.");
+        }
+
         if (rejected.Count > 0)
         {
             binding = null;
@@ -725,6 +767,7 @@ public static class HostConfiguration
             Managed = managed,
             TrustedProxies = trustedProxies,
             AllowedOrigins = allowedOrigins,
+            AllowedHosts = allowedHosts,
             ResponseCacheOperatorSecret = responseCacheOperatorSecret,
         };
         refusals = [];
@@ -748,6 +791,42 @@ public static class HostConfiguration
 
         rejected.Add($"'{key}' was given '{value}'. Name an IP address such as '172.28.0.2'.");
         return null;
+    }
+
+    private static string? PublicAuthority(string key, string value, List<string> rejected)
+    {
+        if (value.Length > 0
+            && !value.Contains('/', StringComparison.Ordinal)
+            && !value.Contains('?', StringComparison.Ordinal)
+            && !value.Contains('#', StringComparison.Ordinal)
+            && Uri.TryCreate("http://" + value, UriKind.Absolute, out Uri? parsed)
+            && string.IsNullOrEmpty(parsed.UserInfo)
+            && parsed.AbsolutePath == "/"
+            && string.IsNullOrEmpty(parsed.Query)
+            && string.IsNullOrEmpty(parsed.Fragment))
+        {
+            return parsed.Authority;
+        }
+
+        rejected.Add(
+            $"'{key}' was given '{value}'. Name one HTTP authority such as 'mcp.example.test' "
+            + "or 'mcp.example.test:8443', without a scheme, path, query or fragment.");
+        return null;
+    }
+
+    private static bool TryListenerAuthority(string listen, out string? authority)
+    {
+        authority = null;
+
+        if (!Uri.TryCreate(listen, UriKind.Absolute, out Uri? parsed)
+            || parsed.Port == 0
+            || parsed.Host is "0.0.0.0" or "::" or "*" or "+")
+        {
+            return false;
+        }
+
+        authority = parsed.Authority;
+        return true;
     }
 
     /// <summary>
