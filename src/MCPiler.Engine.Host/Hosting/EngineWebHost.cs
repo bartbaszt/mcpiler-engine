@@ -206,6 +206,7 @@ public static class EngineWebHost
             });
         }
 
+        builder.Services.AddSingleton(binding);
         builder.Services.AddSingleton(execution);
         builder.Services.AddSingleton(drain);
         builder.Services.AddSingleton(generations);
@@ -241,7 +242,8 @@ public static class EngineWebHost
                         // middleware uses, so the two can never disagree about protection.
                         if (SurfaceMetadata.MountRequiresAuthorization(
                                 context.HttpContext,
-                                generations) is not true)
+                                generations,
+                                binding.AllowedHosts) is not true)
                         {
                             context.SkipHandler();
                             return Task.CompletedTask;
