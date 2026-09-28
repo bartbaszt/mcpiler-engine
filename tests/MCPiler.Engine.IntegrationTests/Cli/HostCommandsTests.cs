@@ -550,6 +550,56 @@ public sealed class HostCommandsTests : IDisposable
 
     /// <summary>An open mount inspects without any refusal, with no issuer configured.</summary>
     [Fact]
+    public async Task Inspect_requires_an_allowed_host_for_a_protected_wildcard_listener()
+    {
+        string[] settings =
+        [
+            "--file-store-root", Store(),
+            "--mount", "/api=" + ScopedManifest("wildcard-protected"),
+            "--issuer", "https://issuer.example",
+            "--token-validation", "introspection",
+            "--introspection-endpoint", "https://issuer.example/introspect",
+            "--listen", "http://0.0.0.0:8080",
+        ];
+
+        CommandOutcome refused = await HostCommands.RunAsync(
+            ["inspect", .. settings],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, refused.ExitCode);
+        Assert.Contains("auth/allowed-host-missing", refused.Output, StringComparison.Ordinal);
+
+        CommandOutcome admitted = await HostCommands.RunAsync(
+            ["inspect", .. settings, "--allowed-host", "mcp.example.com"],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Success, admitted.ExitCode);
+        Assert.DoesNotContain("auth/allowed-host-missing", admitted.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Open_mount_does_not_require_an_allowed_host_only_because_issuer_settings_exist()
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "inspect",
+                "--file-store-root", Store(),
+                "--mount", "/api=" + OpenManifest("wildcard-open"),
+                "--issuer", "https://issuer.example",
+                "--token-validation", "introspection",
+                "--introspection-endpoint", "https://issuer.example/introspect",
+                "--listen", "http://0.0.0.0:8080",
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Success, outcome.ExitCode);
+        Assert.DoesNotContain("auth/allowed-host-missing", outcome.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Inspect_reports_an_open_mount_without_a_refusal()
     {
         CommandOutcome outcome = await HostCommands.RunAsync(
