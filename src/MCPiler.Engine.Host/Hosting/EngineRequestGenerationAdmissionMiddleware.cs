@@ -30,15 +30,18 @@ internal sealed class EngineRequestGenerationAdmissionMiddleware
     public async Task InvokeAsync(HttpContext context)
     {
         SurfaceEndpoint? route = context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>();
-        string? address = AddressOf(context, route);
+
+        if (!TryAddressOf(context, route, out string? address, out string authorizationResourcePath))
+        {
+            await RefuseSilentlyAsync(context).ConfigureAwait(false);
+            return;
+        }
 
         if (address is null)
         {
             await _next(context).ConfigureAwait(false);
             return;
         }
-
-        string authorizationResourcePath = AuthorizationResourcePathOf(context, route);
 
         if (!_generations.TryLease(out EngineGenerationLease? lease) || lease is null)
         {
@@ -81,36 +84,42 @@ internal sealed class EngineRequestGenerationAdmissionMiddleware
         }
     }
 
-    private static string? AddressOf(HttpContext context, SurfaceEndpoint? route)
+    private static bool TryAddressOf(
+        HttpContext context,
+        SurfaceEndpoint? route,
+        out string? address,
+        out string authorizationResourcePath)
     {
-        if (route is not null)
+        string decodedPath = context.Request.Path.Value ?? "/";
+
+        if (TransferPath.TryParse(decodedPath, out _))
         {
-            return RequestAddress.Resolve(context, route);
+            if (!RequestAddress.TryResolveCanonicalTransfer(
+                    context,
+                    out TransferPath decodedTransfer,
+                    out TransferPath rawTransfer))
+            {
+                address = null;
+                authorizationResourcePath = string.Empty;
+                return false;
+            }
+
+            address = RequestAddress.NormalizeResolutionAddress(decodedTransfer.ParentAddress);
+            authorizationResourcePath = rawTransfer.ParentAddress;
+            return true;
         }
 
-        // A managed catch-all can receive a transfer child before the transfer dispatcher clears
-        // the endpoint. Recognize it here so parent authorization and transfer execution share the
-        // same admission even when endpoint routing exposes no SurfaceEndpoint metadata for the
-        // child path.
-        return TransferPath.TryParse(context.Request.Path.Value, out TransferPath transfer)
-            ? RequestAddress.NormalizeResolutionAddress(transfer.ParentAddress)
-            : null;
-    }
-
-    private static string AuthorizationResourcePathOf(HttpContext context, SurfaceEndpoint? route)
-    {
-        if (route is not null)
+        if (route is null)
         {
-            return route.ResolveAuthorizationResourcePath(context);
+            address = null;
+            authorizationResourcePath = string.Empty;
+            return true;
         }
 
-        string rawPath = RequestAddress.RawPath(context);
-
-        return TransferPath.TryParse(rawPath, out TransferPath transfer)
-            ? transfer.ParentAddress
-            : rawPath;
+        address = RequestAddress.Resolve(context, route);
+        authorizationResourcePath = route.ResolveAuthorizationResourcePath(context);
+        return true;
     }
-
 
     private static Task RefuseSilentlyAsync(HttpContext context)
     {
