@@ -48,9 +48,10 @@ Exit code `78` means Engine deliberately refused the configuration. Nothing is s
 
 Do not treat it as a crash. Run the same configuration through `inspect`; for HTTP it uses the
 same Manifest loading/narrowing and host-side startup authorization checks without opening a
-listener. If the exact HTTP configuration is unstartable, `inspect` itself also exits `78`
-while retaining the derived mount/surface/tool details in its report. This makes the command safe
-to use as a CI preflight rather than a report-only warning.
+listener. If the configuration fails one of those preflighted startup checks, `inspect` itself
+also exits `78` while retaining the derived mount/surface/tool details in its report. Listener
+binding, port conflicts and OS socket permissions are not preflighted because `inspect` opens no
+listener.
 
 Common host-level codes include:
 
@@ -63,6 +64,9 @@ Common host-level codes include:
 | `host/runtime-state-unusable` | Runtime-state root/key cannot be opened or the key format is invalid. |
 | `host/floor-unknown` / `host/limit-unknown` | A local narrowing names a bound Engine does not know. |
 | `host/floor-malformed` / `host/limit-malformed` | A narrowing value is not in the expected unit/shape. |
+| `host/surface-address-noncanonical` / `host/surface-address-reserved` / `host/surface-address-transfer-collision` | A final mounted surface address is not a canonical literal route or collides with an Engine-owned HTTP namespace. |
+| `auth/allowed-host-missing` | Protected HTTP serving has no trusted authority because the listen address is wildcard/non-concrete. Add repeatable `--allowed-host host[:port]`. |
+| `auth/issuer-discovery-unusable` | RFC 8414 discovery returned a definitive unusable HTTP response such as 4xx or an unsupported redirect. 429/5xx and transport outages remain transient. |
 | `auth/issuer-missing` | An HTTP mount is protected (the default) but the host has no issuer/validation boundary. Add `--issuer` + `--token-validation`, or explicitly set `authenticationRequired: false` only for an intentionally open mount. |
 | `auth/introspection-client-secret-unusable` | The configured introspection client secret file is missing, empty or unreadable. `inspect` and `serve` both refuse with exit 78 before opening a listener. |
 | `auth/issuer-metadata-invalid` | RFC 8414 discovery returned malformed metadata, omitted `issuer`, or declared an issuer that is not byte-identical to the configured `--issuer`. Fix the issuer URL/metadata; do not override the mismatch by trusting the discovered endpoints. |
@@ -234,6 +238,7 @@ Check:
 - the Engine connection peer is the proxy IP you configured;
 - the proxy forwards the expected scheme and client address;
 - `X-Forwarded-Proto` is not trusted from arbitrary clients;
+- the proxy preserves the public `Host` header and that exact `host[:port]` is present in repeatable `--allowed-host`;
 - the public browser origin is present in `--allowed-origin`.
 
 The response-cache operator channel requires HTTPS remotely. Plain HTTP is accepted only for a
