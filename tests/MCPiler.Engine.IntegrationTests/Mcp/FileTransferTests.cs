@@ -235,6 +235,22 @@ public sealed class FileTransferTests : IDisposable
         string parent = $"{engine.Address.Scheme}://{engine.Address.Authority}/api/full";
         string child = parent + "/files/upload";
 
+        using HttpRequestMessage spoofedAuthority = new(HttpMethod.Post, upload)
+        {
+            Content = new ByteArrayContent(UploadPayload),
+            Headers =
+            {
+                Host = "engine-b.example",
+                Authorization = new AuthenticationHeaderValue(
+                    "Bearer",
+                    authorization.Mint($"{engine.Address.Scheme}://engine-b.example/api/full", "tools.invoke")),
+            },
+        };
+        using HttpResponseMessage spoofedAuthorityResponse = await http.SendAsync(
+            spoofedAuthority,
+            Token);
+        Assert.Equal(HttpStatusCode.NotFound, spoofedAuthorityResponse.StatusCode);
+
         using HttpResponseMessage wrongAudience = await AuthorizedUploadAsync(
             http,
             upload,
