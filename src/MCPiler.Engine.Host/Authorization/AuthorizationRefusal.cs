@@ -84,7 +84,8 @@ internal static class SurfaceMetadata
     /// </remarks>
     internal static bool? MountRequiresAuthorization(
         HttpContext context,
-        EngineGenerationManager generations)
+        EngineGenerationManager generations,
+        IReadOnlyList<string> allowedHosts)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(generations);
@@ -112,10 +113,21 @@ internal static class SurfaceMetadata
 
         using (lease)
         {
-            return lease.Generation.TryResolve(resolutionAddress, out SurfaceResolution? resolved)
-                && resolved is not null
-                ? resolved.Mount.RequiresAuthorization()
-                : null;
+            if (!lease.Generation.TryResolve(resolutionAddress, out SurfaceResolution? resolved)
+                || resolved is null)
+            {
+                return null;
+            }
+
+            if (resolved.Mount.RequiresAuthorization()
+                && !EngineRequestGenerationAdmissionMiddleware.AuthorityAllowed(
+                    context.Request.Host.Value,
+                    allowedHosts))
+            {
+                return null;
+            }
+
+            return resolved.Mount.RequiresAuthorization();
         }
     }
 
