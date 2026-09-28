@@ -476,9 +476,20 @@ internal sealed class ManagedSyncWorker : IDisposable
             return false;
         }
 
+        MountSet mounts = MountSet.From(generation.Mounts);
+        IReadOnlyList<StartupRefusal> topologyRefusals = HostRouteTopologyValidation.Find(mounts);
+
+        if (topologyRefusals.Count > 0)
+        {
+            generation.Dispose();
+            StartupRefusal first = topologyRefusals[0];
+            CandidateRefused(delivery.GenerationId, first.Code, first.Message);
+            return false;
+        }
+
         EngineGeneration candidate = new(
             number,
-            MountSet.From(generation.Mounts),
+            mounts,
             generation.TakeExecution());
 
         Task retirement = _generations.Activate(candidate);
