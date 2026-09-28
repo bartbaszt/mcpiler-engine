@@ -293,28 +293,29 @@ public static class EngineWebHost
             app.UseMiddleware<MountAuthorizationMiddleware>();
         }
 
+        // Transfer children are recognised in middleware for both deployment modes. This keeps
+        // file mode capable of serving slash-terminated parent resources whose exact child URL
+        // contains a deliberate double slash, which ASP.NET route templates cannot express.
+        // Admission and authorization have already bound the request to the exact parent resource.
+        app.Use(async (context, next) =>
+        {
+            if (await FileTransferEndpoints.TryServeAsync(context).ConfigureAwait(false))
+            {
+                return;
+            }
+
+            await next(context).ConfigureAwait(false);
+        });
+
         if (managed)
         {
-            // One template for every address, because an activation may introduce a mount the
-            // process has never seen. The template also matches the transfer children, which
-            // cannot be mapped separately under a catch-all, so they are recognised from the
-            // request path before the protocol handler would see them.
-            app.Use(async (context, next) =>
-            {
-                if (await FileTransferEndpoints.TryServeAsync(context).ConfigureAwait(false))
-                {
-                    return;
-                }
-
-                await next(context).ConfigureAwait(false);
-            });
-
+            // One template for every MCP address, because an activation may introduce a mount the
+            // process has never seen.
             McpRegistration.MapManagedTemplate(app);
         }
         else
         {
             McpRegistration.MapMounts(app, generations.Current!.Mounts);
-            FileTransferEndpoints.Map(app);
         }
 
         HealthEndpoints.Map(app, binding.Runtime.FileStoreRoot, drain);
