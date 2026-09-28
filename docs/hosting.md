@@ -53,6 +53,7 @@ dotnet mcpiler-engine.dll serve \
   --file-store-root /data \
   --issuer https://idp.example.com \
   --token-validation jwks \
+  --allowed-host mcp.example.com \
   --listen http://0.0.0.0:8080
 ```
 
@@ -77,6 +78,7 @@ The host accepts the following settings:
 | `--deployment-id <id>` | Deployment identity for managed mode. Required with `--mode managed`. |
 | `--deployment-secret-file <file>` | File holding the deployment-scoped bearer secret for managed mode. Required with `--mode managed`. |
 | `--trusted-proxy <ip>` | Trusts `X-Forwarded-For`/`X-Forwarded-Proto` from this proxy address. Repeatable; IP literals only. |
+| `--allowed-host <host[:port]>` | Authority admitted for protected-resource identity. Repeatable. A concrete listen authority is used by default; wildcard listeners require an explicit value. |
 | `--allowed-origin <origin>` | Browser origin admitted on served MCP addresses. Repeatable; canonical origins only. Absent means no browser origin is admitted. |
 | `--issuer <url>` | Trusted OAuth issuer for mounts that require bearer authorization, or for any mount that does not declare `authenticationRequired: false`. |
 | `--token-validation introspection\|jwks` | Token-validation mode. Must be paired with `--issuer`. |
@@ -297,9 +299,10 @@ Protected-resource metadata is generated from the addressed public resource and 
 configured authorization server. A capable OAuth/MCP client should use that metadata rather than
 guessing the audience.
 
-Behind a TLS-terminating reverse proxy, preserve the public `Host` header and configure the proxy
-as trusted so Engine observes the public HTTPS scheme. Otherwise the canonical resource seen by
-Engine will differ from the audience minted for the public URL.
+Behind a TLS-terminating reverse proxy, preserve the public `Host` header, list that exact
+`host[:port]` with repeatable `--allowed-host`, and configure the proxy as trusted so Engine
+observes the public HTTPS scheme. Engine does not trust `X-Forwarded-Host`; a caller cannot choose
+an arbitrary authority and thereby redefine the protected-resource audience.
 
 ## Proxy deployments
 
@@ -319,8 +322,9 @@ path unchanged, or mount Engine at the public path itself.
 
 
 
-Behind a reverse proxy the public scheme and host arrive as forwarded headers. Engine ignores
-those headers unless the direct peer is named with `--trusted-proxy`:
+Behind a reverse proxy the public scheme may arrive in `X-Forwarded-Proto`, while the public
+Host must be preserved as the ordinary `Host`/`:authority` value. Engine ignores forwarded scheme
+information unless the direct peer is named with `--trusted-proxy`:
 
 ```bash
 dotnet mcpiler-engine.dll serve \
@@ -328,13 +332,15 @@ dotnet mcpiler-engine.dll serve \
   --file-store-root /data \
   --issuer https://idp.example.com \
   --token-validation jwks \
+  --allowed-host mcp.example.com \
   --trusted-proxy 172.28.0.2
 ```
 
 Only `X-Forwarded-For` and `X-Forwarded-Proto` are trusted, and only from a listed address. The
 proxy must preserve the original `Host` header unchanged; Engine never trusts `X-Forwarded-Host`.
-This matters for protected-resource metadata, which names the exact external resource address an
-MCP client must use.
+For a protected surface that authority must also match `--allowed-host`. When no explicit value is
+supplied, a concrete listen address contributes its own authority; wildcard listeners such as
+`0.0.0.0` require an explicit allowed host.
 
 ### Browser origins
 
