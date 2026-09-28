@@ -1,56 +1,33 @@
 using MCPiler.Engine.Host.Hosting;
-using MCPiler.Engine.Host.Mcp;
 using MCPiler.Engine.Runtime;
 
-using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 
 namespace MCPiler.Engine.Host.Files;
 
-/// <summary>Maps the streaming file-transfer children of every HTTP MCP surface.</summary>
+/// <summary>Serves the streaming file-transfer children of HTTP MCP surfaces.</summary>
 /// <remarks>
 /// <para>
-/// A transfer child is addressed relative to its parent MCP surface, so its metadata states the
-/// parent address and the transfer handlers consume the request's generation admission. A file
-/// handle is issued and redeemed against the same execution graph that serves the surface, which
-/// is why the admission matters here as much as on the MCP routes themselves.
+/// A transfer child is addressed relative to its parent MCP surface. The request's generation
+/// admission already names both the resolved surface and the exact protected parent resource, so a
+/// file handle is issued and redeemed against the same execution graph and resource identity as
+/// the MCP request that owns it.
 /// </para>
 /// <para>
-/// File mode maps one low-precedence catch-all fallback and recognises transfer children from
-/// the request path at runtime. A literal ASP.NET route cannot represent the double slash that a
-/// slash-terminated parent resource intentionally produces (for example
-/// <c>/api/full//files/upload</c>). The fallback preserves that spelling without weakening the
-/// parent-resource contract. Managed mode already has a catch-all MCP template and recognises the
-/// same transfer path in middleware. Both paths reach the same handlers.
+/// Both deployment modes recognise transfer children in middleware from the request path. A
+/// literal ASP.NET route cannot represent the double slash that a slash-terminated parent resource
+/// intentionally produces (for example <c>/api/full//files/upload</c>). Runtime recognition
+/// preserves that spelling without weakening the parent-resource contract.
 /// </para>
 /// </remarks>
 internal static class FileTransferEndpoints
 {
-    public static void Map(WebApplication app)
-    {
-        ArgumentNullException.ThrowIfNull(app);
-
-        // Specific MCP/health/operator routes outrank this catch-all. Unknown paths still end in a
-        // normal 404; only paths recognised by TransferPath reach the transfer handlers.
-        app.MapPost(McpRegistration.ManagedTemplate, FileModeFallbackAsync);
-        app.MapGet(McpRegistration.ManagedTemplate, FileModeFallbackAsync);
-    }
-
-    private static async Task FileModeFallbackAsync(HttpContext context)
-    {
-        if (!await TryServeAsync(context).ConfigureAwait(false))
-        {
-            context.Response.StatusCode = StatusCodes.Status404NotFound;
-        }
-    }
-
     /// <summary>
     /// Serves a transfer path recognised from the request, when the path is one.
     /// </summary>
     /// <remarks>
     /// Returns false for a path that is not a transfer child, so the caller can continue into the
-    /// protocol handler. Used by the managed listener, whose single template also matches the
-    /// children.
+    /// MCP endpoint routing. Admission and authorization run before this dispatcher.
     /// </remarks>
     internal static async Task<bool> TryServeAsync(HttpContext context)
     {
@@ -61,7 +38,8 @@ internal static class FileTransferEndpoints
             return false;
         }
 
-        SurfaceEndpoint route = new(transfer.ParentAddress, authorizationResourcePath: transfer.ParentAddress);
+        // The transfer child is dispatched by middleware rather than by an endpoint. Clear any
+        // catch-all endpoint selected for managed MCP routing before producing the transfer result.
         context.SetEndpoint(null);
 
         if (transfer.Kind == TransferPathKind.Upload)
@@ -72,7 +50,7 @@ internal static class FileTransferEndpoints
                 return true;
             }
 
-            await UploadAsync(context, route).ConfigureAwait(false);
+            await UploadAsync(context).ConfigureAwait(false);
             return true;
         }
 
@@ -82,24 +60,11 @@ internal static class FileTransferEndpoints
             return true;
         }
 
-        await DownloadAsync(context, route, transfer.Capability!).ConfigureAwait(false);
+        await DownloadAsync(context, transfer.Capability!).ConfigureAwait(false);
         return true;
     }
 
     private static async Task UploadAsync(HttpContext context)
-    {
-        SurfaceEndpoint route = RequiredSurface(context);
-        await UploadAsync(context, route).ConfigureAwait(false);
-    }
-
-    private static async Task DownloadAsync(HttpContext context)
-    {
-        SurfaceEndpoint route = RequiredSurface(context);
-        string capability = context.Request.RouteValues["capability"]?.ToString() ?? string.Empty;
-        await DownloadAsync(context, route, capability).ConfigureAwait(false);
-    }
-
-    private static async Task UploadAsync(HttpContext context, SurfaceEndpoint route)
     {
         if (context.Features.Get<EngineRequestGenerationAdmission>() is not { } admission)
         {
@@ -140,7 +105,7 @@ internal static class FileTransferEndpoints
             context.RequestAborted).ConfigureAwait(false);
     }
 
-    private static async Task DownloadAsync(HttpContext context, SurfaceEndpoint route, string capability)
+    private static async Task DownloadAsync(HttpContext context, string capability)
     {
         if (context.Features.Get<EngineRequestGenerationAdmission>() is not { } admission)
         {
@@ -190,9 +155,4 @@ internal static class FileTransferEndpoints
         ArgumentNullException.ThrowIfNull(content);
         return content.CopyToAsync(context.Response.Body, context.RequestAborted);
     }
-
-    private static SurfaceEndpoint RequiredSurface(HttpContext context)
-        => context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>()
-            ?? throw new InvalidOperationException("A mapped transfer endpoint has no parent surface metadata.");
-
 }
