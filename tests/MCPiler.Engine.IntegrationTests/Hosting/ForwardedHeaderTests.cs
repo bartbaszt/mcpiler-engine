@@ -93,6 +93,42 @@ public sealed class ForwardedHeaderTests : IDisposable
             document.RootElement.GetProperty("resource").GetString());
     }
 
+    [Theory]
+    [InlineData("example.com", "example.com")]
+    [InlineData("example.com:8080", "example.com:8080")]
+    [InlineData("example.com:80", "example.com:80")]
+    [InlineData("[::1]", "[::1]")]
+    [InlineData("[::1]:8080", "[::1]:8080")]
+    [InlineData("HOST.EXAMPLE", "host.example")]
+    public async Task A_configured_public_authority_accepts_the_matching_host_header(
+        string configuredAuthority,
+        string requestAuthority)
+    {
+        await using FakeAuthorizationServer authorization =
+            await FakeAuthorizationServer.StartAsync(active: true, Token);
+        await using LoopbackHost upstream = await UpstreamAsync();
+        string manifest = ServedManifests.Write(
+            _root,
+            "authority-" + Guid.NewGuid().ToString("N"),
+            Manifest(upstream.Address));
+
+        await using ServedEngine engine = await ServedEngine.StartAsync(
+            RuntimeOptionsFor(manifest),
+            Token,
+            authorization: AuthorizationFor(authorization.Address),
+            allowedHosts: [configuredAuthority]);
+
+        using HttpClient client = new();
+        using HttpRequestMessage request = new(
+            HttpMethod.Get,
+            new Uri(engine.At("/.well-known/oauth-protected-resource/api/full").ToString()));
+        request.Headers.Host = requestAuthority;
+
+        using HttpResponseMessage served = await client.SendAsync(request, Token);
+
+        Assert.Equal(HttpStatusCode.OK, served.StatusCode);
+    }
+
     [Fact]
     public async Task An_untrusted_client_cannot_claim_the_scheme_or_authority()
     {
