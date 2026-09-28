@@ -421,6 +421,16 @@ public static class HostCommands
 
         bool unstartable = false;
 
+        if (binding.Listener.Transport is HostTransport.Http)
+        {
+            MountSet topology = MountSet.From(result);
+            foreach (StartupRefusal topologyRefusal in HostRouteTopologyValidation.Find(topology))
+            {
+                text.Append(StartupReport.RenderUnstartable(topologyRefusal));
+                unstartable = true;
+            }
+        }
+
         if (await AuthorizationStartupValidation
                 .FindAsync(result.Mounts, binding.Authorization, binding.Listener.Transport, cancellationToken)
                 .ConfigureAwait(false) is { } authorizationRefusal)
