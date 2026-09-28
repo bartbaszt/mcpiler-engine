@@ -63,9 +63,8 @@ public sealed class FixtureCorpusTests
     {
         var expected = new[]
         {
-            "compiled", "compound", "credentials", "files", "jmespath-agent-projection",
-            "jmespath-profile-1", "minimal",
-            "multi-surface", "refs", "sealed-bundle",
+            "compiled", "compound", "credentials", "files", "jmespath-profile-1", "minimal",
+            "multi-surface", "refs", "response-cache", "response-projection-pagination", "sealed-bundle",
             "search", "transformed", "two-origins",
             "manifest-0.3/challenge-session", "manifest-0.3/exchange", "manifest-0.3/managed-provider",
             "manifest-0.3/oauth-authorization-code", "manifest-0.3/oauth-client-credentials",
@@ -127,6 +126,55 @@ public sealed class FixtureCorpusTests
         Assert.True(surface.IsDefault);
         Assert.Equal(OperationExposure.Direct, surface.ExposureOf("list-pets"));
         Assert.False(surface.EffectiveNavigator.Enabled);
+    }
+
+    [Fact]
+    public void MinimalFixtureIsExplicitlyOpenForTheLocalAuthoringWalkthrough()
+    {
+        var manifest = ReadFixture("minimal").Manifest;
+
+        Assert.NotNull(manifest);
+        Assert.False(manifest!.Server.AuthenticationRequired);
+    }
+
+    [Fact]
+    public void VectorAuthoringExampleLoadsItsExternalPayload()
+    {
+        var source = new DirectoryManifestSource(TestRepository.Absolute("examples/vectors"));
+        var result = ManifestReader.Read(source);
+
+        Assert.Empty(result.Errors.Select(diagnostic => diagnostic.ToString()).ToList());
+        Assert.True(result.Succeeded);
+        Assert.NotNull(result.Manifest);
+        Assert.True(result.Manifest!.HasVectors);
+        Assert.NotNull(result.Manifest.Vectors);
+        Assert.Equal(3, result.Manifest.Vectors!.Dimension);
+        Assert.Equal(150, result.Manifest.VectorPayload.Length);
+    }
+
+    [Fact]
+    public void TriliumUseCaseExampleLoadsAndKeepsWritesOffTheDefaultSurface()
+    {
+        var source = new DirectoryManifestSource(TestRepository.Absolute("examples/use-cases/trilium"));
+        var result = ManifestReader.Read(source);
+
+        Assert.Empty(result.Errors.Select(diagnostic => diagnostic.ToString()).ToList());
+        Assert.True(result.Succeeded);
+        Assert.NotNull(result.Manifest);
+
+        var readOnly = result.Manifest!.ResolveSurface(null);
+        var full = result.Manifest.ResolveSurface("full");
+
+        Assert.NotNull(readOnly);
+        Assert.NotNull(full);
+        Assert.True(result.Manifest.Server.AuthenticationRequired);
+        Assert.Equal(["trilium.read"], readOnly!.RequiredScopes);
+        Assert.Equal(["trilium.read", "trilium.write"], full!.RequiredScopes);
+        Assert.Equal(OperationExposure.Direct, readOnly.ExposureOf("search-notes"));
+        Assert.Equal(OperationExposure.Hidden, readOnly.ExposureOf("create-note"));
+        Assert.Equal(OperationExposure.Hidden, readOnly.ExposureOf("delete-note"));
+        Assert.Equal(OperationExposure.Direct, full.ExposureOf("create-note"));
+        Assert.Equal(OperationExposure.Direct, full.ExposureOf("delete-note"));
     }
 
     [Fact]

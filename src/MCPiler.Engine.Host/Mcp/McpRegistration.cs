@@ -3,6 +3,7 @@ using MCPiler.Engine.Runtime;
 
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.DependencyInjection;
 
 using ModelContextProtocol.AspNetCore;
@@ -45,22 +46,33 @@ internal sealed class SurfaceEndpoint
     /// </summary>
     public string? AuthorizationResourcePath { get; }
 
-    /// <summary>The address this request actually used.</summary>
+    /// <summary>The normalized address used only to resolve a mounted surface.</summary>
     /// <remarks>
-    /// A trailing slash is not part of an address. ASP.NET Core routing treats it as absent when
-    /// matching a literal pattern, and the mapped address never carries one, so it is removed here
-    /// before the address is compared.
+    /// ASP.NET Core can match a literal surface route with a trailing slash. Resolution folds that
+    /// spelling onto the mapped surface, but authorization must not: the exact request path is
+    /// carried separately by <see cref="ResolveAuthorizationResourcePath"/>.
     /// </remarks>
     public string ResolveAddress(HttpContext context)
     {
-        if (Address is { } mapped)
+        ArgumentNullException.ThrowIfNull(context);
+        return RequestAddress.NormalizeResolutionAddress(context.Request.Path.Value ?? "/");
+    }
+
+    /// <summary>The exact protected-resource path this HTTP request addressed.</summary>
+    internal string ResolveAuthorizationResourcePath(HttpContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        string path = RequestAddress.RawPath(context);
+
+        // Derive transfer parent identity from the raw request target first. This preserves
+        // trailing slashes and percent-encoding in both file and managed mode.
+        if (Files.TransferPath.TryParse(path, out Files.TransferPath transfer))
         {
-            return mapped;
+            return transfer.ParentAddress;
         }
 
-        string path = context.Request.Path.Value ?? "/";
-
-        return path.Length > 1 && path.EndsWith('/') ? path[..^1] : path;
+        return AuthorizationResourcePath ?? path;
     }
 }
 
@@ -75,22 +87,75 @@ internal sealed class SurfaceEndpoint
 /// </remarks>
 internal static class RequestAddress
 {
-    /// <summary>Resolves the request to the surface address that governs it.</summary>
+    /// <summary>
+    /// Normalizes only for mounted-surface lookup. The returned value must never be used as the
+    /// caller authorization resource, which preserves the raw request path separately.
+    /// </summary>
+    internal static string NormalizeResolutionAddress(string path)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(path);
+        return path.Length > 1 && path.EndsWith('/') ? path[..^1] : path;
+    }
+
+    /// <summary>
+    /// Returns the path bytes represented by the HTTP request target, without the query string.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="HttpRequest.Path"/> is already URL-decoded by ASP.NET Core for routing. Caller
+    /// authorization is defined over the public spelling the client used, so percent-encoding
+    /// must come from <see cref="IHttpRequestFeature.RawTarget"/> instead. Resolution continues to
+    /// use the decoded path and is therefore a separate operation.
+    /// </remarks>
+    internal static string RawPath(HttpContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+
+        string? rawTarget = context.Features.Get<IHttpRequestFeature>()?.RawTarget;
+
+        if (string.IsNullOrEmpty(rawTarget))
+        {
+            return context.Request.Path.Value ?? "/";
+        }
+
+        int pathStart = 0;
+
+        if (rawTarget[0] != '/')
+        {
+            int scheme = rawTarget.IndexOf("://", StringComparison.Ordinal);
+            if (scheme >= 0)
+            {
+                int slash = rawTarget.IndexOf('/', scheme + 3);
+                pathStart = slash >= 0 ? slash : rawTarget.Length;
+            }
+        }
+
+        if (pathStart == rawTarget.Length)
+        {
+            return "/";
+        }
+
+        int query = rawTarget.IndexOf('?', pathStart);
+        return query >= 0
+            ? rawTarget[pathStart..query]
+            : rawTarget[pathStart..];
+    }
+
+    /// <summary>Resolves the decoded request to the surface address that governs it.</summary>
     internal static string Resolve(HttpContext context, SurfaceEndpoint route)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(route);
 
-        if (route.Address is not null)
+        string path = context.Request.Path.Value ?? "/";
+
+        if (Files.TransferPath.TryParse(path, out Files.TransferPath transfer))
         {
-            return route.Address;
+            return NormalizeResolutionAddress(transfer.ParentAddress);
         }
 
-        string path = route.ResolveAddress(context);
-
-        return Files.TransferPath.TryParse(path, out Files.TransferPath transfer)
-            ? transfer.ParentAddress
-            : path;
+        // File-mode literal routing is case-insensitive in ASP.NET Core. Resolve from the actual
+        // decoded request path rather than route metadata so /API/FULL cannot alias /api/full.
+        return NormalizeResolutionAddress(path);
     }
 }
 

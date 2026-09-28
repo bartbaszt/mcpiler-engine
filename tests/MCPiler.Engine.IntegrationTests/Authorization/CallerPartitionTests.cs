@@ -477,8 +477,13 @@ public sealed class CallerPartitionTests : IDisposable
             Assert.True(generation.TryResolve(address, out SurfaceResolution? resolution));
             Assert.NotNull(resolution);
 
-            string resourceIdentity = MountAuthorization.CanonicalResource(Scheme, Host, address);
-            var admission = new EngineRequestGenerationAdmission(address, resourceIdentity, generation, resolution);
+            string resourceIdentity = MountAuthorization.CanonicalResource(Scheme, Host, requestPath);
+            var admission = new EngineRequestGenerationAdmission(
+                address,
+                requestPath,
+                resourceIdentity,
+                generation,
+                resolution);
 
             bool nextCalled = false;
             var middleware = new MountAuthorizationMiddleware(

@@ -39,10 +39,22 @@ internal static class FileTransferEndpoints
 
     private static void MapSurface(WebApplication app, string parentPath)
     {
-        SurfaceEndpoint metadata = new(parentPath, authorizationResourcePath: parentPath);
+        MapParentResource(app, parentPath);
 
-        app.MapPost(parentPath + UploadSuffix, UploadAsync).WithMetadata(metadata);
-        app.MapGet(parentPath + DownloadSuffix, DownloadAsync).WithMetadata(metadata);
+        // A slash-terminated MCP URL is a distinct protected resource. Its transfer children need
+        // a distinct URL spelling too; concatenating "/files/..." to a parent that already ends in
+        // slash intentionally produces the double slash that preserves the exact parent identity.
+        MapParentResource(app, parentPath + "/");
+    }
+
+    private static void MapParentResource(WebApplication app, string parentResourcePath)
+    {
+        SurfaceEndpoint metadata = new(
+            RequestAddress.NormalizeResolutionAddress(parentResourcePath),
+            authorizationResourcePath: parentResourcePath);
+
+        app.MapPost(parentResourcePath + UploadSuffix, UploadAsync).WithMetadata(metadata);
+        app.MapGet(parentResourcePath + DownloadSuffix, DownloadAsync).WithMetadata(metadata);
     }
 
     /// <summary>
@@ -109,7 +121,7 @@ internal static class FileTransferEndpoints
         }
 
         EngineExecution execution = admission.Generation.Execution;
-        string resource = CanonicalParent(context, route);
+        string resource = admission.ResourceIdentity;
         string? fileName = context.Request.Query["fileName"].FirstOrDefault();
 
         RuntimeFileUploadResult result = await execution
@@ -150,7 +162,7 @@ internal static class FileTransferEndpoints
         }
 
         EngineExecution execution = admission.Generation.Execution;
-        string resource = CanonicalParent(context, route);
+        string resource = admission.ResourceIdentity;
 
         await using RuntimeFileDownload download = await execution
             .OpenFileAsync(capability, resource, context.RequestAborted)
@@ -196,10 +208,4 @@ internal static class FileTransferEndpoints
         => context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>()
             ?? throw new InvalidOperationException("A mapped transfer endpoint has no parent surface metadata.");
 
-    private static string CanonicalParent(HttpContext context, SurfaceEndpoint route)
-        => MountAuthorization.CanonicalResource(
-            context.Request.Scheme,
-            context.Request.Host.Value ?? string.Empty,
-            route.AuthorizationResourcePath
-                ?? throw new InvalidOperationException("A transfer endpoint has no parent resource path."));
 }

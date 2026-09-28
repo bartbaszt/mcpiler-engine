@@ -397,30 +397,30 @@ public sealed class HostCommandsTests : IDisposable
     }
 
     /// <summary>
-    /// Inspection answers both questions: what would be exposed, and whether it would run.
+    /// Inspection answers both questions: what would be exposed, and whether the exact HTTP
+    /// configuration can start.
     /// </summary>
     /// <remarks>
-    /// The mount path an inspection runs cannot see the host-side pairing rule, because that
-    /// rule depends on configuration rather than on the Manifest. An inspection that printed
-    /// only the surfaces would tell an operator everything about a configuration that would
-    /// refuse to start.
+    /// A CI preflight that exits zero for a configuration <c>serve</c> will reject is worse than
+    /// a missing preflight: automation promotes the deployment precisely because the check said
+    /// it was usable. The report still includes the derived surface for diagnosis, but the
+    /// process outcome is the same configuration refusal as serving.
     /// </remarks>
     [Fact]
-    public async Task Inspect_reports_that_serving_a_protected_mount_without_an_issuer_would_be_refused()
+    public async Task Inspect_refuses_a_protected_http_mount_without_an_issuer()
     {
         CommandOutcome outcome = await HostCommands.RunAsync(
             ["inspect", "--file-store-root", Store(), "--mount", "/api=" + ScopedManifest("scoped")],
             Identity,
             TestContext.Current.CancellationToken);
 
-        // The inspection itself succeeded: it described a loadable mount.
-        Assert.Equal(ExitCodes.Success, outcome.ExitCode);
+        Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
         Assert.Contains("requires authorization", outcome.Output, StringComparison.Ordinal);
         Assert.Contains("would be refused", outcome.Output, StringComparison.Ordinal);
         Assert.Contains("auth/issuer-missing", outcome.Output, StringComparison.Ordinal);
         Assert.Contains("issuer", outcome.Output, StringComparison.Ordinal);
 
-        // And it still described what would be served, rather than replacing that with the refusal.
+        // The refusal does not hide the valid Manifest/surface description an operator needs.
         Assert.Contains("fingerprint=", outcome.Output, StringComparison.Ordinal);
     }
 
@@ -450,6 +450,54 @@ public sealed class HostCommandsTests : IDisposable
         Assert.DoesNotContain("would be refused", outcome.Output, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Inspect_and_serve_both_refuse_unusable_introspection_client_secret_files()
+    {
+        string missing = Path.Combine(_root, "missing-introspection-secret");
+        string empty = Path.Combine(_root, "empty-introspection-secret");
+        string notAFile = Path.Combine(_root, "introspection-secret-directory");
+
+        File.WriteAllText(empty, string.Empty);
+        Directory.CreateDirectory(notAFile);
+
+        foreach ((string label, string secret) in new[]
+        {
+            ("missing", missing),
+            ("empty", empty),
+            ("not-a-file", notAFile),
+        })
+        {
+            string[] settings =
+            [
+                "--file-store-root", Store(),
+                "--mount", "/api=" + ScopedManifest("secret-" + label),
+                "--issuer", "https://issuer.example",
+                "--token-validation", "introspection",
+                "--introspection-endpoint", "https://issuer.example/introspect",
+                "--introspection-client-id", "engine",
+                "--introspection-client-secret-file", secret,
+            ];
+
+            CommandOutcome inspect = await HostCommands.RunAsync(
+                ["inspect", .. settings],
+                Identity,
+                TestContext.Current.CancellationToken);
+
+            CommandOutcome serve = await HostCommands.RunAsync(
+                ["serve", .. settings],
+                Identity,
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(ExitCodes.Configuration, inspect.ExitCode);
+            Assert.Equal(ExitCodes.Configuration, serve.ExitCode);
+            Assert.Contains("auth/introspection-client-secret-unusable", inspect.Output, StringComparison.Ordinal);
+            Assert.Contains("introspection client", inspect.Output, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(secret, inspect.Output, StringComparison.Ordinal);
+            Assert.Contains("auth/introspection-client-secret-unusable", serve.Output, StringComparison.Ordinal);
+            Assert.Contains(secret, serve.Output, StringComparison.Ordinal);
+        }
+    }
+
     /// <summary>An open mount inspects without any refusal, with no issuer configured.</summary>
     [Fact]
     public async Task Inspect_reports_an_open_mount_without_a_refusal()
@@ -462,6 +510,83 @@ public sealed class HostCommandsTests : IDisposable
         Assert.Equal(ExitCodes.Success, outcome.ExitCode);
         Assert.Contains("served without authorization", outcome.Output, StringComparison.Ordinal);
         Assert.DoesNotContain("would be refused", outcome.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Inspect_stdio_uses_the_local_process_boundary_and_does_not_require_an_http_issuer()
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "inspect",
+                "--file-store-root", Store(),
+                "--mount", "/api=" + ScopedManifest("stdio-protected"),
+                "--transport", "stdio",
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Success, outcome.ExitCode);
+        Assert.DoesNotContain("auth/issuer-missing", outcome.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("would be refused", outcome.Output, StringComparison.Ordinal);
+        Assert.Contains("fingerprint=", outcome.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Inspect_and_serve_stdio_both_refuse_more_than_one_surface()
+    {
+        string manifest = MultiSurfaceManifest("stdio-many-surfaces");
+
+        string[] settings =
+        [
+            "--file-store-root", Store(),
+            "--mount", "/api=" + manifest,
+            "--transport", "stdio",
+        ];
+
+        CommandOutcome inspect = await HostCommands.RunAsync(
+            ["inspect", .. settings],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        CommandOutcome serve = await HostCommands.RunAsync(
+            ["serve", .. settings],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, inspect.ExitCode);
+        Assert.Equal(ExitCodes.Configuration, serve.ExitCode);
+        Assert.Contains("exactly one surface", inspect.Output, StringComparison.Ordinal);
+        Assert.Contains("exactly one surface", serve.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Inspect_and_serve_stdio_both_refuse_more_than_one_mount()
+    {
+        string first = OpenManifest("stdio-first");
+        string second = OpenManifest("stdio-second");
+
+        string[] settings =
+        [
+            "--file-store-root", Store(),
+            "--mount", "/first=" + first,
+            "--mount", "/second=" + second,
+            "--transport", "stdio",
+        ];
+
+        CommandOutcome inspect = await HostCommands.RunAsync(
+            ["inspect", .. settings],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        CommandOutcome serve = await HostCommands.RunAsync(
+            ["serve", .. settings],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, inspect.ExitCode);
+        Assert.Equal(ExitCodes.Configuration, serve.ExitCode);
+        Assert.Contains("exactly one mounted Manifest", inspect.Output, StringComparison.Ordinal);
+        Assert.Contains("exactly one mounted Manifest", serve.Output, StringComparison.Ordinal);
     }
 
     private string OpenManifest(string name)
@@ -507,14 +632,11 @@ public sealed class HostCommandsTests : IDisposable
     }
 
     /// <summary>
-    /// Inspection answers the same question without serving, and succeeds as an inspection.
+    /// Inspection returns the same configuration refusal when the chosen validation mode cannot
+    /// be satisfied by the issuer.
     /// </summary>
-    /// <remarks>
-    /// The check needs the issuer, so it cannot be derived from the mount; an inspection that
-    /// omitted it would describe a configuration that could never run.
-    /// </remarks>
     [Fact]
-    public async Task Inspect_reports_a_validation_mode_the_issuer_cannot_support()
+    public async Task Inspect_refuses_a_validation_mode_the_issuer_cannot_support()
     {
         await using FakeAuthorizationServer issuer = await FakeAuthorizationServer.StartAsync(
             active: true,
@@ -532,11 +654,11 @@ public sealed class HostCommandsTests : IDisposable
             Identity,
             TestContext.Current.CancellationToken);
 
-        Assert.Equal(ExitCodes.Success, outcome.ExitCode);
+        Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
         Assert.Contains("would be refused", outcome.Output, StringComparison.Ordinal);
         Assert.Contains("auth/introspection-endpoint-missing", outcome.Output, StringComparison.Ordinal);
 
-        // And it still described what would be served.
+        // The valid Manifest/surface description remains available for diagnosis.
         Assert.Contains("fingerprint=", outcome.Output, StringComparison.Ordinal);
     }
 
@@ -601,6 +723,54 @@ public sealed class HostCommandsTests : IDisposable
         Assert.DoesNotContain("introspection revalidation bound", outcome.Output, StringComparison.Ordinal);
         Assert.Contains("fingerprint=", outcome.Output, StringComparison.Ordinal);
     }
+
+    private string MultiSurfaceManifest(string name)
+    {
+        string directory = Path.Combine(_root, name);
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "manifest.json"), MultiSurfaceManifestText);
+        return directory;
+    }
+
+    private const string MultiSurfaceManifestText = """
+        {
+          "manifestFormatVersion": "0.3",
+          "sections": {
+            "server": { "inline": {
+              "name": "Multi Surface API",
+              "authenticationRequired": false,
+              "surfaces": [
+                {
+                  "slug": "read",
+                  "isDefault": true,
+                  "operations": [ { "operation": "list-pets", "exposure": "direct" } ]
+                },
+                {
+                  "slug": "full",
+                  "operations": [ { "operation": "list-pets", "exposure": "direct" } ]
+                }
+              ]
+            } },
+            "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+            "operations": {
+              "inline": {
+                "operations": [ { "key": "GET /pets", "method": "GET", "path": "/pets" } ]
+              }
+            },
+            "agentSurface": {
+              "inline": {
+                "operations": [
+                  {
+                    "slug": "list-pets",
+                    "name": "List pets",
+                    "binding": { "type": "http", "operation": "GET /pets" }
+                  }
+                ]
+              }
+            }
+          }
+        }
+        """;
 
     private const string OpenManifestText = """
         {
@@ -675,7 +845,10 @@ public sealed class HostCommandsTests : IDisposable
         {
           "manifestFormatVersion": "0.3",
           "sections": {
-            "server": { "inline": { "name": "Example API" } },
+            "server": { "inline": {
+              "name": "Example API",
+              "authenticationRequired": false
+            } },
             "policy": { "inline": { "baseUrl": "https://api.example.com" } },
             "operations": {
               "inline": {

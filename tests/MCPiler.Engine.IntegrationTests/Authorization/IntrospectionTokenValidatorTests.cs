@@ -204,6 +204,31 @@ public sealed class IntrospectionTokenValidatorTests
         Assert.Equal(2, handler.Calls);
     }
 
+    [Theory]
+    [InlineData("\"resource\"", "resource")]
+    [InlineData("[\"resource\"]", "resource")]
+    [InlineData("[\"resource\",\"other\"]", null)]
+    [InlineData("[\"other\",\"resource\"]", null)]
+    public async Task Audience_shapes_name_exactly_one_resource_or_none(string audienceJson, string? expected)
+    {
+        var handler = new StubHandler((_, _) => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                $"{{\"active\":true,\"aud\":{audienceJson},\"scope\":\"read\",\"exp\":4102444800}}",
+                Encoding.UTF8,
+                "application/json"),
+        });
+        using var client = new HttpClient(handler);
+        var validator = CreateValidator(client, new FakeTimeProvider(Now), ttlSeconds: 0);
+
+        TokenVerification verification = await validator.ValidateAsync(
+            "audience-shape",
+            TestContext.Current.CancellationToken);
+
+        Assert.True(verification.Active);
+        Assert.Equal(expected, verification.Audience);
+    }
+
     [Fact]
     public async Task Equivalent_json_layouts_produce_the_same_active_verdict()
     {

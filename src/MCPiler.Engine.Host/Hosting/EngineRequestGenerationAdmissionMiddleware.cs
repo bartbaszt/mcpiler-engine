@@ -29,13 +29,16 @@ internal sealed class EngineRequestGenerationAdmissionMiddleware
 
     public async Task InvokeAsync(HttpContext context)
     {
-        string? address = AddressOf(context);
+        SurfaceEndpoint? route = context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>();
+        string? address = AddressOf(context, route);
 
         if (address is null)
         {
             await _next(context).ConfigureAwait(false);
             return;
         }
+
+        string authorizationResourcePath = AuthorizationResourcePathOf(context, route);
 
         if (!_generations.TryLease(out EngineGenerationLease? lease) || lease is null)
         {
@@ -55,10 +58,11 @@ internal sealed class EngineRequestGenerationAdmissionMiddleware
             string resourceIdentity = MountAuthorization.CanonicalResource(
                 context.Request.Scheme,
                 context.Request.Host.Value ?? string.Empty,
-                address);
+                authorizationResourcePath);
 
             context.Features.Set(new EngineRequestGenerationAdmission(
                 address,
+                authorizationResourcePath,
                 resourceIdentity,
                 lease.Generation,
                 resolved));
@@ -77,9 +81,9 @@ internal sealed class EngineRequestGenerationAdmissionMiddleware
         }
     }
 
-    private static string? AddressOf(HttpContext context)
+    private static string? AddressOf(HttpContext context, SurfaceEndpoint? route)
     {
-        if (context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>() is { } route)
+        if (route is not null)
         {
             return RequestAddress.Resolve(context, route);
         }
@@ -89,9 +93,24 @@ internal sealed class EngineRequestGenerationAdmissionMiddleware
         // same admission even when endpoint routing exposes no SurfaceEndpoint metadata for the
         // child path.
         return TransferPath.TryParse(context.Request.Path.Value, out TransferPath transfer)
-            ? transfer.ParentAddress
+            ? RequestAddress.NormalizeResolutionAddress(transfer.ParentAddress)
             : null;
     }
+
+    private static string AuthorizationResourcePathOf(HttpContext context, SurfaceEndpoint? route)
+    {
+        if (route is not null)
+        {
+            return route.ResolveAuthorizationResourcePath(context);
+        }
+
+        string path = context.Request.Path.Value ?? "/";
+
+        return TransferPath.TryParse(path, out TransferPath transfer)
+            ? transfer.ParentAddress
+            : path;
+    }
+
 
     private static Task RefuseSilentlyAsync(HttpContext context)
     {

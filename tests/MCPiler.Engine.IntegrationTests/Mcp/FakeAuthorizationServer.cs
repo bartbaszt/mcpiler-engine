@@ -179,8 +179,8 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
                 context.Response.ContentType = "application/json";
                 await context.Response.WriteAsync(
                     advertisesIntrospection
-                        ? $$"""{ "issuer": "http://{{host}}", "introspection_endpoint": "http://{{host}}/introspect", "jwks_uri": "http://{{host}}/jwks", "introspection_endpoint_auth_methods_supported": ["client_secret_basic"] }"""
-                        : $$"""{ "issuer": "http://{{host}}", "jwks_uri": "http://{{host}}/jwks" }""",
+                        ? $"""{ "issuer": "http://{{host}}/", "introspection_endpoint": "http://{{host}}/introspect", "jwks_uri": "http://{{host}}/jwks", "introspection_endpoint_auth_methods_supported": ["client_secret_basic"] }"""
+                        : $"""{ "issuer": "http://{{host}}/", "jwks_uri": "http://{{host}}/jwks" }""",
                     context.RequestAborted);
                 return;
             }

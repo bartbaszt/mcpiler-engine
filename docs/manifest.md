@@ -16,7 +16,9 @@ privileged: the format is the contract, not the producer.
 - Current format version: **0.3**
 - Supported by this Engine: **0.3**
 - JSON Schemas: [`schemas/manifest-0.3/`](../schemas/manifest-0.3/)
-- Worked examples: [`tests/fixtures/manifests/`](../tests/fixtures/manifests/)
+- Manual authoring guide: [`docs/authoring.md`](authoring.md)
+- Tested example catalogue: [`examples/README.md`](../examples/README.md)
+- Conformance fixtures: [`tests/fixtures/manifests/`](../tests/fixtures/manifests/)
 
 ## Contents
 
@@ -33,14 +35,18 @@ privileged: the format is the contract, not the producer.
 
 ## The smallest useful manifest
 
-Every default in the format is chosen so that a manifest states only what is
-specific to the API being served. This is a complete, servable manifest:
+The format keeps API-specific state compact, but caller authorization is intentionally
+fail-closed: a server is protected when `authenticationRequired` is absent. The smallest
+copy-paste example below explicitly opts out so it can be served locally without an issuer:
 
 ```json
 {
   "manifestFormatVersion": "0.3",
   "sections": {
-    "server": { "inline": { "name": "Example API" } },
+    "server": { "inline": {
+      "name": "Example API",
+      "authenticationRequired": false
+    } },
     "policy": { "inline": { "baseUrl": "https://api.example.com" } },
     "operations": {
       "inline": {
@@ -74,14 +80,20 @@ none has to be.
 Four sections are required: `server`, `policy`, `operations`, `agentSurface`.
 The rest are optional.
 
+`authenticationRequired: false` is not the security default; it is present here only to make the
+smallest example directly runnable on loopback. Remove it (or set it to true) for a protected HTTP
+mount and configure the host's issuer/token-validation boundary.
+
 ## Physical shapes
 
 One manifest, three interchangeable layouts. They differ in packaging only; a
 loaded manifest is identical whichever was used.
 
-**Single file.** Every section inline in one document. Readable, diffable, ideal
-for a hand-written manifest or a small API. Cannot carry a vector matrix, which
-is binary.
+**Single file.** Every section inline in one root `manifest.json`. Readable,
+diffable, ideal for a hand-written manifest or a small API. The host CLI still mounts the
+**directory containing** that file, for example `--mount /example=./my-api` for
+`./my-api/manifest.json`; it does not take the root JSON file path as the mount value.
+This shape cannot carry a vector matrix, which is binary.
 
 **Directory bundle.** A root `manifest.json` whose section entries point at
 sibling files:
@@ -102,14 +114,15 @@ translated, because a path that works on one operating system and fails on
 another is not portable.
 
 **Transport archive.** A `.mcpiler-manifest` file: an uncompressed ustar archive
-of a directory bundle. Every header field that would otherwise record the build
-environment is fixed — modification time is the Unix epoch, uid and gid are 0,
-user and group names are empty, files are mode 0644 and directories 0755 — so
-packing the same bundle twice produces the same bytes. Entries are ordered by
-path, which makes the order a property of the manifest rather than of the
-producer. Entry names longer than 100 characters are refused rather than encoded
-through a long-name extension, because every such extension writes headers that
-differ between archivers.
+of a directory bundle. It is a transport wrapper, not a different logical Manifest. Managed
+generations are delivered in this form; the current file-mode host CLI mounts an unpacked
+bundle directory and does not accept the archive path directly. Every header field that would
+otherwise record the build environment is fixed — modification time is the Unix epoch, uid and
+gid are 0, user and group names are empty, files are mode 0644 and directories 0755 — so
+packing the same bundle twice produces the same bytes. Entries are ordered by path, which makes
+the order a property of the manifest rather than of the producer. Entry names longer than 100
+characters are refused rather than encoded through a long-name extension, because every such
+extension writes headers that differ between archivers.
 
 Mixed layouts are allowed: a manifest may inline small sections and point at
 files for large ones. `vectors` is the one section that must always be external.
@@ -232,6 +245,7 @@ Everything else has a documented default and may be omitted:
 |---|---|
 | `limits` | `upstreamConnectTimeoutSeconds` 10, `upstreamRequestTimeoutSeconds` 100, `upstreamResponseSizeLimitBytes` 52428800, `redirectHopLimit` 5, `concurrency` 8, `mcpRequestSizeLimitBytes` 1048576 |
 | `transformCeiling` | `maxSteps` 64, `maxDepth` 32, `maxNodes` 8192, `maxOutputBytes` 262144, `maxArrayFanout` 1024 |
+| `jmesPathCeiling` | `maxExpressionBytes` 16384, `maxInputNodes` 1000000, `maxInputDepth` 64, `maxResultNodes` 65536, `maxResultDepth` 64, `maxOutputBytes` 1048576, `maxEvaluationMilliseconds` 60000 |
 | `compound` | `maxTotalResponseBytes` 104857600, `workflowTimeoutSeconds` 120 |
 | `schemaBounds` | `maxDepth` 32, `maxNodes` 2048, `maxPropertiesPerLevel` 256 |
 | `files` | `handleLifetimeSeconds` 86400, `uploadSizeLimitBytes` 104857600, `rejectMagicMismatch` true |
@@ -248,14 +262,16 @@ incorrect belief about the deployed perimeter.
 
 ### `credentials`
 
-Credentials by reference. A manifest never carries secret material.
+Credentials are references by default; a produced manifest should not carry resolved secret
+material. The `inline` reference form exists only as an explicit operator opt-in for hand-authored
+artifacts and is refused by default.
 
 Each entry is `{id, scheme, slot, location?, value}`. Schemes are `basic`,
 `bearer`, `apiKey` and `header` for credentials a binding applies directly, and
 `oauth2-client-credentials`, `oauth2-authorization-code`, `token-session-exchange`,
-`challenge-session` and `request-signing` for slots an authentication profile
-consumes. `location` applies to `apiKey` only and is `header` (default), `query`
-or `cookie`.
+`challenge-session`, `request-signing` and `oauth1-authorization` for slots an
+authentication profile consumes. `location` applies to `apiKey` only and is `header`
+(default), `query` or `cookie`.
 
 `id` is how a binding names this credential. It matches `^[a-z0-9][a-z0-9-]*$`,
 is at most 64 characters, and must be unique within the section. Upper case is
@@ -268,14 +284,19 @@ same id no matter which secret is behind it.
 
 - `{"fromEnv": "NAME"}` — an environment variable.
 - `{"fromFile": "/absolute/path"}` — a file, trailing newline trimmed.
-- `{"fromProvider": "KEY"}` — an opaque key into the active generation's
-  in-memory secret set. Refused unless `--allow-provider-references` (managed
-  mode), and refused when the mode is standalone.
+- `{"fromProvider": "KEY"}` — an opaque key into the active managed generation's
+  in-memory secret set. Managed delivery enables this reference as part of the generation-loading
+  path; file mode has no provider secret set and refuses it. There is no operator switch that
+  enables provider references for a standalone mount.
 - `{"inline": "..."}` — refused unless `--allow-inline-secrets`, and always
   warned about.
 
 `basic` uses slots `username` and `password`, which compose one `Authorization`
 header; both halves must be declared in the section.
+
+`oauth1-authorization` uses the closed slot set `consumerSecret`, `rsaPrivateKey`, `oauthToken`
+and `oauthTokenSecret`. The authentication profile's signature method decides the exact subset
+that may be referenced; extra method-incompatible slots are refused rather than ignored.
 
 **Declaring a credential grants nothing.** A credential is applied only where a
 binding names it, so the section may hold two credentials that address the same
@@ -298,8 +319,8 @@ Optional. Generic authentication profiles: the portable form of a connector's
 dynamic authentication configuration. A manifest without this section keeps the
 legacy static model, in which each binding's `credentialRef` names the
 credentials it applies directly. A connector whose authentication is dynamic
-declares exactly one profile here and its executing bindings reference it by
-`authenticationRef` instead of declaring a credential scope.
+declares one or more profiles here and each executing binding references the profile it uses by
+`authenticationRef` instead of declaring a direct credential scope.
 
 A profile is
 `{id, kind, configuration, authenticationOrigins, destinationOrigins, credentialRef,
@@ -309,7 +330,8 @@ a producer row identity.
 
 `kind` is a closed discriminator. The executable kinds are `static`,
 `oauth2-client-credentials`, `oauth2-authorization-code-pkce-refresh`,
-`token-session-exchange`, `challenge-session` and `request-signing`.
+`token-session-exchange`, `challenge-session`, `request-signing` and
+`oauth1-authorization`.
 `reviewed-composite` is part of the vocabulary so a stored value round-trips, but
 no accepted artifact defines its runtime semantics, so a profile declaring it is
 refused at load (`authentication/kind-not-executable`) rather than failing on the
@@ -324,6 +346,7 @@ first invocation that uses it.
 | `token-session-exchange` | `strategyId`, `inputs`, `endpoint`, `method` (`GET`/`POST`/`PUT`/`PATCH`), `request`, `response`, `injection`, `destination?`, `defaultLifetimeSeconds` (1–2592000), `safetySkewSeconds` (0–300), `authFailureStatusCodes` |
 | `challenge-session` | `strategyId`, `inputs`, `challenge`, `injection`, `replaySafeOperationKeys`, `sessionLifetimeSeconds` (1–2592000) |
 | `request-signing` | `strategyId` (one of the reviewed signer kinds below), `inputs` with exactly `accessKeyId` |
+| `oauth1-authorization` | `consumerKey`, `signatureMethod` (`HMAC-SHA1`, `RSA-SHA1`, `PLAINTEXT`, `HMAC-SHA256`), `parameterTransport` (`authorization-header`, `query`, `form-body`) |
 
 `request-signing` names one of four reviewed signer kinds:
 `request-signing-aws-sigv4`, `request-signing-hmac`,
@@ -348,7 +371,10 @@ a path, query, fragment or user information.
 kind's slot shape: `oauth2-client-credentials` needs a
 `clientSecret`; `oauth2-authorization-code-pkce-refresh` needs a `clientSecret`
 or an authorized `refreshToken`; `request-signing` needs a `signingSecret`; and
-each dynamic scheme may only reference credentials of its own scheme. A profile
+each dynamic scheme may only reference credentials of its own scheme. For
+`oauth1-authorization`, `HMAC-SHA1`, `HMAC-SHA256` and `PLAINTEXT` require exactly
+`consumerSecret`, `oauthToken` and `oauthTokenSecret`; `RSA-SHA1` requires exactly
+`rsaPrivateKey` and `oauthToken`. A profile
 referencing an incompatible credential is refused
 (`authentication/credential-incompatible`) — silently resolving to a slot the
 strategy never reveals would make the profile behave as if unauthenticated.
@@ -454,13 +480,44 @@ Bindings:
   The two are alternatives: a profiled execution states the profile and not a
   direct scope.
 - `{"type": "transformedHttp", "base": {...}, "inputProgram": {...},
-  "outputProgram": {...}}` — a call with a bounded argument or response
-  transformation. Input pointers address `/path`, `/query`, `/headers`,
-  `/cookies`, `/body`, `/parts`; output pointers read `/status`, `/headers`,
-  `/body`.
+  "outputProjection": {...}}` — a call with a bounded input transformation and/or one
+  response projection. Input pointers address `/path`, `/query`, `/headers`,
+  `/cookies`, `/body`, `/parts`. The binding-level `outputProjection` is the closed
+  response-body union described below. The former `outputProgram` member is not an alias and
+  is refused as an unknown member.
 - `{"type": "compound", "steps": [...], "outputSelection": {...}}` — a workflow
   over other operations in this manifest. A step names another operation's slug.
   Nesting is refused. A step may read a previous step's response, never its own.
+
+### Binding-level response projection
+
+A `transformedHttp` binding may carry one optional `outputProjection`. This is distinct from
+the operation-level `agentSurface.operations[*].outputProjection` described under
+[Output projection and pagination](#output-projection-and-pagination): the operation-level member
+builds the reviewed agent-facing response envelope and continuation metadata, while the
+binding-level member transforms or selects the upstream response body before that envelope is
+constructed.
+
+The binding-level member is a closed union:
+
+- `{"kind":"transformProgram","program":{...}}` applies the bounded output transformation
+  grammar documented under [Transformation programs](#transformation-programs).
+- `{"kind":"jmespath","languageVersion":1,"expression":"...","limits":{...}}` evaluates one
+  JMESPath profile-1 expression in the confined projection worker.
+
+A JMESPath projection must declare all seven positive limits:
+`maxExpressionBytes`, `maxInputNodes`, `maxInputDepth`, `maxResultNodes`,
+`maxResultDepth`, `maxOutputBytes` and `maxEvaluationMilliseconds`. Effective values are
+narrowed by `policy.jmesPathCeiling`; the output byte limit is additionally bounded by the
+ordinary upstream response-size policy.
+
+JMESPath accepts only an inline JSON response body. A binary response or file handle is refused
+rather than coerced. Evaluation happens outside the serving process in the confined projection
+worker. A language failure, timeout, worker failure, memory refusal or result-bound violation is
+reported as a projection failure; Engine never falls back to the unprojected upstream body after
+a declared projection fails. Successful results are canonicalized as JSON before they are returned.
+
+Absence of the binding-level `outputProjection` is passthrough and preserves the response body.
 
 ### Compound workflows
 
@@ -698,8 +755,9 @@ a packed float32 matrix whose row ids are operation slugs.
 
 The vector section **degrades silently**. If it is absent, unreadable, or its
 dimension disagrees with the payload, vector ranking is disabled and the manifest
-still loads and serves. Discovery falls back to lexical ranking. `validate`
-reports the problem; loading does not fail.
+still loads and serves. Discovery falls back to lexical ranking. `inspect` traverses
+the same load path as `serve` and therefore surfaces any matrix warning emitted during startup;
+an unusable matrix does not by itself refuse the Manifest.
 
 Engine supplies only the stored half. It issues no embedding request and contacts
 no provider, so a semantic ranking happens only when the caller passes a
@@ -708,6 +766,40 @@ declares. Without one, or without a usable matrix, discovery ranks lexically and
 says so by answering exactly as it would have with no vector at all. A query
 vector whose length disagrees with the matrix is a tool error rather than a silent
 downgrade.
+
+The external payload uses the deterministic **MVMX version 1** binary layout:
+
+```text
+offset  size                         meaning
+0       4                            ASCII magic "MVMX"
+4       4                            little-endian signed int32 JSON-header byte length
+8       headerLength                 UTF-8 JSON header
+...     count * dimension * 4        row-major little-endian IEEE-754 float32 values
+```
+
+The JSON header has exactly the matrix metadata needed to interpret the payload:
+
+```json
+{
+  "formatVersion": 1,
+  "dimension": 3,
+  "count": 2,
+  "elementType": "float32",
+  "normalization": "l2",
+  "ids": ["list-pets", "get-pet"]
+}
+```
+
+`dimension` and `count` must be positive. `elementType` is `float32` and
+`normalization` is `l2` for version 1. The payload length must be exactly
+`count * dimension * 4` bytes; trailing or missing bytes refuse the matrix. The
+`ids` array must contain exactly `count` operation slugs in the same order as the
+lexical search index used for the served operation set. The section-index
+`dimension` and the header `dimension` are two declarations of the same fact and
+must agree.
+
+The matrix file itself is referenced by the root `vectors` section entry and therefore
+cannot be represented by an inline single-file Manifest.
 
 ### `provenance`
 
@@ -763,12 +855,16 @@ format release, and a format release does not require an Engine release to be
 described.
 
 **Engine declares an explicit supported range.** This Engine supports manifest
-format `0.3`. Section versions are not uniform, because they move
-independently: `agentSurface` is at `5`, `credentials` is at `4`, `authentication`
-is at `2`, `server` and `policy` are at `2`, while `operations`, `tools` and
-`search` are still at `1`. A section that omits `formatVersion` is accepted at
-whatever version this Engine supports for it. A refusal always names the version
-observed and the range supported. Hostile input echoed for context is truncated.
+format `0.3`. Section versions are not uniform, because they move independently:
+`agentSurface` currently emits `5` and accepts `4..5`; `credentials` is `4`;
+`authentication` is `2`; `server` and `policy` are `2`; and `operations`,
+`tools` and `search` are `1`. A section that omits `formatVersion` uses the
+current interpretation of that reader. An explicit version must be inside that reader's
+supported range. A refusal always names the version observed and the range supported.
+Hostile input echoed for context is truncated.
+
+The concise Engine/root/section/sub-format matrix and upgrade procedure are maintained in
+[Engine and Manifest compatibility](compatibility.md).
 
 **While MAJOR is 0 there is no compatibility promise.** The remedy for an old
 manifest is to produce it again, not to migrate it. There is no alpha migrator,

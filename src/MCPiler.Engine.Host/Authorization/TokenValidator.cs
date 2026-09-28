@@ -58,27 +58,40 @@ public interface ITokenValidator
 /// shared rather than duplicated so the two modes cannot disagree about where an issuer's
 /// metadata lives.
 /// </remarks>
+internal readonly record struct IssuerMetadataDiscovery(
+    JsonElement? Document,
+    string? InvalidReason);
+
 internal static class IssuerMetadata
 {
-    internal static async Task<JsonElement?> DiscoverAsync(
+    internal static Uri DiscoveryUri(string issuer)
+    {
+        Uri configured = new(issuer, UriKind.Absolute);
+        string issuerPath = configured
+            .GetComponents(UriComponents.Path, UriFormat.UriEscaped)
+            .TrimStart('/');
+
+        string path = "/.well-known/oauth-authorization-server";
+        if (issuerPath.Length > 0)
+        {
+            path += "/" + issuerPath;
+        }
+
+        return new Uri(configured.GetLeftPart(UriPartial.Authority) + path, UriKind.Absolute);
+    }
+
+    internal static async Task<IssuerMetadataDiscovery> DiscoverAsync(
         HttpClient client,
         string issuer,
         CancellationToken cancellationToken)
     {
-        // RFC 8414 §3.1: the well-known path is inserted between the host and the issuer's
-        // own path. An issuer with no path takes the bare form.
-        Uri baseUri = new(issuer, UriKind.Absolute);
-        string wellKnown = baseUri.AbsolutePath is "/" or ""
-            ? new Uri(baseUri, "/.well-known/oauth-authorization-server").ToString()
-            : new Uri(baseUri, ".well-known/oauth-authorization-server").ToString();
-
         using HttpResponseMessage response = await client.GetAsync(
-            wellKnown,
+            DiscoveryUri(issuer),
             cancellationToken).ConfigureAwait(false);
 
         if (response.StatusCode != HttpStatusCode.OK)
         {
-            return null;
+            return new IssuerMetadataDiscovery(null, null);
         }
 
         try
@@ -87,11 +100,32 @@ internal static class IssuerMetadata
                 await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
 
-            return document.RootElement.Clone();
+            JsonElement root = document.RootElement;
+
+            if (root.ValueKind is not JsonValueKind.Object)
+            {
+                return new IssuerMetadataDiscovery(null, "The authorization-server metadata is not a JSON object.");
+            }
+
+            if (!root.TryGetProperty("issuer", out JsonElement declared)
+                || declared.ValueKind is not JsonValueKind.String
+                || declared.GetString() is not { Length: > 0 } metadataIssuer)
+            {
+                return new IssuerMetadataDiscovery(null, "The authorization-server metadata omits the required 'issuer' member.");
+            }
+
+            if (!string.Equals(metadataIssuer, issuer, StringComparison.Ordinal))
+            {
+                return new IssuerMetadataDiscovery(
+                    null,
+                    $"The authorization-server metadata issuer '{metadataIssuer}' does not exactly match configured issuer '{issuer}'.");
+            }
+
+            return new IssuerMetadataDiscovery(root.Clone(), null);
         }
         catch (JsonException)
         {
-            return null;
+            return new IssuerMetadataDiscovery(null, "The authorization-server metadata is not valid JSON.");
         }
     }
 }

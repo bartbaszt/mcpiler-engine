@@ -85,11 +85,10 @@ internal sealed class MountAuthorizationMiddleware
             return;
         }
 
-        // File-mode transfer children carry their parent in endpoint metadata. A managed catch-all
-        // has no such metadata, so the request admission's folded parent address is the binding.
-        // Establish it once and use it for both discovery and audience validation.
-        string resourcePath = route.AuthorizationResourcePath
-            ?? admission.Address;
+        // Resolution address and authorization resource are deliberately different facts. Route
+        // resolution may fold a trailing slash onto the mapped surface; authorization never does.
+        // Transfer children already carry/inherit their exact parent resource in the admission.
+        string resourcePath = admission.AuthorizationResourcePath;
 
         if (!admission.Resolution.Mount.RequiresAuthorization())
         {
@@ -108,10 +107,7 @@ internal sealed class MountAuthorizationMiddleware
             return;
         }
 
-        string canonical = MountAuthorization.CanonicalResource(
-            context.Request.Scheme,
-            context.Request.Host.Value ?? string.Empty,
-            resourcePath);
+        string canonical = admission.ResourceIdentity;
 
         if (verification.Audience is null
             || !MountAuthorization.AudienceNames(verification.Audience, canonical))
@@ -264,6 +260,35 @@ internal static class MountAuthorizationSetup
                 options.JwksUri),
             _ => throw new InvalidOperationException(
                 "The token validation configuration was validated at bind time; an unknown mode here is a bug."),
+        };
+    }
+
+    /// <summary>
+    /// Validates local authorization startup material without constructing the validator.
+    /// </summary>
+    /// <remarks>
+    /// The same reader is used by <see cref="Validator"/>. Returning a structured refusal here
+    /// lets <c>inspect</c> and <c>serve</c> agree about a missing, empty or unreadable
+    /// introspection client secret before either path builds a web host.
+    /// </remarks>
+    internal static StartupRefusal? FindStartupRefusal(HostAuthorizationOptions options)
+    {
+        if (options.IntrospectionClientSecretFile is not { } path)
+        {
+            return null;
+        }
+
+        if (IntrospectionClientSecret.TryRead(path, out _, out string? refusal))
+        {
+            return null;
+        }
+
+        return new StartupRefusal(
+            string.Empty,
+            "auth/introspection-client-secret-unusable",
+            $"The introspection client is configured but its secret is unusable: {refusal}")
+        {
+            Setting = HostConfiguration.IntrospectionClientSecretFileKey,
         };
     }
 

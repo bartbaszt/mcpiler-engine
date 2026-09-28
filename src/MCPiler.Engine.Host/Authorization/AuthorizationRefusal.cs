@@ -1,6 +1,7 @@
 using MCPiler.Engine.Host.Configuration;
 using MCPiler.Engine.Host.Files;
 using MCPiler.Engine.Host.Hosting;
+using MCPiler.Engine.Host.Mcp;
 using MCPiler.Engine.Runtime;
 
 using Microsoft.AspNetCore.Http;
@@ -88,7 +89,7 @@ internal static class SurfaceMetadata
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(generations);
 
-        string resource = ResourceOf(context);
+        string resource = DecodedResourceOf(context);
         string address = string.IsNullOrEmpty(resource) ? "/" : resource;
 
         // A transfer child is not a protected resource of its own: it inherits the mount that
@@ -103,9 +104,11 @@ internal static class SurfaceMetadata
             return null;
         }
 
+        string resolutionAddress = RequestAddress.NormalizeResolutionAddress(address);
+
         using (lease)
         {
-            return lease.Generation.TryResolve(address, out SurfaceResolution? resolved)
+            return lease.Generation.TryResolve(resolutionAddress, out SurfaceResolution? resolved)
                 && resolved is not null
                 ? resolved.Mount.RequiresAuthorization()
                 : null;
@@ -113,11 +116,23 @@ internal static class SurfaceMetadata
     }
 
     /// <summary>
-    /// The resource path a metadata request mirrors, with the well-known prefix removed.
+    /// The decoded resource path used only to resolve whether a mounted surface exists.
     /// </summary>
-    private static string ResourceOf(HttpContext context)
+    private static string DecodedResourceOf(HttpContext context)
     {
         string path = context.Request.Path.Value ?? "/";
+
+        return path.StartsWith(WellKnownPrefix, StringComparison.Ordinal)
+            ? path[WellKnownPrefix.Length..]
+            : path;
+    }
+
+    /// <summary>
+    /// The request-target spelling mirrored into RFC 9728 metadata.
+    /// </summary>
+    private static string RawResourceOf(HttpContext context)
+    {
+        string path = RequestAddress.RawPath(context);
 
         return path.StartsWith(WellKnownPrefix, StringComparison.Ordinal)
             ? path[WellKnownPrefix.Length..]
@@ -128,7 +143,7 @@ internal static class SurfaceMetadata
         HttpContext context,
         HostAuthorizationOptions options)
     {
-        string resource = ResourceOf(context);
+        string resource = RawResourceOf(context);
 
         string canonical = MountAuthorization.CanonicalResource(
             context.Request.Scheme,

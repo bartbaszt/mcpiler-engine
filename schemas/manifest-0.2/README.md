@@ -1,53 +1,42 @@
-# MCPiler Manifest 0.2 — published JSON Schemas
+# MCPiler Manifest 0.2 — historical JSON Schema snapshot
 
-These documents describe the MCPiler Manifest format for editors, generators and
-third-party tooling. They are JSON Schema 2020-12.
+These JSON Schema 2020-12 documents preserve the published description of Manifest format 0.2 for
+historical tooling and migration work.
 
-## They are a description, not the authority
+They are **not** evidence that the current Engine serves root format 0.2. The current Engine runtime
+support range is documented in [`docs/compatibility.md`](../../docs/compatibility.md) and is
+currently exactly 0.3.
 
-The readers under `src/MCPiler.Engine/Manifest/Loading/` decide what Engine will serve.
-These schemas exist so a human or a tool can be told what the format is without reading
-that code. Where the two could ever disagree, the reader wins and the schema is the bug.
+## Status
 
-That is a real risk, so it is tested rather than trusted. `PublishedSchemaTests` asserts:
+This directory is retained as a historical schema snapshot.
 
-- every valid fixture in `tests/fixtures/manifests/` validates against these schemas;
-- every hostile fixture that declares `"schemaRefuses": true` is also refused here, and
-  every one that declares `false` is not — the split is recorded per case in the corpus,
-  so a new case cannot be added without deciding which side it falls on;
-- the accepted member set at each object location equals the corresponding reader's
-  member list, compared by reflection, so adding a member to a reader without updating
-  the schema fails the build;
-- every closed vocabulary equals the corresponding `Vocabulary` enum.
+The active schema/reader conformance suite (`PublishedSchemaTests`) targets
+[`schemas/manifest-0.3/`](../manifest-0.3/), not this directory. Consequently:
 
-## What a schema cannot say here
+- do not treat a 0.2 schema-valid document as deployable to the current Engine;
+- do not assume these historical schemas track the current readers;
+- do not update these files merely to match new 0.3 reader vocabulary;
+- migrate or re-export a 0.2 Manifest before deploying it to an Engine whose supported root range
+  excludes 0.2.
 
-JSON Schema describes shape and vocabulary. It cannot express uniqueness across array
-entries, a cross-reference from one section to another, or agreement between two members
-computed from each other. So duplicate slugs and keys, a duplicate credential id, an exposure
-entry naming an unknown operation, a binding naming an unknown execution key, a binding
-referencing an undeclared credential id, a binding referencing one half of a basic credential
-pair, two credentials referenced by one binding that contend for the same destination slot, a
-destination outside the perimeter, and a `key` disagreeing with `method` and `path` are all
-reader-only refusals. The hostile corpus marks them `"schemaRefuses": false` and the tests
-assert that this is exactly the set the schemas let through.
+## Authority
 
-## One deliberate divergence
+For an Engine version that historically implemented format 0.2, its reader was the runtime
+authority and these schemas were the machine-readable description. That general rule still applies
+to current formats: JSON Schema can describe shape and vocabulary but cannot express every
+cross-section runtime invariant.
 
-The readers match closed vocabularies case-insensitively as a courtesy to hand authors.
-These schemas describe the canonical camelCase form only, so an editor will flag `Direct`
-where the reader would accept it. That is the intended direction — the schema documents the
-form to write, the reader is forgiving about the form you wrote. `TheSchemaDescribesTheCanonicalCasing`
-pins the divergence so it stays deliberate.
+For current Engine behavior use:
+
+- [Manifest reference](../../docs/manifest.md);
+- [Compatibility matrix](../../docs/compatibility.md);
+- [current 0.3 schemas](../manifest-0.3/).
 
 ## Identifiers
 
-`$id` uses `urn:mcpiler:manifest:0.2:<name>`. A URN, not an https URL, because Engine has no
-published schema host yet and a URL that does not resolve is a worse identifier than one that
-never promised to. A hosted alias can be added at publication.
-
-The version in the identifier is the manifest format version, whose versioning policy is
-stated in `../../docs/manifest.md`. It is not the Engine assembly version.
+The historical schemas use `urn:mcpiler:manifest:0.2:<name>` identifiers. The version in the URN
+is the Manifest format version, not the Engine product version.
 
 ## Files
 
@@ -61,7 +50,7 @@ stated in `../../docs/manifest.md`. It is not the Engine assembly version.
 | `agent-surface.schema.json` | `urn:mcpiler:manifest:0.2:agent-surface` | `agentSurface` |
 | `tools.schema.json` | `urn:mcpiler:manifest:0.2:tools` | `tools` |
 | `search.schema.json` | `urn:mcpiler:manifest:0.2:search` | `search` |
-| `schema.schema.json` | `urn:mcpiler:manifest:0.2:schema` | a schema value, shared |
+| `schema.schema.json` | `urn:mcpiler:manifest:0.2:schema` | a schema value |
 
-There is no schema for `vectors`: its payload is binary, and its index entry is described in
-`root.schema.json`.
+There is no standalone vector schema in 0.2; vector index metadata, where applicable to that
+snapshot, is described by the root schema.

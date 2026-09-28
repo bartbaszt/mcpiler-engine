@@ -34,6 +34,33 @@ a `sections/` directory.
 | `files/` | multipart upload with encoding, raw binary body, and a binary response declared through its media types. |
 | `credentials/` | every credential scheme and every API-key location, all by reference. |
 | `search/` | a pinned lexical index written by hand from the documented rules, so a drift in either derivation or the rules fails a test instead of quietly changing relevance. |
+| `jmespath-profile-1/` | a complete transformed binding using the confined JMESPath profile-1 output projection and explicit projection limits. |
+| `response-cache/` | a minimal cache-eligible GET with an authored per-operation response-cache TTL. |
+| `response-projection-pagination/` | a minimal agent-facing output envelope with cursor pagination derived from a response header. |
+| `two-origins/` | operations intentionally routed to more than one allowed upstream origin. |
+| `compiled/` | producer-shaped output retained for Engine/Studio compatibility tests; not the recommended starting point for a hand-authored Manifest. |
+
+### Authentication fixtures
+
+`manifest-0.3/` contains complete manifests for the current executable authentication
+vocabulary rather than fragments:
+
+| fixture | what it pins |
+| --- | --- |
+| `static/` | a static authentication profile. |
+| `oauth-client-credentials/` | OAuth 2 client credentials. |
+| `oauth-authorization-code/` | OAuth 2 authorization code with PKCE/refresh state. |
+| `exchange/` | token/session exchange. |
+| `challenge-session/` | challenge/session authentication. |
+| `oauth1-authorization/` | OAuth 1.0a including HMAC-SHA1, RSA-SHA1 and HMAC-SHA256 examples. |
+| `request-signing-aws-sigv4/` | AWS Signature Version 4 request signing. |
+| `request-signing-hmac/` | generic HMAC request signing. |
+| `request-signing-jwt-hmac/` | JWT-HMAC request signing. |
+| `request-signing-subsonic-md5/` | Subsonic-compatible MD5 signing. |
+| `managed-provider/` | a dynamic profile whose credential value comes from the active managed generation. |
+
+The user-facing catalogue in [`examples/README.md`](../../../examples/README.md) maps common
+authoring goals to these test-pinned manifests.
 
 ## `archive/`
 
