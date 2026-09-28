@@ -429,6 +429,21 @@ public static class HostCommands
                 text.Append(StartupReport.RenderUnstartable(topologyRefusal));
                 unstartable = true;
             }
+
+            if (binding.Authorization is not null
+                && result.Mounts.Any(mount => mount.RequiresAuthorization())
+                && binding.AllowedHosts.Count == 0)
+            {
+                text.Append(StartupReport.RenderUnstartable(new StartupRefusal(
+                    string.Empty,
+                    "auth/allowed-host-missing",
+                    $"Protected HTTP serving requires at least one '{HostConfiguration.AllowedHostKey}' "
+                    + $"when '{HostConfiguration.ListenKey}' does not name one concrete authority.")
+                {
+                    Setting = HostConfiguration.AllowedHostKey,
+                }));
+                unstartable = true;
+            }
         }
 
         if (await AuthorizationStartupValidation
