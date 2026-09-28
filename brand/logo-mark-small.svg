@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">MCPiler small mark</title>
+  <desc id="desc">Responsive simplified MCPiler mark for very small sizes.</desc>
+  <g fill="none" stroke="#111315" aria-hidden="true">
+      <path d="M18 49V13L32 23L46 13V49" stroke-width="5.5" stroke-linecap="square" stroke-linejoin="miter"/>
+      <path d="M21 32L32 40L43 32" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="miter"/>
+    </g>
+</svg>

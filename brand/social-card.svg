@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">MCPiler Engine social card</title>
+  <desc id="desc">MCPiler Engine social card using the final 06F MCPiler identity.</desc>
+  <rect width="1200" height="630" fill="#FAFAF8"/>
+<rect x="56" y="56" width="1088" height="518" rx="28" fill="#FFFFFF" stroke="#D8DADD"/>
+<g transform="translate(102 186) scale(1.62)"><g fill="none" stroke="#111315" aria-hidden="true">
+      <g stroke-width="2.5" stroke-linecap="round"><path d="M12 40H41.5"/><path d="M118.5 40H148"/><path d="M12 50H41.5"/><path d="M118.5 50H148"/><path d="M12 60H41.5"/><path d="M118.5 60H148"/></g>
+      <g fill="#111315" stroke="none"><circle cx="12" cy="40" r="3"/><circle cx="148" cy="40" r="3"/><circle cx="12" cy="50" r="3"/><circle cx="148" cy="50" r="3"/><circle cx="12" cy="60" r="3"/><circle cx="148" cy="60" r="3"/></g>
+      <path d="M46 76V18L80 40L114 18V76" stroke-width="9" stroke-linecap="square" stroke-linejoin="miter"/>
+      <path d="M54 44L80 61L106 44" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="miter"/>
+      <path d="M54 58L80 75L106 58" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="miter"/>
+    </g></g>
+<text x="392" y="254" fill="#111315" font-family="Inter, sans-serif" font-size="76" letter-spacing="-3"><tspan font-weight="700">MCP</tspan><tspan font-weight="400">iler</tspan></text>
+<text x="395" y="306" fill="#686E74" font-family="Inter, sans-serif" font-size="18" font-weight="700" letter-spacing="4">ENGINE</text>\n<text x="392" y="354" fill="#25282B" font-family="Inter, sans-serif" font-size="30">Compile APIs into reliable MCP tools.</text>
+<text x="392" y="417" fill="#686E74" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="19">MANIFEST → VALIDATE → SERVE → MCP</text>
+<circle cx="395" cy="463" r="5" fill="#465CEB"/><text x="414" y="470" fill="#25282B" font-family="Inter, sans-serif" font-size="24">Deterministic runtime</text>
+</svg>

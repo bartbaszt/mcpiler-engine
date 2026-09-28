@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="brand/social-card.svg" alt="MCPiler Engine — Compile APIs into reliable MCP tools." width="800" />
+</p>
+
 # MCPiler Engine
 
 MCPiler Engine turns selected operations of an existing REST API into **MCP tools**
@@ -172,6 +176,10 @@ Without that configuration, Manifests that need no durable mutable slot may stil
 than being allowed to lose its replacement on restart. Static credentials, managed provider
 values, access tokens, exchange sessions, challenge sessions and signing outputs are never
 persisted either way.
+
+## Brand
+
+MCPiler Engine uses the shared MCPiler **06F — M-Gate + connected layers** visual identity. Repository, documentation and release-media assets live in [`brand/`](brand/). The **MCPiler** wordmark remains the parent brand; **Engine** is the product descriptor.
 
 ## Licensing
 
