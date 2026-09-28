@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">MCPiler favicon</title>
+  <desc id="desc">Small-size MCPiler favicon using the responsive mark.</desc>
+  <rect width="64" height="64" rx="14" fill="#FAFAF8"/>
+<rect x="0.75" y="0.75" width="62.5" height="62.5" rx="13.25" fill="none" stroke="#D8DADD" stroke-width="1.5"/>
+<g fill="none" stroke="#111315" aria-hidden="true">
+      <path d="M18 49V13L32 23L46 13V49" stroke-width="5.5" stroke-linecap="square" stroke-linejoin="miter"/>
+      <path d="M21 32L32 40L43 32" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="miter"/>
+    </g>
+</svg>
