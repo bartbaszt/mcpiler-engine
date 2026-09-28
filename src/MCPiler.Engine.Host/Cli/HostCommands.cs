@@ -143,6 +143,24 @@ public static class HostCommands
                 report + StartupReport.RenderRefusal(authorizationRefusal) + Environment.NewLine);
         }
 
+        if (binding.Listener.Transport is HostTransport.Http)
+        {
+            IReadOnlyList<StartupRefusal> httpRefusals =
+                FindHttpHostRefusals(MountSet.From(result), binding);
+
+            if (httpRefusals.Count > 0)
+            {
+                StringBuilder refusedReport = new(report);
+                foreach (StartupRefusal httpRefusal in httpRefusals)
+                {
+                    refusedReport.Append(StartupReport.RenderRefusal(httpRefusal));
+                    refusedReport.AppendLine();
+                }
+
+                return new CommandOutcome(ExitCodes.Configuration, refusedReport.ToString());
+            }
+        }
+
         if (binding.Listener.Transport is HostTransport.Stdio
             && !StdioTransport.TrySelectSurface(result, out _, out string? stdioRefusal))
         {
@@ -291,6 +309,25 @@ public static class HostCommands
             return new CommandOutcome(ExitCodes.Configuration, identity + Environment.NewLine + refusal);
         }
 
+        EngineGeneration activeGeneration = generations.Current
+            ?? throw new InvalidOperationException(
+                "Initial managed synchronization reported success without an active generation.");
+
+        IReadOnlyList<StartupRefusal> managedHttpRefusals =
+            FindHttpHostRefusals(activeGeneration.Mounts, binding);
+        if (managedHttpRefusals.Count > 0)
+        {
+            StringBuilder refused = new(identity);
+            refused.AppendLine();
+            foreach (StartupRefusal httpRefusal in managedHttpRefusals)
+            {
+                refused.Append(StartupReport.RenderRefusal(httpRefusal));
+                refused.AppendLine();
+            }
+
+            return new CommandOutcome(ExitCodes.Configuration, refused.ToString());
+        }
+
         progress?.Write(identity + Environment.NewLine + StartupReport.RenderManaged(
             options.Describe(),
             initial.GenerationId!,
@@ -423,25 +460,9 @@ public static class HostCommands
 
         if (binding.Listener.Transport is HostTransport.Http)
         {
-            MountSet topology = MountSet.From(result);
-            foreach (StartupRefusal topologyRefusal in HostRouteTopologyValidation.Find(topology))
+            foreach (StartupRefusal httpRefusal in FindHttpHostRefusals(MountSet.From(result), binding))
             {
-                text.Append(StartupReport.RenderUnstartable(topologyRefusal));
-                unstartable = true;
-            }
-
-            if (binding.Authorization is not null
-                && result.Mounts.Any(mount => mount.RequiresAuthorization())
-                && binding.AllowedHosts.Count == 0)
-            {
-                text.Append(StartupReport.RenderUnstartable(new StartupRefusal(
-                    string.Empty,
-                    "auth/allowed-host-missing",
-                    $"Protected HTTP serving requires at least one '{HostConfiguration.AllowedHostKey}' "
-                    + $"when '{HostConfiguration.ListenKey}' does not name one concrete authority.")
-                {
-                    Setting = HostConfiguration.AllowedHostKey,
-                }));
+                text.Append(StartupReport.RenderUnstartable(httpRefusal));
                 unstartable = true;
             }
         }
@@ -491,6 +512,29 @@ public static class HostCommands
         return new CommandOutcome(
             unstartable ? ExitCodes.Configuration : ExitCodes.Success,
             text.ToString());
+    }
+
+    private static IReadOnlyList<StartupRefusal> FindHttpHostRefusals(
+        MountSet mounts,
+        HostBinding binding)
+    {
+        List<StartupRefusal> refusals = [.. HostRouteTopologyValidation.Find(mounts)];
+
+        if (binding.Authorization is not null
+            && mounts.Mounts.Any(mount => mount.RequiresAuthorization())
+            && binding.AllowedHosts.Count == 0)
+        {
+            refusals.Add(new StartupRefusal(
+                string.Empty,
+                "auth/allowed-host-missing",
+                $"Protected HTTP serving requires at least one '{HostConfiguration.AllowedHostKey}' "
+                + $"when '{HostConfiguration.ListenKey}' does not name one concrete authority.")
+            {
+                Setting = HostConfiguration.AllowedHostKey,
+            });
+        }
+
+        return refusals;
     }
 
     private static async Task<CommandOutcome> FilesAsync(CommandLineResult parsed, CancellationToken cancellationToken)
