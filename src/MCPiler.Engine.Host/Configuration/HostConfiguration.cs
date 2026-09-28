@@ -837,7 +837,32 @@ public static class HostConfiguration
             return false;
         }
 
-        authority = parsed.Authority;
+        // Uri.Authority canonicalizes an explicitly written default port away. AllowedHosts is
+        // an exact, scheme-neutral authority policy, so derive it from the operator's declared
+        // listener authority after the URI has been validated and the host classified above.
+        int authorityStart = parsed.Scheme.Length + Uri.SchemeDelimiter.Length;
+        int authorityEnd = listen.Length;
+
+        int slash = listen.IndexOf('/', authorityStart);
+        int query = listen.IndexOf('?', authorityStart);
+        int fragment = listen.IndexOf('#', authorityStart);
+
+        if (slash >= 0 && slash < authorityEnd)
+        {
+            authorityEnd = slash;
+        }
+
+        if (query >= 0 && query < authorityEnd)
+        {
+            authorityEnd = query;
+        }
+
+        if (fragment >= 0 && fragment < authorityEnd)
+        {
+            authorityEnd = fragment;
+        }
+
+        authority = listen[authorityStart..authorityEnd];
         return true;
     }
 

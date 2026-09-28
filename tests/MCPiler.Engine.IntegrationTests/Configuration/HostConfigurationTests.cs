@@ -467,6 +467,11 @@ public sealed class HostConfigurationTests
     [Theory]
     [InlineData("http://127.0.0.1:8080", "127.0.0.1:8080")]
     [InlineData("http://[::1]:8080", "[::1]:8080")]
+    [InlineData("http://127.0.0.1:80", "127.0.0.1:80")]
+    [InlineData("https://example.com:443", "example.com:443")]
+    [InlineData("http://[::1]:80", "[::1]:80")]
+    [InlineData("http://example.com", "example.com")]
+    [InlineData("https://example.com", "example.com")]
     public void A_concrete_listener_derives_its_authority(string listen, string expected)
     {
         Dictionary<string, string> settings = AuthorizedHttpSettings(listen);

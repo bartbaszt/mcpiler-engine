@@ -203,10 +203,19 @@ public sealed class HostCommandsTests : IDisposable
         Assert.Contains("canonical literal HTTP path", outcome.Output, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task Inspect_and_serve_refuse_a_surface_that_collides_with_transfer_namespace()
+    [Theory]
+    [InlineData("files/upload")]
+    [InlineData("FILES/upload")]
+    [InlineData("Files/upload")]
+    [InlineData("fIlEs/upload")]
+    [InlineData("files/capability")]
+    [InlineData("FILES/capability")]
+    [InlineData("Files/capability")]
+    public async Task Inspect_and_serve_refuse_a_surface_that_collides_with_transfer_namespace(string slug)
     {
-        string manifest = SurfaceSlugManifest("transfer-collision", "files/upload");
+        string manifest = SurfaceSlugManifest(
+            "transfer-collision-" + Guid.NewGuid().ToString("N"),
+            slug);
         string store = Store();
         string[] settings =
         [

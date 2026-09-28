@@ -131,7 +131,7 @@ internal static class HostRouteTopologyValidation
                 continue;
             }
 
-            if (TransferPath.TryParse(address.Path, out _))
+            if (IsTransferNamespaceAlias(address.Path))
             {
                 refusals.Add(Refusal(
                     address,
@@ -209,6 +209,31 @@ internal static class HostRouteTopologyValidation
         => IsNamespace(path, HealthPrefix)
             || IsNamespace(path, OperatorPrefix)
             || IsNamespace(path, ProtectedResourceMetadataPrefix);
+
+    private static bool IsTransferNamespaceAlias(string path)
+    {
+        // TransferPath.TryParse deliberately remains ordinal: /files/ is protocol syntax on the
+        // wire. Topology validation has a different job. ASP.NET literal routing is
+        // case-insensitive, so a surface such as /api/FILES/upload would alias the Engine-owned
+        // /api/files/upload child before the ordinal protocol parser gets to decide what it is.
+        if (path.EndsWith(TransferPath.UploadSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return path.Length > TransferPath.UploadSuffix.Length;
+        }
+
+        int marker = path.LastIndexOf(TransferPath.FilesSegment, StringComparison.OrdinalIgnoreCase);
+
+        if (marker <= 0)
+        {
+            return false;
+        }
+
+        string candidate = path[(marker + TransferPath.FilesSegment.Length)..];
+
+        // Mirror the download shape only for collision detection: one non-empty capability
+        // segment. Deeper paths do not name a transfer child and therefore are not aliases.
+        return candidate.Length > 0 && !candidate.Contains('/');
+    }
 
     private static bool IsNamespace(string path, string prefix)
         => string.Equals(path, prefix, StringComparison.OrdinalIgnoreCase)
