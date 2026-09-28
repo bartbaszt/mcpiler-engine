@@ -314,7 +314,7 @@ public static class EngineWebHost
         else
         {
             McpRegistration.MapMounts(app, generations.Current!.Mounts);
-            FileTransferEndpoints.Map(app, generations.Current!.Mounts);
+            FileTransferEndpoints.Map(app);
         }
 
         HealthEndpoints.Map(app, binding.Runtime.FileStoreRoot, drain);
