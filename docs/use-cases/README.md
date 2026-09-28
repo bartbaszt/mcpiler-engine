@@ -19,9 +19,9 @@ Unless a case explicitly says otherwise, remember two global rules:
 1. HTTP mounts are protected by default. A local/demo case that intentionally needs no caller
    authorization must say `"authenticationRequired": false`; a protected HTTP case must pass the
    same `--issuer` / `--token-validation` settings to both `inspect` and `serve`.
-2. `inspect` is an exit-code preflight, not merely a report. If the exact HTTP configuration
-   would be refused at startup, `inspect` exits `78` while still printing the derived
-   surfaces/tools for diagnosis. CI should require exit code 0.
+2. `inspect` is an exit-code preflight, not merely a report. If a configuration fails one of
+   the startup checks that `inspect` performs, it exits `78` while still printing derived
+   surfaces/tools. Listener/socket binding itself is not checked because no listener is opened.
 
 # Coverage map
 
@@ -517,11 +517,12 @@ Steps:
 1. run Engine on a private listen address;
 2. proxy the exact public mount/surface path **without prefix stripping or path rewriting**; preserve the path Engine sees;
 3. configure --trusted-proxy with only the proxy's actual source IP;
-4. configure browser allowed origins only when needed;
-5. keep health endpoints available to the orchestrator as appropriate;
-6. test protected-resource metadata/auth;
-7. test a complete MCP initialization and tool call through the proxy;
-8. verify direct untrusted forwarded headers are ignored.
+4. configure --allowed-host with the exact public host[:port] preserved by the proxy;
+5. configure browser allowed origins only when needed;
+6. keep health endpoints available to the orchestrator as appropriate;
+7. test protected-resource metadata/auth;
+8. test a complete MCP initialization and tool call through the proxy;
+9. verify direct untrusted forwarded headers are ignored.
 
 See:
 [hosting.md](../hosting.md#proxy-deployments).
