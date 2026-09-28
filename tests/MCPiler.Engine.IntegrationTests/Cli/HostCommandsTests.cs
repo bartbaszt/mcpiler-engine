@@ -183,6 +183,56 @@ public sealed class HostCommandsTests : IDisposable
         Assert.DoesNotContain("operator-secret-canary-value", present.Output, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("/api/")]
+    [InlineData("/")]
+    [InlineData("api")]
+    [InlineData("/api/{tenant}")]
+    [InlineData("/foo?x")]
+    public async Task Inspect_refuses_noncanonical_mount_prefixes(string prefix)
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            ["inspect", "--mount", prefix + "=" + Manifest("bad-prefix-" + Guid.NewGuid().ToString("N")), "--file-store-root", Store()],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
+        Assert.Contains("canonical literal HTTP path", outcome.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Inspect_refuses_a_surface_that_collides_with_transfer_namespace()
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "inspect",
+                "--mount", "/api=" + SurfaceSlugManifest("transfer-collision", "files/upload"),
+                "--file-store-root", Store(),
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
+        Assert.Contains("host/surface-address-transfer-collision", outcome.Output, StringComparison.Ordinal);
+        Assert.Contains("fingerprint=", outcome.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Inspect_refuses_a_surface_that_collides_with_health_namespace()
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "inspect",
+                "--mount", "/health=" + SurfaceSlugManifest("health-collision", "live"),
+                "--file-store-root", Store(),
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
+        Assert.Contains("host/surface-address-reserved", outcome.Output, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Inspect_opens_no_listener_and_says_so()
     {
@@ -800,6 +850,19 @@ public sealed class HostCommandsTests : IDisposable
           }
         }
         """;
+
+    private string SurfaceSlugManifest(string name, string slug)
+    {
+        string directory = Path.Combine(_root, name);
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(
+            Path.Combine(directory, "manifest.json"),
+            OpenManifestText.Replace(
+                "\"name\": \"Open API\",",
+                $"\"name\": \"Open API\", \"surfaces\": [{{ \"slug\": \"{slug}\", \"isDefault\": true }}],",
+                StringComparison.Ordinal));
+        return directory;
+    }
 
     private string ScopedManifest(string name)
     {
