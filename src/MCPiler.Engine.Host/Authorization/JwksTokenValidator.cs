@@ -34,6 +34,7 @@ internal sealed class JwksTokenValidator : ITokenValidator
 {
     private static readonly TimeSpan KeyRefreshInterval = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan MaximumKeyAge = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan RefreshAttemptCooldown = TimeSpan.FromSeconds(30);
 
     private readonly HttpClient _client;
     private readonly string _issuer;
@@ -45,6 +46,8 @@ internal sealed class JwksTokenValidator : ITokenValidator
     private string? _jwksUri;
     private JsonWebKeySet? _cachedKeys;
     private DateTimeOffset _keysFetchedAt;
+    private DateTimeOffset _lastRegularRefreshAttemptAt;
+    private DateTimeOffset _lastForcedRefreshAttemptAt;
     private Task<JsonWebKeySet?>? _refreshTask;
 
     internal JwksTokenValidator(
@@ -151,6 +154,24 @@ internal sealed class JwksTokenValidator : ITokenValidator
 
             if (_refreshTask is null || _refreshTask.IsCompleted)
             {
+                DateTimeOffset lastAttempt = forceRefresh
+                    ? _lastForcedRefreshAttemptAt
+                    : _lastRegularRefreshAttemptAt;
+
+                if (lastAttempt != default && now - lastAttempt < RefreshAttemptCooldown)
+                {
+                    return Task.FromResult(StaleKeysUnsafe(now));
+                }
+
+                if (forceRefresh)
+                {
+                    _lastForcedRefreshAttemptAt = now;
+                }
+                else
+                {
+                    _lastRegularRefreshAttemptAt = now;
+                }
+
                 _refreshTask = RefreshKeysAsync();
             }
 
