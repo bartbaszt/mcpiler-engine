@@ -154,6 +154,15 @@ public static class EngineWebHost
                 $"refused {first.Mount} [{first.Code}]: {first.Message}");
         }
 
+        if (binding.Authorization is not null
+            && activeGeneration.Mounts.Mounts.Any(mount => mount.RequiresAuthorization())
+            && binding.AllowedHosts.Count == 0)
+        {
+            generations.Dispose();
+            throw new InvalidOperationException(
+                $"refused [auth/allowed-host-missing]: protected HTTP serving requires at least one '{HostConfiguration.AllowedHostKey}'.");
+        }
+
         // The authorization pairing is a startup fact, not a request-time surprise. A mount
         // that requires a token exists and the process trusts no issuer: refusing here
         // names the mount, and an operator debugs their deployment rather than a client
