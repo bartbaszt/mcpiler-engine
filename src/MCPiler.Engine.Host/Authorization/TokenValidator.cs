@@ -60,7 +60,8 @@ public interface ITokenValidator
 /// </remarks>
 internal readonly record struct IssuerMetadataDiscovery(
     JsonElement? Document,
-    string? InvalidReason);
+    string? InvalidReason,
+    HttpStatusCode? StatusCode = null);
 
 internal static class IssuerMetadata
 {
@@ -91,7 +92,7 @@ internal static class IssuerMetadata
 
         if (response.StatusCode != HttpStatusCode.OK)
         {
-            return new IssuerMetadataDiscovery(null, null);
+            return new IssuerMetadataDiscovery(null, null, response.StatusCode);
         }
 
         try
@@ -104,28 +105,29 @@ internal static class IssuerMetadata
 
             if (root.ValueKind is not JsonValueKind.Object)
             {
-                return new IssuerMetadataDiscovery(null, "The authorization-server metadata is not a JSON object.");
+                return new IssuerMetadataDiscovery(null, "The authorization-server metadata is not a JSON object.", response.StatusCode);
             }
 
             if (!root.TryGetProperty("issuer", out JsonElement declared)
                 || declared.ValueKind is not JsonValueKind.String
                 || declared.GetString() is not { Length: > 0 } metadataIssuer)
             {
-                return new IssuerMetadataDiscovery(null, "The authorization-server metadata omits the required 'issuer' member.");
+                return new IssuerMetadataDiscovery(null, "The authorization-server metadata omits the required 'issuer' member.", response.StatusCode);
             }
 
             if (!string.Equals(metadataIssuer, issuer, StringComparison.Ordinal))
             {
                 return new IssuerMetadataDiscovery(
                     null,
-                    $"The authorization-server metadata issuer '{metadataIssuer}' does not exactly match configured issuer '{issuer}'.");
+                    $"The authorization-server metadata issuer '{metadataIssuer}' does not exactly match configured issuer '{issuer}'.",
+                    response.StatusCode);
             }
 
-            return new IssuerMetadataDiscovery(root.Clone(), null);
+            return new IssuerMetadataDiscovery(root.Clone(), null, response.StatusCode);
         }
         catch (JsonException)
         {
-            return new IssuerMetadataDiscovery(null, "The authorization-server metadata is not valid JSON.");
+            return new IssuerMetadataDiscovery(null, "The authorization-server metadata is not valid JSON.", response.StatusCode);
         }
     }
 }
