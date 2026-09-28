@@ -713,15 +713,6 @@ public static class HostConfiguration
             allowedHosts.Add(listenerAuthority!);
         }
 
-        if (authorization is not null
-            && transport is HostTransport.Http
-            && allowedHosts.Count == 0)
-        {
-            rejected.Add(
-                $"Protected HTTP serving requires at least one '{AllowedHostKey}' when '{ListenKey}' "
-                + "does not name one concrete authority.");
-        }
-
         if (rejected.Count > 0)
         {
             binding = null;
