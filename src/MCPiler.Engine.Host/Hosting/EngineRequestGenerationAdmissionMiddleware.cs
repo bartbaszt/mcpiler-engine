@@ -1,3 +1,4 @@
+using MCPiler.Engine.Host.Configuration;
 using MCPiler.Engine.Host.Files;
 using MCPiler.Engine.Host.Mcp;
 using MCPiler.Engine.Runtime;
@@ -18,18 +19,27 @@ internal sealed class EngineRequestGenerationAdmissionMiddleware
 {
     private readonly RequestDelegate _next;
     private readonly EngineGenerationManager _generations;
+    private readonly HostBinding _binding;
 
     public EngineRequestGenerationAdmissionMiddleware(
         RequestDelegate next,
-        EngineGenerationManager generations)
+        EngineGenerationManager generations,
+        HostBinding binding)
     {
         _next = next;
         _generations = generations;
+        _binding = binding;
     }
 
     public async Task InvokeAsync(HttpContext context)
     {
-        string? address = AddressOf(context);
+        SurfaceEndpoint? route = context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>();
+
+        if (!TryAddressOf(context, route, out string? address, out string authorizationResourcePath))
+        {
+            await RefuseSilentlyAsync(context).ConfigureAwait(false);
+            return;
+        }
 
         if (address is null)
         {
@@ -52,16 +62,37 @@ internal sealed class EngineRequestGenerationAdmissionMiddleware
                 return;
             }
 
+            if (resolved.Mount.RequiresAuthorization()
+                && (_binding.Authorization is null
+                    || !AuthorityAllowed(context.Request.Host.Value, _binding.AllowedHosts)))
+            {
+                // Defense in depth for managed mode: a protected generation must never flow to
+                // handlers when this listener was built without an authorization boundary, even
+                // if a future activation bug admitted the generation.
+                await RefuseSilentlyAsync(context).ConfigureAwait(false);
+                return;
+            }
+
             string resourceIdentity = MountAuthorization.CanonicalResource(
                 context.Request.Scheme,
                 context.Request.Host.Value ?? string.Empty,
-                address);
+                authorizationResourcePath);
 
-            context.Features.Set(new EngineRequestGenerationAdmission(
+            var admission = new EngineRequestGenerationAdmission(
                 address,
+                authorizationResourcePath,
                 resourceIdentity,
                 lease.Generation,
-                resolved));
+                resolved);
+
+            if (!resolved.Mount.RequiresAuthorization())
+            {
+                // Public is a positive decision about an open mount, not the default identity of
+                // a request whose authorization decision has not happened yet.
+                admission.CallerPartition = CallerPartition.Public;
+            }
+
+            context.Features.Set(admission);
 
             try
             {
@@ -77,21 +108,47 @@ internal sealed class EngineRequestGenerationAdmissionMiddleware
         }
     }
 
-    private static string? AddressOf(HttpContext context)
+    private static bool TryAddressOf(
+        HttpContext context,
+        SurfaceEndpoint? route,
+        out string? address,
+        out string authorizationResourcePath)
     {
-        if (context.GetEndpoint()?.Metadata.GetMetadata<SurfaceEndpoint>() is { } route)
+        string decodedPath = context.Request.Path.Value ?? "/";
+
+        if (TransferPath.TryParse(decodedPath, out _))
         {
-            return RequestAddress.Resolve(context, route);
+            if (!RequestAddress.TryResolveCanonicalTransfer(
+                    context,
+                    out TransferPath decodedTransfer,
+                    out TransferPath rawTransfer))
+            {
+                address = null;
+                authorizationResourcePath = string.Empty;
+                return false;
+            }
+
+            address = RequestAddress.NormalizeResolutionAddress(decodedTransfer.ParentAddress);
+            authorizationResourcePath = rawTransfer.ParentAddress;
+            return true;
         }
 
-        // A managed catch-all can receive a transfer child before the transfer dispatcher clears
-        // the endpoint. Recognize it here so parent authorization and transfer execution share the
-        // same admission even when endpoint routing exposes no SurfaceEndpoint metadata for the
-        // child path.
-        return TransferPath.TryParse(context.Request.Path.Value, out TransferPath transfer)
-            ? transfer.ParentAddress
-            : null;
+        if (route is null)
+        {
+            address = null;
+            authorizationResourcePath = string.Empty;
+            return true;
+        }
+
+        address = RequestAddress.Resolve(context, route);
+        authorizationResourcePath = route.ResolveAuthorizationResourcePath(context);
+        return true;
     }
+
+    internal static bool AuthorityAllowed(string? authority, IReadOnlyList<string> allowed)
+        => !string.IsNullOrEmpty(authority)
+            && allowed.Any(candidate =>
+                string.Equals(candidate, authority, StringComparison.OrdinalIgnoreCase));
 
     private static Task RefuseSilentlyAsync(HttpContext context)
     {

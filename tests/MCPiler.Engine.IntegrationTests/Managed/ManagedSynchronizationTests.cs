@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -159,6 +160,131 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             TestContext.Current.CancellationToken);
 
         Assert.Equal(HttpStatusCode.NotFound, removed.StatusCode);
+    }
+
+    [Fact]
+    public async Task Open_to_protected_without_an_issuer_is_refused_and_keeps_the_open_generation()
+    {
+        var current = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        await using var platform = await PlatformAsync(_ => Response.Generation(current));
+        await using ManagedProcess engine = await StartAsync(
+            platform,
+            allowedHosts: ["mcp.example.test"]);
+
+        current = Generation("g2", ServedManifests.ProtectedOneSurface, prefix: "/mcp/connector");
+
+        await WaitForAsync(
+            () =>
+            {
+                lock (engine.Diagnostics)
+                {
+                    return engine.Diagnostics.Any(message =>
+                        message.Contains("auth/issuer-missing", StringComparison.Ordinal));
+                }
+            });
+
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+
+        using McpHttpSession session = await McpHttpSession.OpenAsync(
+            engine.At("/mcp/connector/full"),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(
+            ["list-pets", "add-pet"],
+            Names(await session.RequestAsync("tools/list", 2, TestContext.Current.CancellationToken)));
+    }
+
+    [Fact]
+    public async Task Open_to_protected_without_an_allowed_host_is_refused_and_keeps_the_open_generation()
+    {
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(
+            active: true,
+            TestContext.Current.CancellationToken);
+
+        var current = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        await using var platform = await PlatformAsync(_ => Response.Generation(current));
+        await using ManagedProcess engine = await StartAsync(
+            platform,
+            authorization: AuthorizationFor(authorization.Address),
+            allowedHosts: []);
+
+        current = Generation("g2", ServedManifests.ProtectedOneSurface, prefix: "/mcp/connector");
+
+        await WaitForAsync(
+            () =>
+            {
+                lock (engine.Diagnostics)
+                {
+                    return engine.Diagnostics.Any(message =>
+                        message.Contains("auth/allowed-host-missing", StringComparison.Ordinal));
+                }
+            });
+
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+    }
+
+    [Fact]
+    public async Task Open_to_protected_with_issuer_and_allowed_host_activates_and_requires_bearer_authentication()
+    {
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(
+            active: true,
+            TestContext.Current.CancellationToken);
+
+        var current = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        await using var platform = await PlatformAsync(_ => Response.Generation(current));
+        await using ManagedProcess engine = await StartAsync(
+            platform,
+            authorization: AuthorizationFor(authorization.Address));
+
+        current = Generation("g2", ServedManifests.ProtectedOneSurface, prefix: "/mcp/connector");
+        await WaitForAsync(() => engine.Worker.ActiveGenerationId == "g2");
+
+        Uri endpoint = engine.At("/mcp/connector/full");
+        using (HttpClient anonymous = new())
+        using (HttpResponseMessage refused = await anonymous.PostAsync(
+            endpoint,
+            new StringContent(
+                """{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}""",
+                Encoding.UTF8,
+                "application/json"),
+            TestContext.Current.CancellationToken))
+        {
+            Assert.Equal(HttpStatusCode.Unauthorized, refused.StatusCode);
+        }
+
+        string token = authorization.Mint(endpoint.AbsoluteUri.TrimEnd('/'), string.Empty);
+        using McpHttpSession session = await McpHttpSession.OpenAsync(
+            endpoint,
+            TestContext.Current.CancellationToken,
+            bearerToken: token);
+        Assert.Equal(
+            ["list-pets", "add-pet"],
+            Names(await session.RequestAsync("tools/list", 2, TestContext.Current.CancellationToken)));
+    }
+
+    [Fact]
+    public async Task Protected_to_open_activates_and_the_new_generation_serves_without_a_bearer()
+    {
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(
+            active: true,
+            TestContext.Current.CancellationToken);
+
+        var current = Generation("g1", ServedManifests.ProtectedOneSurface, prefix: "/mcp/connector");
+        await using var platform = await PlatformAsync(_ => Response.Generation(current));
+        await using ManagedProcess engine = await StartAsync(
+            platform,
+            authorization: AuthorizationFor(authorization.Address));
+
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+
+        current = Generation("g2", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        await WaitForAsync(() => engine.Worker.ActiveGenerationId == "g2");
+
+        using McpHttpSession session = await McpHttpSession.OpenAsync(
+            engine.At("/mcp/connector/full"),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(
+            ["list-pets", "add-pet"],
+            Names(await session.RequestAsync("tools/list", 2, TestContext.Current.CancellationToken)));
     }
 
     [Fact]
@@ -726,10 +852,12 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     {
         ManagedGenerationLoader loader = await OpenLoaderAsync();
         var manager = new EngineGenerationManager(HostMode.Managed);
+        HostBinding binding = ManagedBinding();
         var worker = new ManagedSyncWorker(
             platform.Options(secretFileExists),
             loader,
             manager,
+            binding,
             "test",
             backoff: new ManagedSyncBackoff(TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(50)));
 
@@ -747,16 +875,20 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
     private async Task<ManagedProcess> StartAsync(
         PlatformStandIn platform,
-        ManagedGenerationLoader? providedLoader = null)
+        ManagedGenerationLoader? providedLoader = null,
+        HostAuthorizationOptions? authorization = null,
+        IReadOnlyList<string>? allowedHosts = null)
     {
         ManagedGenerationLoader loader = providedLoader ?? await OpenLoaderAsync();
         var manager = new EngineGenerationManager(HostMode.Managed);
         var drain = new DrainCoordinator();
+        HostBinding binding = ManagedBinding(authorization, allowedHosts);
         List<string> diagnostics = [];
         var worker = new ManagedSyncWorker(
             platform.Options(),
             loader,
             manager,
+            binding,
             "test",
             diagnostics: message =>
             {
@@ -771,17 +903,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         Assert.True(initial.Started, initial.Refusal?.Message);
 
-        string fileRoot = Path.Combine(_root, "files-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(fileRoot);
-
-        WebApplication app = EngineWebHost.BuildManaged(
-            new HostBinding(
-                new RuntimeOptions([], fileRoot),
-                new HostListenOptions("http://127.0.0.1:0", HostTransport.Http),
-                Authorization: null,
-                HostLifecycleOptions.Default),
-            drain,
-            manager);
+        WebApplication app = EngineWebHost.BuildManaged(binding, drain, manager);
 
         await app.StartAsync(TestContext.Current.CancellationToken);
 
@@ -802,6 +924,35 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         process.Diagnostics = diagnostics;
         _processes.Add(process);
         return process;
+    }
+
+    private HostBinding ManagedBinding(
+        HostAuthorizationOptions? authorization = null,
+        IReadOnlyList<string>? allowedHosts = null)
+    {
+        string fileRoot = Path.Combine(_root, "files-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(fileRoot);
+
+        int port = ReserveLoopbackPort();
+        string authority = $"127.0.0.1:{port}";
+
+        return new HostBinding(
+            new RuntimeOptions([], fileRoot),
+            new HostListenOptions($"http://{authority}", HostTransport.Http),
+            authorization,
+            HostLifecycleOptions.Default)
+        {
+            AllowedHosts = allowedHosts ?? (authorization is null ? [] : [authority]),
+        };
+    }
+
+    private static int ReserveLoopbackPort()
+    {
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        return port;
     }
 
     private async Task<ManagedGenerationLoader> OpenLoaderAsync()
@@ -876,6 +1027,9 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             answer,
             delay ?? TimeSpan.Zero,
             TestContext.Current.CancellationToken);
+
+    private static HostAuthorizationOptions AuthorizationFor(Uri issuer)
+        => new(issuer.AbsoluteUri, HostTokenValidation.Introspection);
 
     private static Dictionary<string, object?> Generation(
         string id,

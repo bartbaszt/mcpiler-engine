@@ -1,7 +1,10 @@
 {
   "manifestFormatVersion": "0.3",
   "sections": {
-    "server": { "inline": { "name": "Example API" } },
+    "server": { "inline": {
+      "name": "Example API",
+      "authenticationRequired": false
+    } },
     "policy": { "inline": { "baseUrl": "https://api.example.com" } },
     "operations": {
       "inline": {

@@ -1,6 +1,7 @@
 using MCPiler.Engine.Host.Configuration;
 using MCPiler.Engine.Host.Files;
 using MCPiler.Engine.Host.Hosting;
+using MCPiler.Engine.Host.Mcp;
 using MCPiler.Engine.Runtime;
 
 using Microsoft.AspNetCore.Http;
@@ -83,12 +84,17 @@ internal static class SurfaceMetadata
     /// </remarks>
     internal static bool? MountRequiresAuthorization(
         HttpContext context,
-        EngineGenerationManager generations)
+        EngineGenerationManager generations,
+        IReadOnlyList<string> allowedHosts)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(generations);
 
-        string resource = ResourceOf(context);
+        if (!TryResourcePaths(context, out string resource, out _))
+        {
+            return null;
+        }
+
         string address = string.IsNullOrEmpty(resource) ? "/" : resource;
 
         // A transfer child is not a protected resource of its own: it inherits the mount that
@@ -103,32 +109,62 @@ internal static class SurfaceMetadata
             return null;
         }
 
+        string resolutionAddress = RequestAddress.NormalizeResolutionAddress(address);
+
         using (lease)
         {
-            return lease.Generation.TryResolve(address, out SurfaceResolution? resolved)
-                && resolved is not null
-                ? resolved.Mount.RequiresAuthorization()
-                : null;
+            if (!lease.Generation.TryResolve(resolutionAddress, out SurfaceResolution? resolved)
+                || resolved is null)
+            {
+                return null;
+            }
+
+            if (resolved.Mount.RequiresAuthorization()
+                && !EngineRequestGenerationAdmissionMiddleware.AuthorityAllowed(
+                    context.Request.Host.Value,
+                    allowedHosts))
+            {
+                return null;
+            }
+
+            return resolved.Mount.RequiresAuthorization();
         }
     }
 
     /// <summary>
-    /// The resource path a metadata request mirrors, with the well-known prefix removed.
+    /// Splits the metadata route into decoded and raw resource paths only when the Engine-owned
+    /// well-known prefix is present literally and case-exactly in both representations.
     /// </summary>
-    private static string ResourceOf(HttpContext context)
+    private static bool TryResourcePaths(
+        HttpContext context,
+        out string decodedResource,
+        out string rawResource)
     {
-        string path = context.Request.Path.Value ?? "/";
+        string decodedPath = context.Request.Path.Value ?? "/";
+        string rawPath = RequestAddress.RawPath(context);
 
-        return path.StartsWith(WellKnownPrefix, StringComparison.Ordinal)
-            ? path[WellKnownPrefix.Length..]
-            : path;
+        if (!decodedPath.StartsWith(WellKnownPrefix, StringComparison.Ordinal)
+            || !rawPath.StartsWith(WellKnownPrefix, StringComparison.Ordinal))
+        {
+            decodedResource = string.Empty;
+            rawResource = string.Empty;
+            return false;
+        }
+
+        decodedResource = decodedPath[WellKnownPrefix.Length..];
+        rawResource = rawPath[WellKnownPrefix.Length..];
+        return true;
     }
 
     internal static ProtectedResourceMetadata Build(
         HttpContext context,
         HostAuthorizationOptions options)
     {
-        string resource = ResourceOf(context);
+        if (!TryResourcePaths(context, out _, out string resource))
+        {
+            throw new InvalidOperationException(
+                "Protected-resource metadata was built for a noncanonical well-known request path.");
+        }
 
         string canonical = MountAuthorization.CanonicalResource(
             context.Request.Scheme,

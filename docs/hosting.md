@@ -5,9 +5,15 @@ keeps binary file handles in a local store, and serves the derived MCP surfaces 
 Streamable HTTP or standard input/output. The client-facing upload/download route contract is
 documented in [File handles — HTTP transfer contract](file-handles.md#http-transfer-contract).
 
+For symptom-driven diagnosis, startup refusals, managed-mode recovery, proxy/auth issues and
+projection failures, see [Troubleshooting](troubleshooting.md).
+
 ## Basic HTTP hosting
 
-A serving process needs at least one mount and a file-store root:
+A serving process needs at least one mount and a file-store root. HTTP mounts are **protected by
+default** because `server.authenticationRequired` defaults to `true`.
+
+For an explicitly open local/demo Manifest (`"authenticationRequired": false`):
 
 ```bash
 dotnet mcpiler-engine.dll serve \
@@ -15,16 +21,39 @@ dotnet mcpiler-engine.dll serve \
   --file-store-root /data
 ```
 
-`--mount` is repeatable. Its value is `<prefix>=<manifest-directory>`. Each mounted Manifest
-keeps its own tool namespace and surfaces; mounts are not merged. The Manifest's default
-surface answers at the mount prefix and named surfaces answer below that prefix.
+JWKS validation keeps a bounded process-local **JWKS key-set cache**: keys are treated as fresh for
+5 minutes, an unknown `kid` triggers an early refresh, and the last valid set may be reused for up
+to 15 minutes total during a transient JWKS outage. After that bound, validation fails closed.
+Introspection has its separate result-cache policy documented below.
 
-The HTTP listener defaults to `http://127.0.0.1:8080`. Override it with `--listen`:
+For the normal protected HTTP case, configure a real OAuth/OIDC issuer and validation mode:
 
 ```bash
 dotnet mcpiler-engine.dll serve \
   --mount /petstore=/manifests/petstore \
   --file-store-root /data \
+  --issuer https://idp.example.com \
+  --token-validation jwks
+```
+
+The issuer above is a placeholder; use your actual authority. If discovery does not publish the
+required endpoint, supply the documented `--jwks-uri` or introspection override.
+
+`--mount` is repeatable. Its value is `<prefix>=<manifest-directory>`. Each mounted Manifest
+keeps its own tool namespace and surfaces; mounts are not merged. The Manifest's default
+surface answers at the mount prefix and named surfaces answer below that prefix.
+
+The HTTP listener defaults to `http://127.0.0.1:8080`. Override it with `--listen`.
+When binding beyond loopback, keep the protected authorization settings from the serving
+configuration above unless the network itself is an intentionally trusted boundary:
+
+```bash
+dotnet mcpiler-engine.dll serve \
+  --mount /petstore=/manifests/petstore \
+  --file-store-root /data \
+  --issuer https://idp.example.com \
+  --token-validation jwks \
+  --allowed-host mcp.example.com \
   --listen http://0.0.0.0:8080
 ```
 
@@ -49,10 +78,12 @@ The host accepts the following settings:
 | `--deployment-id <id>` | Deployment identity for managed mode. Required with `--mode managed`. |
 | `--deployment-secret-file <file>` | File holding the deployment-scoped bearer secret for managed mode. Required with `--mode managed`. |
 | `--trusted-proxy <ip>` | Trusts `X-Forwarded-For`/`X-Forwarded-Proto` from this proxy address. Repeatable; IP literals only. |
+| `--allowed-host <host[:port]>` | Authority admitted for protected-resource identity. Repeatable. A concrete listen authority is used by default; wildcard listeners require an explicit value. |
 | `--allowed-origin <origin>` | Browser origin admitted on served MCP addresses. Repeatable; canonical origins only. Absent means no browser origin is admitted. |
 | `--issuer <url>` | Trusted OAuth issuer for mounts that require bearer authorization, or for any mount that does not declare `authenticationRequired: false`. |
 | `--token-validation introspection\|jwks` | Token-validation mode. Must be paired with `--issuer`. |
 | `--introspection-endpoint <url>` | Override the discovered RFC 7662 endpoint. |
+| `--introspection-cache-ttl-seconds <n>` | Maximum positive introspection result age. Inactive-token results are cached for at most `min(5, n)` seconds. Default: 30 seconds; zero disables both caches. Valid only with `--token-validation introspection`. |
 | `--introspection-client-id <id>` | Client identity the process authenticates as to the introspection endpoint. Paired with `--introspection-client-secret-file`. |
 | `--introspection-client-secret-file <file>` | File holding that client's secret. A path, never a value: a command-line secret is visible to every process listing. Paired with `--introspection-client-id`. |
 | `--jwks-uri <url>` | Override the issuer's published JWKS URI. |
@@ -61,6 +92,7 @@ The host accepts the following settings:
 | `--response-cache-max-retained-bytes <n>` | Narrows the hard 256 MiB accounted-memory ceiling per mount. Zero disables response caching. |
 | `--response-cache-max-entries <n>` | Narrows the hard 4,096-entry ceiling per mount. Zero disables response caching. |
 | `--response-cache-max-ttl-seconds <n>` | Narrows the hard 86,400-second effective TTL ceiling. Zero disables response caching. |
+| `--response-cache-operator-secret-file <file>` | Enables the authenticated response-cache operator channel using a dedicated bearer secret read from this file. |
 
 Unknown settings are refused by name. Runtime API destinations, allowed origins, credentials,
 and Manifest-compiled execution limits are not host configuration.
@@ -70,6 +102,30 @@ managed desired state. Each value must be a non-negative whole number no greater
 maximum. A value above that maximum is refused with the allowed ceiling in the diagnostic.
 Setting any of the four ceilings to zero disables caching while leaving ordinary live HTTP
 execution unchanged. Startup and inspection reports show effective ceilings and disabled state.
+
+The introspection cache is separate from the upstream response cache. Its TTL is meaningful only
+with `--token-validation introspection`; supplying it with `jwks` validation or without issuer
+validation is refused rather than ignored.
+
+### Response-cache operator channel
+
+The response cache has an optional non-MCP operator surface. It is disabled by default: unless
+`--response-cache-operator-secret-file` is configured, these routes are not mapped at all.
+
+When enabled:
+
+- `GET /.engine/response-cache?mount=<prefix>` returns sanitized cache observations for the
+  currently serving generation and named mount.
+- `POST /.engine/response-cache/clear?mount=<prefix>` clears completed entries for that mount.
+  Add `&operation=<slug>` to clear only one operation.
+- Both routes require `Authorization: Bearer <operator-secret>`, where the secret is read from the
+  configured file at startup and is distinct from MCP caller tokens, the introspection client
+  secret, and the managed-deployment secret.
+- Remote use requires HTTPS. Plain HTTP is accepted only when the request genuinely originates on
+  loopback. Forwarded scheme information is honored only from addresses named with
+  `--trusted-proxy`.
+- Clearing cache entries does not mutate the Manifest or managed desired generation and does not
+  cancel an in-flight producer.
 
 Two switches affect Manifest admission:
 
@@ -87,9 +143,9 @@ compiled into the Manifest.
 ## Runtime-owned authentication state
 
 A connector may declare authentication with a slot whose value the provider rotates, such as an
-OAuth authorization-code refresh token. Engine may keep that one value across restarts in a
-bounded, encrypted, file-backed store so a rotation survives a process restart without losing the
-credential.
+OAuth authorization-code refresh token. Engine keeps that runtime-owned value across restarts in a
+bounded, encrypted, file-backed store so a rotation cannot be acknowledged and then lost on the
+next process restart. A Manifest that declares such a slot requires this store.
 
 The store is configured with two paired settings. Supplying one without the other is refused, and
 a refusal names both:
@@ -99,7 +155,9 @@ dotnet mcpiler-engine.dll serve \
   --mount /petstore=/manifests/petstore \
   --file-store-root /data \
   --runtime-state-root /state \
-  --runtime-state-key-file /run/secrets/engine-runtime-state-key
+  --runtime-state-key-file /run/secrets/engine-runtime-state-key \
+  --issuer https://idp.example.com \
+  --token-validation jwks
 ```
 
 - `--runtime-state-root` is the state directory. Records are written beneath it, one per mount,
@@ -109,8 +167,11 @@ dotnet mcpiler-engine.dll serve \
   hexadecimal characters, with one optional trailing newline. This is a deployment key. It is
   never the Platform master key, and Engine never reads Platform key material.
 
-Without both settings, startup reports `runtime state: memory-only` and a rotated refresh token
-is lost on restart. With both, startup reports `runtime state: durable`.
+Without both settings, a deployment whose Manifests declare no runtime-owned mutable slot may
+serve and reports `runtime state: memory-only`. If any mounted Manifest declares such a slot,
+startup is refused with `host/runtime-state-required`; Engine does not serve a configuration that
+could lose an already-rotated provider credential on restart. With both settings, startup reports
+`runtime state: durable`.
 
 The store is deliberately narrow. Only a slot a Manifest declares as runtime-owned mutable
 authentication state is persistable; today that is the rotating OAuth authorization-code refresh
@@ -161,7 +222,9 @@ dotnet mcpiler-engine.dll serve \
   --deployment-secret-file /run/secrets/engine-deployment-secret \
   --file-store-root /data \
   --runtime-state-root /data/runtime-state \
-  --runtime-state-key-file /run/secrets/engine-runtime-state-key
+  --runtime-state-key-file /run/secrets/engine-runtime-state-key \
+  --issuer https://idp.example.com \
+  --token-validation jwks
 ```
 
 - `--management-endpoint` is Platform's public address. Engine calls only Platform's
@@ -191,22 +254,93 @@ and inherit its audience, required scopes, protected-resource challenge and capa
 response, authorization and out-of-band byte-transfer details. Managed activation does not change
 the generation of an already admitted upload or download request.
 
+## Caller token audience is the exact MCP surface resource
+
+A valid signature/issuer and the required scopes are necessary but **not sufficient** to authorize
+a protected MCP request.
+
+The token's **audience** must name the exact canonical resource the client addressed. Engine builds
+that resource from the HTTP request-target path spelling (excluding the query string), preserving
+percent-encoding and a trailing slash for authorization even though routing uses the decoded path:
+
+```text
+scheme://host + raw surface path
+```
+
+For example:
+
+```text
+https://mcp.example.com/trilium
+https://mcp.example.com/trilium/read-only
+https://mcp.example.com/trilium/full
+```
+
+are three distinct audience/resource values even if the first two resolve to the same default
+surface/tool set.
+
+Important consequences:
+
+- scheme participates in the identity: `http://...` and `https://...` are different resources;
+- host and port participate in the identity;
+- the exact path participates in the identity;
+- a trailing slash is significant;
+- the bare default mount and its explicit default-surface path are not audience aliases;
+- no case-insensitive, prefix or trailing-slash normalization is applied;
+- percent-encoded spellings are distinct authorization resource names when the client used different
+  bytes in the request target, even when ASP.NET routing decodes them to the same mounted surface;
+- `requiredScopes` are checked **in addition to** the audience match.
+
+A caller therefore needs a token issued for the exact public MCP URL it will call. In OAuth
+deployments, configure the client/authorization flow so the requested `resource`/audience
+corresponds to that URL. Do not issue one token for the bare mount and assume adding a write scope
+makes it valid for a sibling `/full` surface.
+
+Protected-resource metadata is generated from the addressed public resource and names the
+configured authorization server. A capable OAuth/MCP client should use that metadata rather than
+guessing the audience.
+
+Behind a TLS-terminating reverse proxy, preserve the public `Host` header, list that exact
+`host[:port]` with repeatable `--allowed-host`, and configure the proxy as trusted so Engine
+observes the public HTTPS scheme. Engine does not trust `X-Forwarded-Host`; a caller cannot choose
+an arbitrary authority and thereby redefine the protected-resource audience.
+
 ## Proxy deployments
 
-Behind a reverse proxy the public scheme and host arrive as forwarded headers. Engine ignores
-those headers unless the direct peer is named with `--trusted-proxy`:
+For protected HTTP surfaces, the reverse proxy must preserve the **public path** byte spelling that
+reaches Engine. Scheme is reconstructed only from trusted forwarded-proto handling; Engine does not
+trust `X-Forwarded-Host` and does not implement a trusted `X-Forwarded-Prefix`/external PathBase.
+
+Therefore do **not** deploy protected resources behind prefix stripping/path rewriting such as:
+
+~~~text
+public  https://host/mcp/trilium
+proxy -> https://engine/trilium
+~~~
+
+That topology changes the protected-resource identity. Use a proxy rule that forwards the public
+path unchanged, or mount Engine at the public path itself.
+
+
+
+Behind a reverse proxy the public scheme may arrive in `X-Forwarded-Proto`, while the public
+Host must be preserved as the ordinary `Host`/`:authority` value. Engine ignores forwarded scheme
+information unless the direct peer is named with `--trusted-proxy`:
 
 ```bash
 dotnet mcpiler-engine.dll serve \
   --mount /petstore=/manifests/petstore \
   --file-store-root /data \
+  --issuer https://idp.example.com \
+  --token-validation jwks \
+  --allowed-host mcp.example.com \
   --trusted-proxy 172.28.0.2
 ```
 
 Only `X-Forwarded-For` and `X-Forwarded-Proto` are trusted, and only from a listed address. The
 proxy must preserve the original `Host` header unchanged; Engine never trusts `X-Forwarded-Host`.
-This matters for protected-resource metadata, which names the exact external resource address an
-MCP client must use.
+For a protected surface that authority must also match `--allowed-host`. When no explicit value is
+supplied, a concrete listen address contributes its own authority; wildcard listeners such as
+`0.0.0.0` require an explicit allowed host.
 
 ### Browser origins
 
@@ -217,6 +351,8 @@ a browser sends one. Name each browser origin that may reach a served address:
 dotnet mcpiler-engine.dll serve \
   --mount /petstore=/manifests/petstore \
   --file-store-root /data \
+  --issuer https://idp.example.com \
+  --token-validation jwks \
   --allowed-origin https://studio.example.com
 ```
 
@@ -234,8 +370,24 @@ surfaces and tool fingerprints that would be exposed, and opens no listener:
 ```bash
 dotnet mcpiler-engine.dll inspect \
   --mount /petstore=/manifests/petstore \
-  --file-store-root /data
+  --file-store-root /data \
+  --issuer https://idp.example.com \
+  --token-validation jwks
 ```
+
+Run `inspect` with the **same host settings** you intend to serve. For HTTP, host-side startup
+authorization refusals — for example a protected mount with no issuer, an unusable issuer endpoint,
+or a missing/empty/unreadable `--introspection-client-secret-file` — return exit code `78`.
+The report still includes the derived surfaces/tools so the configuration can be diagnosed without
+opening a listener. `inspect` reads the configured introspection secret file during preflight but
+never prints the secret value.
+
+For an explicitly open local/demo Manifest, omit the issuer settings.
+
+For stdio, pass `--transport stdio` to `inspect` as well. The command applies the same
+single-target rule as `serve`: exactly one mount and exactly one surface must be selectable,
+otherwise both commands exit `78`. Stdio still does not require an HTTP issuer merely because
+the Manifest is protected; the local process boundary is the caller-authorization boundary.
 
 Use `version` or `--version` to print the Engine build identity and the supported Manifest
 format range.
@@ -320,7 +472,10 @@ manifest-only promotions from that candidate, so they do not rebuild application
 
 Every published stable image carries the Engine `LICENSE`, `NOTICE` and deterministic runtime
 third-party notices below `/licenses/mcpiler-engine/`. The .NET runtime's `LICENSE.txt` and
-`ThirdPartyNotices.txt` remain under `/usr/share/dotnet/`.
+`ThirdPartyNotices.txt` remain under `/usr/share/dotnet/`. The inventory identifies the
+third-party packages and reviewed licence classification; it does not replace upstream licence or
+binary-agreement texts. See [Licensing and redistribution](licensing.md), especially the
+JSON-Everything official-binary terms, before redistributing an Engine image.
 
 Release verification keeps the runnable image index separate from supply-chain evidence. The raw
 index contains exactly `linux/amd64` and `linux/arm64`; BuildKit root-index attestations are
@@ -345,11 +500,16 @@ docker run --rm \
   serve \
   --mount /petstore=/manifests/petstore \
   --file-store-root /data \
+  --issuer https://idp.example.com \
+  --token-validation jwks \
+  --allowed-host mcp.example.com \
   --listen http://0.0.0.0:8080
 ```
 
-Key material and management credentials are always passed as file paths, never as argument
-values, so `docker inspect` shows where a secret lives rather than what it is. A managed
+The issuer values shown in these examples are placeholders; use the real caller-authorization
+authority for the served generation. Key material and management credentials are always passed as
+file paths, never as argument values, so `docker inspect` shows where a secret lives rather than
+what it is. A managed
 container adds the management settings and mounts the deployment secret file read-only:
 
 ```bash
@@ -367,6 +527,9 @@ docker run --rm \
   --file-store-root /data \
   --runtime-state-root /data/runtime-state \
   --runtime-state-key-file /run/secrets/engine-runtime-state-key \
+  --issuer https://idp.example.com \
+  --token-validation jwks \
+  --allowed-host mcp.example.com \
   --listen http://0.0.0.0:8080
 ```
 

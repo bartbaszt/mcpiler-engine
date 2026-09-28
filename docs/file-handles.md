@@ -101,9 +101,22 @@ identity. This means the same canonical parent resource controls:
 4. the authorization context used to issue or redeem the capability.
 
 The child URL is not independently discoverable or authorizable. File and managed mode use this
-same contract. In managed mode, the parent is the surface admitted for the current request; an
-activation that happens while authorization or streaming is in progress cannot move that request to
-another generation.
+same contract.
+
+Because the child path is formed by appending `/files/...` to the **exact parent resource**, a
+slash-terminated parent has a double slash before the child segment:
+
+~~~text
+parent resource:  /api/full/
+upload child:     /api/full//files/upload
+download child:   /api/full//files/{capability}
+audience:         https://host/api/full/
+~~~
+
+This is intentional: collapsing that double slash would silently move the transfer to the distinct
+`/api/full` protected resource. In managed mode, the parent is the surface admitted for the
+current request; an activation that happens while authorization or streaming is in progress cannot
+move that request to another generation.
 
 ## The root
 

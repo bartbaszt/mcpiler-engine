@@ -129,4 +129,5 @@ the compiler, the compiler is missing a seam — add the seam.
 
 ## Reporting security issues
 
-Do not open a public issue for a security problem. Contact the maintainer privately.
+Follow [`SECURITY.md`](SECURITY.md). Do not open a public issue, discussion or pull request for
+a suspected vulnerability before private triage.

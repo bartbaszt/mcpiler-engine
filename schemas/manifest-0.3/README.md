@@ -49,7 +49,8 @@ published schema host yet and a URL that does not resolve is a worse identifier 
 never promised to. A hosted alias can be added at publication.
 
 The version in the identifier is the manifest format version, whose versioning policy is
-stated in `../../docs/manifest.md`. It is not the Engine assembly version.
+stated in `../../docs/manifest.md`. It is not the Engine assembly version. The current
+Engine/root/section compatibility matrix is in `../../docs/compatibility.md`.
 
 ## Files
 

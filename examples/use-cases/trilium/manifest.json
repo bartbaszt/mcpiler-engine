@@ -1,0 +1,455 @@
+{
+  "manifestFormatVersion": "0.3",
+  "sections": {
+    "server": {
+      "inline": {
+        "name": "Trilium Notes",
+        "description": "A narrow MCP surface over Trilium ETAPI.",
+        "surfaces": [
+          {
+            "slug": "read-only",
+            "name": "Trilium read only",
+            "isDefault": true,
+            "operations": [
+              {
+                "operation": "search-notes",
+                "exposure": "direct"
+              },
+              {
+                "operation": "get-note",
+                "exposure": "direct"
+              },
+              {
+                "operation": "get-note-content",
+                "exposure": "direct"
+              },
+              {
+                "operation": "create-note",
+                "exposure": "hidden"
+              },
+              {
+                "operation": "delete-note",
+                "exposure": "hidden"
+              }
+            ],
+            "requiredScopes": [
+              "trilium.read"
+            ]
+          },
+          {
+            "slug": "full",
+            "name": "Trilium full access",
+            "operations": [
+              {
+                "operation": "search-notes",
+                "exposure": "direct"
+              },
+              {
+                "operation": "get-note",
+                "exposure": "direct"
+              },
+              {
+                "operation": "get-note-content",
+                "exposure": "direct"
+              },
+              {
+                "operation": "create-note",
+                "exposure": "direct"
+              },
+              {
+                "operation": "delete-note",
+                "exposure": "direct"
+              }
+            ],
+            "requiredScopes": [
+              "trilium.read",
+              "trilium.write"
+            ]
+          }
+        ],
+        "authenticationRequired": true
+      }
+    },
+    "policy": {
+      "inline": {
+        "baseUrl": "http://trilium:8080/etapi"
+      }
+    },
+    "operations": {
+      "inline": {
+        "operations": [
+          {
+            "key": "GET /notes",
+            "method": "GET",
+            "path": "/notes",
+            "summary": "Search Trilium notes",
+            "parameters": [
+              {
+                "name": "search",
+                "in": "query",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              },
+              {
+                "name": "limit",
+                "in": "query",
+                "schema": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100
+                }
+              }
+            ],
+            "responses": {
+              "200": {
+                "content": {
+                  "application/json": {
+                    "schema": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "key": "GET /notes/{noteId}",
+            "method": "GET",
+            "path": "/notes/{noteId}",
+            "summary": "Get Trilium note metadata",
+            "parameters": [
+              {
+                "name": "noteId",
+                "in": "path",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            ],
+            "responses": {
+              "200": {
+                "content": {
+                  "application/json": {
+                    "schema": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "key": "GET /notes/{noteId}/content",
+            "method": "GET",
+            "path": "/notes/{noteId}/content",
+            "summary": "Get Trilium note content",
+            "parameters": [
+              {
+                "name": "noteId",
+                "in": "path",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            ],
+            "responses": {
+              "200": {
+                "content": {
+                  "text/html": {
+                    "schema": {
+                      "type": "string"
+                    }
+                  },
+                  "text/plain": {
+                    "schema": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "key": "POST /create-note",
+            "method": "POST",
+            "path": "/create-note",
+            "summary": "Create a Trilium note",
+            "requestBody": {
+              "required": true,
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "type": "object",
+                    "required": [
+                      "parentNoteId",
+                      "title",
+                      "type",
+                      "content"
+                    ],
+                    "properties": {
+                      "parentNoteId": {
+                        "type": "string"
+                      },
+                      "title": {
+                        "type": "string"
+                      },
+                      "type": {
+                        "type": "string",
+                        "enum": [
+                          "text",
+                          "code",
+                          "file",
+                          "image",
+                          "search",
+                          "book",
+                          "relationMap",
+                          "render"
+                        ]
+                      },
+                      "content": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            "responses": {
+              "201": {
+                "content": {
+                  "application/json": {
+                    "schema": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          {
+            "key": "DELETE /notes/{noteId}",
+            "method": "DELETE",
+            "path": "/notes/{noteId}",
+            "summary": "Delete a Trilium note",
+            "parameters": [
+              {
+                "name": "noteId",
+                "in": "path",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            ],
+            "responses": {
+              "204": {
+                "description": "Deleted"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "operations": [
+          {
+            "slug": "search-notes",
+            "name": "Search notes",
+            "summary": "Searches Trilium notes using Trilium's search expression syntax",
+            "inputSchema": {
+              "type": "object",
+              "required": [
+                "search"
+              ],
+              "properties": {
+                "search": {
+                  "type": "string"
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 100
+                }
+              }
+            },
+            "annotations": {
+              "readOnly": true,
+              "destructive": false,
+              "idempotent": true,
+              "openWorld": false
+            },
+            "risk": "readOnly",
+            "binding": {
+              "type": "http",
+              "operation": "GET /notes",
+              "credentialRef": [
+                "trilium-token"
+              ]
+            }
+          },
+          {
+            "slug": "get-note",
+            "name": "Get note",
+            "summary": "Gets Trilium note metadata by note identifier",
+            "inputSchema": {
+              "type": "object",
+              "required": [
+                "noteId"
+              ],
+              "properties": {
+                "noteId": {
+                  "type": "string"
+                }
+              }
+            },
+            "annotations": {
+              "readOnly": true,
+              "destructive": false,
+              "idempotent": true,
+              "openWorld": false
+            },
+            "risk": "readOnly",
+            "binding": {
+              "type": "http",
+              "operation": "GET /notes/{noteId}",
+              "credentialRef": [
+                "trilium-token"
+              ]
+            }
+          },
+          {
+            "slug": "get-note-content",
+            "name": "Get note content",
+            "summary": "Gets the content of a Trilium note by note identifier",
+            "inputSchema": {
+              "type": "object",
+              "required": [
+                "noteId"
+              ],
+              "properties": {
+                "noteId": {
+                  "type": "string"
+                }
+              }
+            },
+            "annotations": {
+              "readOnly": true,
+              "destructive": false,
+              "idempotent": true,
+              "openWorld": false
+            },
+            "risk": "readOnly",
+            "binding": {
+              "type": "http",
+              "operation": "GET /notes/{noteId}/content",
+              "credentialRef": [
+                "trilium-token"
+              ]
+            }
+          },
+          {
+            "slug": "create-note",
+            "name": "Create note",
+            "summary": "Creates a note under a selected Trilium parent note",
+            "inputSchema": {
+              "type": "object",
+              "required": [
+                "parentNoteId",
+                "title",
+                "type",
+                "content"
+              ],
+              "properties": {
+                "parentNoteId": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "text",
+                    "code",
+                    "file",
+                    "image",
+                    "search",
+                    "book",
+                    "relationMap",
+                    "render"
+                  ]
+                },
+                "content": {
+                  "type": "string"
+                }
+              }
+            },
+            "annotations": {
+              "readOnly": false,
+              "destructive": false,
+              "idempotent": false,
+              "openWorld": false
+            },
+            "risk": "mutating",
+            "binding": {
+              "type": "http",
+              "operation": "POST /create-note",
+              "credentialRef": [
+                "trilium-token"
+              ]
+            }
+          },
+          {
+            "slug": "delete-note",
+            "name": "Delete note",
+            "summary": "Deletes one Trilium note by identifier",
+            "inputSchema": {
+              "type": "object",
+              "required": [
+                "noteId"
+              ],
+              "properties": {
+                "noteId": {
+                  "type": "string"
+                }
+              }
+            },
+            "annotations": {
+              "readOnly": false,
+              "destructive": true,
+              "idempotent": true,
+              "openWorld": false
+            },
+            "risk": "destructive,mutating,idempotent",
+            "binding": {
+              "type": "http",
+              "operation": "DELETE /notes/{noteId}",
+              "credentialRef": [
+                "trilium-token"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "credentials": {
+      "inline": {
+        "credentials": [
+          {
+            "id": "trilium-token",
+            "scheme": "bearer",
+            "slot": "Authorization",
+            "value": {
+              "fromEnv": "TRILIUM_ETAPI_TOKEN"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

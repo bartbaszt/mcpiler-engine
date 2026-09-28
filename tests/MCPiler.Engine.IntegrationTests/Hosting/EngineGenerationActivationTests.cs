@@ -5,6 +5,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -86,6 +87,28 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
         }
 
         await retired.WaitAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task A_protected_activation_is_hidden_when_the_listener_has_no_authorization_boundary()
+    {
+        await using ManagedListener listener = await StartAsync(
+            ServedManifests.OneSurface,
+            authorization: null,
+            allowHostWithoutAuthorization: true);
+
+        await listener.ActivateAsync(Load("/api", ServedManifests.ProtectedOneSurface));
+
+        using HttpClient http = new();
+        using HttpResponseMessage response = await http.PostAsync(
+            listener.At("/api/full"),
+            new StringContent(
+                """{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}""",
+                Encoding.UTF8,
+                "application/json"),
+            Token);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     /// <summary>
@@ -1144,7 +1167,8 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
         string manifest,
         HostAuthorizationOptions? authorization = null,
         string? fileStoreRoot = null,
-        string? operatorSecret = null)
+        string? operatorSecret = null,
+        bool allowHostWithoutAuthorization = false)
     {
         string store = fileStoreRoot ?? Store();
         ManagedListener listener = await ManagedListener.StartAsync(
@@ -1152,7 +1176,8 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
             store,
             TestContext.Current.CancellationToken,
             authorization,
-            operatorSecret);
+            operatorSecret,
+            allowHostWithoutAuthorization);
 
         _listeners.Add(listener);
         return listener;
@@ -1421,7 +1446,8 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
             string fileStoreRoot,
             CancellationToken cancellationToken,
             HostAuthorizationOptions? authorization = null,
-            string? operatorSecret = null)
+            string? operatorSecret = null,
+            bool allowHostWithoutAuthorization = false)
         {
             ArgumentNullException.ThrowIfNull(initial);
 
@@ -1431,13 +1457,19 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
             EngineExecution initialExecution = EngineExecution.Create(initial, ServedEngine.Permissive());
             _ = manager.Activate(Generation(0, initial, initialExecution));
 
+            int port = ReserveLoopbackPort();
+            string authority = $"127.0.0.1:{port}";
+
             WebApplication app = EngineWebHost.BuildManaged(
                 new HostBinding(
                     new RuntimeOptions([new MountRequest("/managed", initial.Mounts[0].Path)], fileStoreRoot),
-                    new HostListenOptions("http://127.0.0.1:0", HostTransport.Http),
+                    new HostListenOptions($"http://{authority}", HostTransport.Http),
                     Authorization: authorization,
                     HostLifecycleOptions.Default)
                 {
+                    AllowedHosts = authorization is null && !allowHostWithoutAuthorization
+                        ? []
+                        : [authority],
                     ResponseCacheOperatorSecret = operatorSecret,
                 },
                 drain,
@@ -1488,6 +1520,15 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
             => Manager.Activate(NewGeneration(replacement)).WaitAsync(TestContext.Current.CancellationToken);
 
         public Uri At(string route) => new(Address, route);
+
+        private static int ReserveLoopbackPort()
+        {
+            using TcpListener listener = new(IPAddress.Loopback, 0);
+            listener.Start();
+            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            listener.Stop();
+            return port;
+        }
 
         public async ValueTask DisposeAsync()
         {

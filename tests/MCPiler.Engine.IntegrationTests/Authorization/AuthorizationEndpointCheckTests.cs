@@ -26,7 +26,7 @@ public sealed class AuthorizationEndpointCheckTests
     public async Task A_loopback_introspection_endpoint_is_usable()
     {
         await using FakeServer server = await FakeServer.StartAsync(
-            "{\"introspection_endpoint\":\"{0}/introspect\",\"jwks_uri\":\"{0}/jwks\"}");
+            "{\"issuer\":\"{issuer}\",\"introspection_endpoint\":\"{0}/introspect\",\"jwks_uri\":\"{0}/jwks\"}");
 
         StartupRefusal? refusal = await AuthorizationEndpointCheck.FindAsync(
             Introspection(server.Address),
@@ -38,7 +38,7 @@ public sealed class AuthorizationEndpointCheckTests
     [Fact]
     public async Task A_missing_introspection_endpoint_is_refused_by_name()
     {
-        await using FakeServer server = await FakeServer.StartAsync("{\"jwks_uri\":\"{0}/jwks\"}");
+        await using FakeServer server = await FakeServer.StartAsync("{\"issuer\":\"{issuer}\",\"jwks_uri\":\"{0}/jwks\"}");
 
         StartupRefusal? refusal = await AuthorizationEndpointCheck.FindAsync(
             Introspection(server.Address),
@@ -53,7 +53,7 @@ public sealed class AuthorizationEndpointCheckTests
     public async Task A_discovered_remote_http_introspection_endpoint_is_refused_before_endpoint_traffic()
     {
         await using FakeServer server = await FakeServer.StartAsync(
-            "{\"introspection_endpoint\":\"http://198.51.100.10/introspect\"}");
+            "{\"issuer\":\"{issuer}\",\"introspection_endpoint\":\"http://198.51.100.10/introspect\"}");
 
         StartupRefusal? refusal = await AuthorizationEndpointCheck.FindAsync(
             Introspection(server.Address),
@@ -68,7 +68,7 @@ public sealed class AuthorizationEndpointCheckTests
     public async Task A_loopback_jwks_endpoint_is_usable()
     {
         await using FakeServer server = await FakeServer.StartAsync(
-            "{\"issuer\":\"{0}\",\"jwks_uri\":\"{0}/jwks\"}");
+            "{\"issuer\":\"{issuer}\",\"jwks_uri\":\"{0}/jwks\"}");
 
         StartupRefusal? refusal = await AuthorizationEndpointCheck.FindAsync(
             new HostAuthorizationOptions(server.Address.AbsoluteUri, HostTokenValidation.Jwks),
@@ -80,7 +80,7 @@ public sealed class AuthorizationEndpointCheckTests
     [Fact]
     public async Task A_missing_jwks_endpoint_is_refused_by_name()
     {
-        await using FakeServer server = await FakeServer.StartAsync("{\"introspection_endpoint\":\"{0}/introspect\"}");
+        await using FakeServer server = await FakeServer.StartAsync("{\"issuer\":\"{issuer}\",\"introspection_endpoint\":\"{0}/introspect\"}");
 
         StartupRefusal? refusal = await AuthorizationEndpointCheck.FindAsync(
             new HostAuthorizationOptions(server.Address.AbsoluteUri, HostTokenValidation.Jwks),
@@ -95,7 +95,7 @@ public sealed class AuthorizationEndpointCheckTests
     public async Task A_discovered_remote_http_jwks_endpoint_is_refused_before_key_traffic()
     {
         await using FakeServer server = await FakeServer.StartAsync(
-            "{\"jwks_uri\":\"http://198.51.100.10/jwks\"}");
+            "{\"issuer\":\"{issuer}\",\"jwks_uri\":\"http://198.51.100.10/jwks\"}");
 
         StartupRefusal? refusal = await AuthorizationEndpointCheck.FindAsync(
             new HostAuthorizationOptions(server.Address.AbsoluteUri, HostTokenValidation.Jwks),
@@ -154,9 +154,52 @@ public sealed class AuthorizationEndpointCheckTests
             Introspection(issuer.Address),
             TestContext.Current.CancellationToken);
 
-        Assert.Null(refusal);
+        Assert.NotNull(refusal);
+        Assert.Equal("auth/issuer-discovery-unusable", refusal!.Code);
         Assert.Equal(1, issuer.RequestCount);
         Assert.Equal(0, target.RequestCount);
+    }
+
+    [Theory]
+    [InlineData(StatusCodes.Status400BadRequest)]
+    [InlineData(StatusCodes.Status401Unauthorized)]
+    [InlineData(StatusCodes.Status403Forbidden)]
+    [InlineData(StatusCodes.Status404NotFound)]
+    public async Task Definitive_discovery_http_failures_are_startup_refusals(int status)
+    {
+        await using AuthorizationTransportServer issuer = await AuthorizationTransportServer.StartAsync(
+            context =>
+            {
+                context.Response.StatusCode = status;
+                return Task.CompletedTask;
+            });
+
+        StartupRefusal? refusal = await AuthorizationEndpointCheck.FindAsync(
+            Introspection(issuer.Address),
+            TestContext.Current.CancellationToken);
+
+        Assert.NotNull(refusal);
+        Assert.Equal("auth/issuer-discovery-unusable", refusal!.Code);
+    }
+
+    [Theory]
+    [InlineData(StatusCodes.Status429TooManyRequests)]
+    [InlineData(StatusCodes.Status500InternalServerError)]
+    [InlineData(StatusCodes.Status503ServiceUnavailable)]
+    public async Task Transient_discovery_http_failures_remain_outages(int status)
+    {
+        await using AuthorizationTransportServer issuer = await AuthorizationTransportServer.StartAsync(
+            context =>
+            {
+                context.Response.StatusCode = status;
+                return Task.CompletedTask;
+            });
+
+        StartupRefusal? refusal = await AuthorizationEndpointCheck.FindAsync(
+            Introspection(issuer.Address),
+            TestContext.Current.CancellationToken);
+
+        Assert.Null(refusal);
     }
 
     [Theory]
@@ -171,7 +214,7 @@ public sealed class AuthorizationEndpointCheckTests
                 context.Response.ContentType = "application/json";
                 string issuerAddress = $"http://{context.Request.Host.Value}";
                 return context.Response.WriteAsync(
-                    $"{{\"introspection_endpoint\":\"{issuerAddress}/introspect\",\"jwks_uri\":\"{issuerAddress}/jwks\"}}",
+                    $"{{\"issuer\":\"{issuerAddress}/\",\"introspection_endpoint\":\"{issuerAddress}/introspect\",\"jwks_uri\":\"{issuerAddress}/jwks\"}}",
                     context.RequestAborted);
             });
         await using AuthorizationTransportServer proxy = await AuthorizationTransportServer.StartAsync(
@@ -191,6 +234,44 @@ public sealed class AuthorizationEndpointCheckTests
         Assert.Null(refusal);
         Assert.Equal(1, issuer.RequestCount);
         Assert.Equal(0, proxy.RequestCount);
+    }
+
+    [Theory]
+    [InlineData("https://example.com/tenant-a", "https://example.com/.well-known/oauth-authorization-server/tenant-a")]
+    [InlineData("https://example.com/tenant-a/deployment-b", "https://example.com/.well-known/oauth-authorization-server/tenant-a/deployment-b")]
+    [InlineData("https://example.com/tenant-a/", "https://example.com/.well-known/oauth-authorization-server/tenant-a/")]
+    public void Discovery_uri_inserts_well_known_before_the_issuer_path(string issuer, string expected)
+        => Assert.Equal(expected, IssuerMetadata.DiscoveryUri(issuer).AbsoluteUri);
+
+    [Fact]
+    public async Task Metadata_without_issuer_is_refused()
+    {
+        await using FakeServer server = await FakeServer.StartAsync(
+            "{\"jwks_uri\":\"{0}/jwks\"}");
+
+        StartupRefusal? refusal = await AuthorizationEndpointCheck.FindAsync(
+            new HostAuthorizationOptions(server.Address.AbsoluteUri, HostTokenValidation.Jwks),
+            TestContext.Current.CancellationToken);
+
+        Assert.NotNull(refusal);
+        Assert.Equal("auth/issuer-metadata-invalid", refusal!.Code);
+        Assert.Equal(HostConfiguration.IssuerKey, refusal.Setting);
+        Assert.Contains("omits", refusal.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Metadata_for_another_issuer_is_refused()
+    {
+        await using FakeServer server = await FakeServer.StartAsync(
+            "{\"issuer\":\"https://other.example/tenant\",\"jwks_uri\":\"{0}/jwks\"}");
+
+        StartupRefusal? refusal = await AuthorizationEndpointCheck.FindAsync(
+            new HostAuthorizationOptions(server.Address.AbsoluteUri, HostTokenValidation.Jwks),
+            TestContext.Current.CancellationToken);
+
+        Assert.NotNull(refusal);
+        Assert.Equal("auth/issuer-metadata-invalid", refusal!.Code);
+        Assert.Contains("does not exactly match", refusal.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -242,7 +323,9 @@ public sealed class AuthorizationEndpointCheckTests
                 string host = context.Request.Host.Value ?? string.Empty;
                 context.Response.ContentType = "application/json";
                 await context.Response.WriteAsync(
-                    metadataTemplate.Replace("{0}", $"http://{host}", StringComparison.Ordinal),
+                    metadataTemplate
+                        .Replace("{issuer}", $"http://{host}/", StringComparison.Ordinal)
+                        .Replace("{0}", $"http://{host}", StringComparison.Ordinal),
                     context.RequestAborted);
             });
 
