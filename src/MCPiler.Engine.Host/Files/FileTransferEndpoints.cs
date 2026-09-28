@@ -26,9 +26,6 @@ namespace MCPiler.Engine.Host.Files;
 /// </remarks>
 internal static class FileTransferEndpoints
 {
-    private const string UploadSuffix = "/files/upload";
-    private const string DownloadSuffix = "/files/{capability}";
-
     public static void Map(WebApplication app)
     {
         ArgumentNullException.ThrowIfNull(app);
