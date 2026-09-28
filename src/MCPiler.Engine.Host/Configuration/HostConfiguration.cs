@@ -674,6 +674,7 @@ public static class HostConfiguration
             }
         }
 
+        BindMountPrefixes(mounts, rejected);
         BindDeploymentMode(mode, modeExplicit, mounts.Count, rejected);
 
         ManagedSyncOptions? managed = BindManaged(
@@ -866,6 +867,22 @@ public static class HostConfiguration
             DeploymentId = deploymentId!,
             SecretFile = secretFile!,
         };
+    }
+
+    private static void BindMountPrefixes(
+        IReadOnlyList<KeyValuePair<string, string>> mounts,
+        List<string> rejected)
+    {
+        foreach ((string prefix, _) in mounts)
+        {
+            if (!HostRouteTopologyValidation.IsCanonicalMountPrefix(prefix))
+            {
+                rejected.Add(
+                    $"Mount prefix '{prefix}' is not a canonical literal HTTP path. "
+                    + "Use an absolute non-root path beginning with '/', without a trailing slash, "
+                    + "empty segments, percent-encoding, whitespace, query/fragment syntax or route-template metacharacters.");
+            }
+        }
     }
 
     /// <summary>
