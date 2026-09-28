@@ -104,6 +104,14 @@ internal static class ToolBridge
             return NotServed();
         }
 
+        if (admission.CallerPartition is not { } callerPartition)
+        {
+            // A protected request cannot reach execution until authorization has positively
+            // settled a caller partition. Treating absence as Public would turn a missing
+            // authorization decision into an anonymous execution identity.
+            return NotServed();
+        }
+
         if (!drain.TryEnter(tool, cancellationToken, out DrainCoordinator.InvocationLease? admitted))
         {
             return new CallToolResult
@@ -115,16 +123,13 @@ internal static class ToolBridge
 
         using (DrainCoordinator.InvocationLease lease = admitted!)
         {
-            // The partition the authorization middleware settled for this request. The admission
-            // always states one — public for an open mount — so the HTTP path never passes an
-            // absence that a cache would have to interpret.
             return await ExecuteResolvedAsync(
                 admission.Generation,
                 admission.Resolution,
                 admission.ResourceIdentity,
                 tool,
                 request,
-                admission.CallerPartition ?? CallerPartition.Public,
+                callerPartition,
                 lease.CancellationToken).ConfigureAwait(false);
         }
     }

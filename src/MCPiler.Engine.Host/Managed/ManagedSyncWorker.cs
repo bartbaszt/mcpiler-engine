@@ -1,3 +1,5 @@
+using MCPiler.Engine.Host.Authorization;
+using MCPiler.Engine.Host.Configuration;
 using MCPiler.Engine.Host.Hosting;
 using MCPiler.Engine.Runtime;
 using MCPiler.Engine.Runtime.Managed;
@@ -31,6 +33,7 @@ internal sealed class ManagedSyncWorker : IDisposable
     private readonly ManagedSyncClient _client;
     private readonly ManagedGenerationLoader _loader;
     private readonly EngineGenerationManager _generations;
+    private readonly HostBinding _binding;
     private readonly ManagedSyncBackoff _backoff;
     private readonly Action<string>? _diagnostics;
     private readonly string _engineVersion;
@@ -69,6 +72,7 @@ internal sealed class ManagedSyncWorker : IDisposable
         ManagedSyncOptions options,
         ManagedGenerationLoader loader,
         EngineGenerationManager generations,
+        HostBinding binding,
         string engineVersion,
         Action<string>? diagnostics = null,
         ManagedSyncClient? client = null,
@@ -77,11 +81,13 @@ internal sealed class ManagedSyncWorker : IDisposable
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(loader);
         ArgumentNullException.ThrowIfNull(generations);
+        ArgumentNullException.ThrowIfNull(binding);
         ArgumentException.ThrowIfNullOrEmpty(engineVersion);
 
         _options = options;
         _loader = loader;
         _generations = generations;
+        _binding = binding;
         _engineVersion = engineVersion;
         _diagnostics = diagnostics;
         _client = client ?? new ManagedSyncClient(options);
@@ -266,10 +272,11 @@ internal sealed class ManagedSyncWorker : IDisposable
                         // is no previous generation to keep serving, so retrying silently would
                         // hide the defect behind the startup bound.
                         return ManagedInitialSync.Refused(
-                            "managed/initial-candidate-refused",
-                            $"The Platform delivered generation '{delivery.GenerationId}', and it could "
-                            + "not be loaded. Engine has no prior generation to serve, so it will not "
-                            + "open a listener.");
+                            _lastCandidateCode ?? "managed/initial-candidate-refused",
+                            _lastCandidateMessage
+                                ?? $"The Platform delivered generation '{delivery.GenerationId}', and it could "
+                                + "not be loaded. Engine has no prior generation to serve, so it will not "
+                                + "open a listener.");
 
                     case ManagedPollOutcome.Unchanged:
                         return ManagedInitialSync.Refused(
@@ -484,6 +491,33 @@ internal sealed class ManagedSyncWorker : IDisposable
             generation.Dispose();
             StartupRefusal first = topologyRefusals[0];
             CandidateRefused(delivery.GenerationId, first.Code, first.Message);
+            return false;
+        }
+
+        // A managed replacement must be servable by the listener that already exists. The
+        // listener's authentication middleware and public-authority policy are process-lifetime
+        // capabilities; activating a protected Manifest that those capabilities cannot enforce
+        // would either replace a good generation with an unusable one or bypass authorization.
+        if (AuthorizationRefusal.Find(mounts.Mounts, _binding.Authorization) is { } authorizationRefusal)
+        {
+            generation.Dispose();
+            CandidateRefused(
+                delivery.GenerationId,
+                authorizationRefusal.Code,
+                authorizationRefusal.Message);
+            return false;
+        }
+
+        if (_binding.Listener.Transport is HostTransport.Http
+            && mounts.Mounts.Any(mount => mount.RequiresAuthorization())
+            && _binding.AllowedHosts.Count == 0)
+        {
+            generation.Dispose();
+            CandidateRefused(
+                delivery.GenerationId,
+                "auth/allowed-host-missing",
+                $"Protected HTTP serving requires at least one '{HostConfiguration.AllowedHostKey}' "
+                + $"when '{HostConfiguration.ListenKey}' does not name one concrete authority.");
             return false;
         }
 

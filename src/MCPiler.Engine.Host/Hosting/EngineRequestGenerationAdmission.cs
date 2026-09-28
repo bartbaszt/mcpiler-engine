@@ -70,11 +70,13 @@ internal sealed class EngineRequestGenerationAdmission
     /// cannot tell apart.
     /// </para>
     /// <para>
-    /// Starts as <see cref="CallerPartition.Public"/> so a mount that requires no authorization
-    /// states its identity explicitly rather than leaving it to be inferred from an absence.
+    /// Starts unset. Admission sets <see cref="CallerPartition.Public"/> only after it has resolved
+    /// an open mount; successful bearer authorization replaces the unset value with a caller-
+    /// specific partition for a protected mount. An unset value therefore always means that no
+    /// authorization identity has been established yet.
     /// </para>
     /// </remarks>
-    internal CallerPartition? CallerPartition { get; set; } = MCPiler.Engine.Runtime.CallerPartition.Public;
+    internal CallerPartition? CallerPartition { get; set; }
 
     /// <summary>
     /// Whether a stateful session configured for one HTTP resource still belongs to this request.

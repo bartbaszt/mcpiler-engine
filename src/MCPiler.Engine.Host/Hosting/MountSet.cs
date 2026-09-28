@@ -193,6 +193,15 @@ internal static class HostRouteTopologyValidation
             }
         }
 
+        foreach (string segment in path.Split('/'))
+        {
+            if (string.Equals(segment, ".", StringComparison.Ordinal)
+                || string.Equals(segment, "..", StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+
         return true;
     }
 
@@ -202,8 +211,8 @@ internal static class HostRouteTopologyValidation
             || IsNamespace(path, ProtectedResourceMetadataPrefix);
 
     private static bool IsNamespace(string path, string prefix)
-        => string.Equals(path, prefix, StringComparison.Ordinal)
-            || path.StartsWith(prefix + "/", StringComparison.Ordinal);
+        => string.Equals(path, prefix, StringComparison.OrdinalIgnoreCase)
+            || path.StartsWith(prefix + "/", StringComparison.OrdinalIgnoreCase);
 
     private static StartupRefusal Refusal(
         MountedSurfaceAddress address,

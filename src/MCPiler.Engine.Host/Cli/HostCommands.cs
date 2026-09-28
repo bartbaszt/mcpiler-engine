@@ -288,6 +288,7 @@ public static class HostCommands
             options,
             generationsLoader,
             generations,
+            binding,
             EngineRuntime.SupportedManifestFormatRange,
             diagnostic =>
             {

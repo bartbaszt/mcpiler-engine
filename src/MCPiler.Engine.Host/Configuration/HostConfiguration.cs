@@ -796,7 +796,10 @@ public static class HostConfiguration
             && string.IsNullOrEmpty(parsed.Query)
             && string.IsNullOrEmpty(parsed.Fragment))
         {
-            return parsed.Authority;
+            // Validation uses a synthetic scheme, but the setting itself is scheme-neutral.
+            // Uri.Authority would erase an explicitly written default port such as :80 and
+            // silently change the operator's exact authority allow-list.
+            return value;
         }
 
         rejected.Add(
@@ -810,8 +813,26 @@ public static class HostConfiguration
         authority = null;
 
         if (!Uri.TryCreate(listen, UriKind.Absolute, out Uri? parsed)
-            || parsed.Port == 0
-            || parsed.Host is "0.0.0.0" or "::" or "*" or "+")
+            || parsed.Port == 0)
+        {
+            return false;
+        }
+
+        string host = parsed.Host;
+
+        if (host.Length >= 2 && host[0] == '[' && host[^1] == ']')
+        {
+            host = host[1..^1];
+        }
+
+        if (host is "*" or "+")
+        {
+            return false;
+        }
+
+        if (System.Net.IPAddress.TryParse(host, out System.Net.IPAddress? address)
+            && (System.Net.IPAddress.Any.Equals(address)
+                || System.Net.IPAddress.IPv6Any.Equals(address)))
         {
             return false;
         }

@@ -63,8 +63,12 @@ internal sealed class EngineRequestGenerationAdmissionMiddleware
             }
 
             if (resolved.Mount.RequiresAuthorization()
-                && !AuthorityAllowed(context.Request.Host.Value, _binding.AllowedHosts))
+                && (_binding.Authorization is null
+                    || !AuthorityAllowed(context.Request.Host.Value, _binding.AllowedHosts)))
             {
+                // Defense in depth for managed mode: a protected generation must never flow to
+                // handlers when this listener was built without an authorization boundary, even
+                // if a future activation bug admitted the generation.
                 await RefuseSilentlyAsync(context).ConfigureAwait(false);
                 return;
             }
@@ -74,12 +78,21 @@ internal sealed class EngineRequestGenerationAdmissionMiddleware
                 context.Request.Host.Value ?? string.Empty,
                 authorizationResourcePath);
 
-            context.Features.Set(new EngineRequestGenerationAdmission(
+            var admission = new EngineRequestGenerationAdmission(
                 address,
                 authorizationResourcePath,
                 resourceIdentity,
                 lease.Generation,
-                resolved));
+                resolved);
+
+            if (!resolved.Mount.RequiresAuthorization())
+            {
+                // Public is a positive decision about an open mount, not the default identity of
+                // a request whose authorization decision has not happened yet.
+                admission.CallerPartition = CallerPartition.Public;
+            }
+
+            context.Features.Set(admission);
 
             try
             {
