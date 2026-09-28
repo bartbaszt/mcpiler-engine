@@ -177,7 +177,7 @@ internal static class HostRouteTopologyValidation
         if (string.IsNullOrEmpty(path)
             || path[0] != '/'
             || path.Length == 1
-            || path.EndsWith('/', StringComparison.Ordinal)
+            || path[^1] == '/'
             || path.Contains("//", StringComparison.Ordinal))
         {
             return false;
