@@ -189,6 +189,9 @@ public sealed class HostCommandsTests : IDisposable
     [InlineData("api")]
     [InlineData("/api/{tenant}")]
     [InlineData("/foo?x")]
+    [InlineData("/api/.")]
+    [InlineData("/api/../health/live")]
+    [InlineData("/foo/../.engine/response-cache")]
     public async Task Inspect_refuses_noncanonical_mount_prefixes(string prefix)
     {
         CommandOutcome outcome = await HostCommands.RunAsync(
@@ -227,13 +230,17 @@ public sealed class HostCommandsTests : IDisposable
         Assert.Contains("fingerprint=", inspect.Output, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task Inspect_refuses_a_surface_that_collides_with_health_namespace()
+    [Theory]
+    [InlineData("/health", "live")]
+    [InlineData("/HEALTH", "live")]
+    [InlineData("/.ENGINE", "response-cache")]
+    [InlineData("/.WELL-KNOWN/oauth-protected-resource", "api")]
+    public async Task Inspect_refuses_a_surface_that_collides_with_reserved_host_namespaces(string prefix, string slug)
     {
         CommandOutcome outcome = await HostCommands.RunAsync(
             [
                 "inspect",
-                "--mount", "/health=" + SurfaceSlugManifest("health-collision", "live"),
+                "--mount", prefix + "=" + SurfaceSlugManifest("reserved-collision", slug),
                 "--file-store-root", Store(),
             ],
             Identity,
@@ -241,6 +248,25 @@ public sealed class HostCommandsTests : IDisposable
 
         Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
         Assert.Contains("host/surface-address-reserved", outcome.Output, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(".")]
+    [InlineData("../health/live")]
+    [InlineData("../.engine/response-cache")]
+    public async Task Inspect_refuses_surface_addresses_with_dot_segments(string slug)
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "inspect",
+                "--mount", "/api=" + SurfaceSlugManifest("dot-segment", slug),
+                "--file-store-root", Store(),
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
+        Assert.Contains("canonical literal HTTP path", outcome.Output, StringComparison.Ordinal);
     }
 
     [Fact]

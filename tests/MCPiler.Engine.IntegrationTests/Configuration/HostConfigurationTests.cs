@@ -432,6 +432,50 @@ public sealed class HostConfigurationTests
         Assert.Contains(HostConfiguration.ManagedModeName, refusal, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("example.com")]
+    [InlineData("example.com:8080")]
+    [InlineData("example.com:80")]
+    [InlineData("[::1]")]
+    [InlineData("[::1]:8080")]
+    [InlineData("HOST.EXAMPLE")]
+    public void An_allowed_host_preserves_the_declared_scheme_neutral_authority(string authority)
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.AllowedHostKey] = authority,
+        };
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. settings], out HostBinding? binding, out IReadOnlyList<string> refusals));
+        Assert.Empty(refusals);
+        Assert.Equal([authority], binding!.AllowedHosts);
+    }
+
+    [Theory]
+    [InlineData("http://0.0.0.0:8080")]
+    [InlineData("http://[::]:8080")]
+    public void A_wildcard_listener_does_not_derive_an_allowed_host(string listen)
+    {
+        Dictionary<string, string> settings = AuthorizedHttpSettings(listen);
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. settings], out HostBinding? binding, out IReadOnlyList<string> refusals));
+        Assert.Empty(refusals);
+        Assert.Empty(binding!.AllowedHosts);
+    }
+
+    [Theory]
+    [InlineData("http://127.0.0.1:8080", "127.0.0.1:8080")]
+    [InlineData("http://[::1]:8080", "[::1]:8080")]
+    public void A_concrete_listener_derives_its_authority(string listen, string expected)
+    {
+        Dictionary<string, string> settings = AuthorizedHttpSettings(listen);
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. settings], out HostBinding? binding, out IReadOnlyList<string> refusals));
+        Assert.Empty(refusals);
+        Assert.Equal([expected], binding!.AllowedHosts);
+    }
+
     /// <summary>
     /// A browser origin is stored in the canonical spelling every comparison uses.
     /// </summary>
@@ -876,6 +920,16 @@ public sealed class HostConfigurationTests
             File.Delete(empty);
         }
     }
+
+    private static Dictionary<string, string> AuthorizedHttpSettings(string listen)
+        => new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.ListenKey] = listen,
+            [HostConfiguration.IssuerKey] = "https://issuer.example",
+            [HostConfiguration.TokenValidationKey] = HostConfiguration.IntrospectionModeName,
+            [HostConfiguration.IntrospectionEndpointKey] = "https://issuer.example/introspect",
+        };
 
     private static List<KeyValuePair<string, string>> Mounts() => [new("/api", "/manifests/api")];
 

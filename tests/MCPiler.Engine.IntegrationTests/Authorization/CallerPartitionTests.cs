@@ -262,7 +262,7 @@ public sealed class CallerPartitionTests : IDisposable
 
         // No caller-specific partition was settled. A refusal that left a partition behind would
         // let a cache admit or serve under an identity the boundary never accepted.
-        Assert.Equal(CallerPartition.Public, refused.Admission.CallerPartition);
+        Assert.Null(refused.Admission.CallerPartition);
     }
 
     [Fact]
@@ -275,7 +275,7 @@ public sealed class CallerPartitionTests : IDisposable
 
         Assert.False(refused.NextCalled);
         Assert.Equal(StatusCodes.Status404NotFound, refused.StatusCode);
-        Assert.Equal(CallerPartition.Public, refused.Admission.CallerPartition);
+        Assert.Null(refused.Admission.CallerPartition);
     }
 
     [Fact]
@@ -288,7 +288,7 @@ public sealed class CallerPartitionTests : IDisposable
 
         Assert.False(refused.NextCalled);
         Assert.Equal(StatusCodes.Status404NotFound, refused.StatusCode);
-        Assert.Equal(CallerPartition.Public, refused.Admission.CallerPartition);
+        Assert.Null(refused.Admission.CallerPartition);
     }
 
     // ---- mounts that authorize nobody ----------------------------------------------------

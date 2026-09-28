@@ -61,6 +61,7 @@ internal sealed class ManagedSyncWorker : IDisposable
     /// <param name="options">Where the Platform is, which deployment, and every bound.</param>
     /// <param name="loader">The library loader a delivered generation is decoded by.</param>
     /// <param name="generations">The manager activations swap the pointer through.</param>
+    /// <param name="binding">The process-lifetime HTTP/auth capabilities every candidate must remain servable by.</param>
     /// <param name="engineVersion">This build's identity, reported to the Platform.</param>
     /// <param name="diagnostics">Where worker-level messages an operator should see are written.</param>
     /// <param name="client">The sync client, or null to create the production one.</param>

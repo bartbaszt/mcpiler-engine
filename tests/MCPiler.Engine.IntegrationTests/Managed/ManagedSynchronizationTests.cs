@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -726,10 +727,12 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     {
         ManagedGenerationLoader loader = await OpenLoaderAsync();
         var manager = new EngineGenerationManager(HostMode.Managed);
+        HostBinding binding = ManagedBinding();
         var worker = new ManagedSyncWorker(
             platform.Options(secretFileExists),
             loader,
             manager,
+            binding,
             "test",
             backoff: new ManagedSyncBackoff(TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(50)));
 
@@ -747,16 +750,20 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
     private async Task<ManagedProcess> StartAsync(
         PlatformStandIn platform,
-        ManagedGenerationLoader? providedLoader = null)
+        ManagedGenerationLoader? providedLoader = null,
+        HostAuthorizationOptions? authorization = null,
+        IReadOnlyList<string>? allowedHosts = null)
     {
         ManagedGenerationLoader loader = providedLoader ?? await OpenLoaderAsync();
         var manager = new EngineGenerationManager(HostMode.Managed);
         var drain = new DrainCoordinator();
+        HostBinding binding = ManagedBinding(authorization, allowedHosts);
         List<string> diagnostics = [];
         var worker = new ManagedSyncWorker(
             platform.Options(),
             loader,
             manager,
+            binding,
             "test",
             diagnostics: message =>
             {
@@ -771,17 +778,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         Assert.True(initial.Started, initial.Refusal?.Message);
 
-        string fileRoot = Path.Combine(_root, "files-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(fileRoot);
-
-        WebApplication app = EngineWebHost.BuildManaged(
-            new HostBinding(
-                new RuntimeOptions([], fileRoot),
-                new HostListenOptions("http://127.0.0.1:0", HostTransport.Http),
-                Authorization: null,
-                HostLifecycleOptions.Default),
-            drain,
-            manager);
+        WebApplication app = EngineWebHost.BuildManaged(binding, drain, manager);
 
         await app.StartAsync(TestContext.Current.CancellationToken);
 
@@ -802,6 +799,35 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         process.Diagnostics = diagnostics;
         _processes.Add(process);
         return process;
+    }
+
+    private HostBinding ManagedBinding(
+        HostAuthorizationOptions? authorization = null,
+        IReadOnlyList<string>? allowedHosts = null)
+    {
+        string fileRoot = Path.Combine(_root, "files-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(fileRoot);
+
+        int port = ReserveLoopbackPort();
+        string authority = $"127.0.0.1:{port}";
+
+        return new HostBinding(
+            new RuntimeOptions([], fileRoot),
+            new HostListenOptions($"http://{authority}", HostTransport.Http),
+            authorization,
+            HostLifecycleOptions.Default)
+        {
+            AllowedHosts = allowedHosts ?? (authorization is null ? [] : [authority]),
+        };
+    }
+
+    private static int ReserveLoopbackPort()
+    {
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        return port;
     }
 
     private async Task<ManagedGenerationLoader> OpenLoaderAsync()

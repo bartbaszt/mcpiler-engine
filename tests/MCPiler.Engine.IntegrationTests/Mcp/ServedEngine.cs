@@ -108,6 +108,10 @@ internal sealed class ServedEngine : IAsyncDisposable
     /// The dedicated response-cache operator secret. Null leaves the operator channel unmapped, which
     /// is the safe default; a test that exercises read/clear supplies one.
     /// </param>
+    /// <param name="allowedHosts">
+    /// Explicit public authorities for protected-resource identity. Null derives the concrete
+    /// loopback listener authority when authorization is configured.
+    /// </param>
     public static async Task<ServedEngine> StartAsync(
         RuntimeOptions options,
         CancellationToken cancellationToken,
@@ -117,7 +121,8 @@ internal sealed class ServedEngine : IAsyncDisposable
         ILoggerProvider? loggerProvider = null,
         IReadOnlyList<string>? trustedProxies = null,
         IReadOnlyList<string>? allowedOrigins = null,
-        string? operatorSecret = null)
+        string? operatorSecret = null,
+        IReadOnlyList<string>? allowedHosts = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -148,7 +153,7 @@ internal sealed class ServedEngine : IAsyncDisposable
             {
                 TrustedProxies = trustedProxies ?? [],
                 AllowedOrigins = allowedOrigins ?? [],
-                AllowedHosts = authorization is null ? [] : [authority],
+                AllowedHosts = allowedHosts ?? (authorization is null ? [] : [authority]),
                 ResponseCacheOperatorSecret = operatorSecret,
             },
             execution,

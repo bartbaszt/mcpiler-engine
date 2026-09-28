@@ -67,7 +67,8 @@ public sealed class ForwardedHeaderTests : IDisposable
             RuntimeOptionsFor(manifest),
             Token,
             authorization: AuthorizationFor(authorization.Address),
-            trustedProxies: ["127.0.0.1"]);
+            trustedProxies: ["127.0.0.1"],
+            allowedHosts: ["PUBLIC.EXAMPLE.TEST"]);
 
         using HttpClient client = new();
         using HttpRequestMessage request = new(
@@ -93,7 +94,7 @@ public sealed class ForwardedHeaderTests : IDisposable
     }
 
     [Fact]
-    public async Task An_untrusted_client_cannot_claim_the_scheme()
+    public async Task An_untrusted_client_cannot_claim_the_scheme_or_authority()
     {
         await using FakeAuthorizationServer authorization =
             await FakeAuthorizationServer.StartAsync(active: true, Token);
@@ -120,19 +121,10 @@ public sealed class ForwardedHeaderTests : IDisposable
 
         using HttpResponseMessage served = await client.SendAsync(request, Token);
 
-        Assert.Equal(HttpStatusCode.OK, served.StatusCode);
-
-        using JsonDocument document = JsonDocument.Parse(await served.Content.ReadAsStringAsync(Token));
-
-        // The scheme is the assertion that matters: an untrusted client claimed https and the
-        // process still publishes http, so the audience it will accept is the address a client
-        // that actually reached it over http would present. The host comes from the Host header,
-        // which is what every HTTP server reads and what a deployment constrains through the
-        // proxy and AllowedHosts rather than through forwarded headers.
-        string resource = document.RootElement.GetProperty("resource").GetString()!;
-
-        Assert.StartsWith("http://", resource, StringComparison.Ordinal);
-        Assert.Contains("/api/full", resource, StringComparison.Ordinal);
+        // The forwarded scheme is ignored because the peer is untrusted, and the attacker-chosen
+        // Host is not an allowed protected-resource authority. The resource is hidden rather than
+        // reflected into metadata.
+        Assert.Equal(HttpStatusCode.NotFound, served.StatusCode);
     }
 
     private static async Task<LoopbackHost> UpstreamAsync() =>
