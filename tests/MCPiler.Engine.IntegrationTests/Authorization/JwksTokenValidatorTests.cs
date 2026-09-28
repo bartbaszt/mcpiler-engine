@@ -85,6 +85,35 @@ public sealed class JwksTokenValidatorTests
     }
 
     [Fact]
+    public async Task Sequential_unknown_kids_are_bounded_by_the_forced_refresh_cooldown()
+    {
+        using RSA trustedRsa = RSA.Create(2048);
+        using RSA unknownRsa = RSA.Create(2048);
+        RsaSecurityKey trusted = SigningKey(trustedRsa, "trusted");
+        var handler = new StubHandler((_, _) => JwksResponse(trusted));
+        using HttpClient client = new(handler);
+        var validator = new JwksTokenValidator(client, Issuer, JwksUri, new FakeTimeProvider(Now));
+
+        Assert.True((await validator.ValidateAsync(
+            Mint(trusted, "resource"),
+            TestContext.Current.CancellationToken)).Active);
+
+        for (int i = 0; i < 100; i++)
+        {
+            RsaSecurityKey unknown = new(unknownRsa.ExportParameters(true))
+            {
+                KeyId = $"unknown-{i}",
+            };
+
+            Assert.False((await validator.ValidateAsync(
+                Mint(unknown, "resource"),
+                TestContext.Current.CancellationToken)).Active);
+        }
+
+        Assert.Equal(2, handler.Calls);
+    }
+
+    [Fact]
     public async Task Last_good_keys_survive_a_short_refresh_outage_but_not_indefinitely()
     {
         using RSA rsa = RSA.Create(2048);
@@ -101,7 +130,15 @@ public sealed class JwksTokenValidatorTests
         Assert.True((await validator.ValidateAsync(token, TestContext.Current.CancellationToken)).Active);
 
         clock.Advance(TimeSpan.FromMinutes(6));
-        Assert.True((await validator.ValidateAsync(token, TestContext.Current.CancellationToken)).Active);
+
+        for (int i = 0; i < 100; i++)
+        {
+            Assert.True((await validator.ValidateAsync(
+                token,
+                TestContext.Current.CancellationToken)).Active);
+        }
+
+        Assert.Equal(2, handler.Calls);
 
         clock.Advance(TimeSpan.FromMinutes(10));
         Assert.False((await validator.ValidateAsync(token, TestContext.Current.CancellationToken)).Active);
