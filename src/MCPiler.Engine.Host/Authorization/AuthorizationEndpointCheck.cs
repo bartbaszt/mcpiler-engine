@@ -58,6 +58,11 @@ internal static class AuthorizationEndpointCheck
             return InvalidMetadataRefusal(options, invalid);
         }
 
+        if (DiscoveryStatusRefusal(metadata, options) is { } statusRefusal)
+        {
+            return statusRefusal;
+        }
+
         return metadata.Document is { } document
             ? ValidateDiscovered(document, options, "introspection_endpoint", HostConfiguration.IntrospectionEndpointKey, "introspection")
             : null;
@@ -77,6 +82,11 @@ internal static class AuthorizationEndpointCheck
         if (metadata.InvalidReason is { } invalid)
         {
             return InvalidMetadataRefusal(options, invalid);
+        }
+
+        if (DiscoveryStatusRefusal(metadata, options) is { } statusRefusal)
+        {
+            return statusRefusal;
         }
 
         return metadata.Document is { } document
@@ -139,6 +149,33 @@ internal static class AuthorizationEndpointCheck
             // startup must not claim a valid issuer publishes no endpoint without a document.
             return new IssuerMetadataDiscovery(null, null);
         }
+    }
+
+    private static StartupRefusal? DiscoveryStatusRefusal(
+        IssuerMetadataDiscovery metadata,
+        HostAuthorizationOptions options)
+    {
+        if (metadata.StatusCode is not { } status || status is HttpStatusCode.OK)
+        {
+            return null;
+        }
+
+        int code = (int)status;
+        if (status is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests
+            || code >= 500)
+        {
+            // A server-side or throttling response may recover without an operator change.
+            return null;
+        }
+
+        return new StartupRefusal(
+            string.Empty,
+            "auth/issuer-discovery-unusable",
+            $"'{HostConfiguration.IssuerKey}' is '{options.Issuer}', but RFC 8414 discovery returned HTTP {code} ({status}). "
+            + "The configured issuer endpoint is definitively unusable by this Engine configuration.")
+        {
+            Setting = HostConfiguration.IssuerKey,
+        };
     }
 
     private static StartupRefusal InvalidMetadataRefusal(
