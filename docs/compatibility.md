@@ -115,9 +115,10 @@ dotnet mcpiler-engine.dll inspect \
 ```
 
 Use the same authorization/runtime-state host settings the production deployment requires.
-For HTTP, `inspect` runs the same Manifest loading, policy narrowing and host-side startup
-authorization checks that determine whether `serve` can open the listener. An unstartable
-configuration exits `78`, so CI must require exit code 0 rather than merely archive the report.
+For HTTP, `inspect` runs the same Manifest loading, policy narrowing and host-side startup checks
+that can be performed without opening a listener. If one of those preflighted checks fails,
+`inspect` exits `78`, so CI must require exit code 0 rather than merely archive the report.
+Listener/socket binding remains a `serve`-time concern.
 
 A successful JSON Schema validation alone is not a compatibility check.
 
