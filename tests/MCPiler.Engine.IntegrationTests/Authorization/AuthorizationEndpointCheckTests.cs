@@ -154,9 +154,52 @@ public sealed class AuthorizationEndpointCheckTests
             Introspection(issuer.Address),
             TestContext.Current.CancellationToken);
 
-        Assert.Null(refusal);
+        Assert.NotNull(refusal);
+        Assert.Equal("auth/issuer-discovery-unusable", refusal!.Code);
         Assert.Equal(1, issuer.RequestCount);
         Assert.Equal(0, target.RequestCount);
+    }
+
+    [Theory]
+    [InlineData(StatusCodes.Status400BadRequest)]
+    [InlineData(StatusCodes.Status401Unauthorized)]
+    [InlineData(StatusCodes.Status403Forbidden)]
+    [InlineData(StatusCodes.Status404NotFound)]
+    public async Task Definitive_discovery_http_failures_are_startup_refusals(int status)
+    {
+        await using AuthorizationTransportServer issuer = await AuthorizationTransportServer.StartAsync(
+            context =>
+            {
+                context.Response.StatusCode = status;
+                return Task.CompletedTask;
+            });
+
+        StartupRefusal? refusal = await AuthorizationEndpointCheck.FindAsync(
+            Introspection(issuer.Address),
+            TestContext.Current.CancellationToken);
+
+        Assert.NotNull(refusal);
+        Assert.Equal("auth/issuer-discovery-unusable", refusal!.Code);
+    }
+
+    [Theory]
+    [InlineData(StatusCodes.Status429TooManyRequests)]
+    [InlineData(StatusCodes.Status500InternalServerError)]
+    [InlineData(StatusCodes.Status503ServiceUnavailable)]
+    public async Task Transient_discovery_http_failures_remain_outages(int status)
+    {
+        await using AuthorizationTransportServer issuer = await AuthorizationTransportServer.StartAsync(
+            context =>
+            {
+                context.Response.StatusCode = status;
+                return Task.CompletedTask;
+            });
+
+        StartupRefusal? refusal = await AuthorizationEndpointCheck.FindAsync(
+            Introspection(issuer.Address),
+            TestContext.Current.CancellationToken);
+
+        Assert.Null(refusal);
     }
 
     [Theory]
