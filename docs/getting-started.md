@@ -239,8 +239,9 @@ dotnet mcpiler-engine.dll inspect \
 
 **inspect** uses the same Manifest loading, semantic validation, policy narrowing and host-side
 startup authorization checks as the corresponding HTTP **serve** configuration, but opens no
-listener. If that exact HTTP configuration is unstartable, `inspect` returns exit code `78`
-while still printing the derived surfaces/tools for diagnosis.
+listener. If the configuration fails one of the startup checks that `inspect` preflights, the
+command returns exit code `78` while still printing the derived surfaces/tools for diagnosis.
+Listener/socket bind failures remain `serve`-time failures because `inspect` opens no listener.
 
 Do not replace this with "the JSON parses" or "the JSON Schema is green." Cross-section
 references and security rules are reader/runtime rules.
@@ -273,7 +274,7 @@ surface through HTTPS/reverse proxy/tunnel. For example, the serving configurati
 contain settings of this form:
 
 ~~~bash
---issuer https://idp.example.com --token-validation jwks
+--issuer https://idp.example.com --token-validation jwks --allowed-host mcp.example.com
 ~~~
 
 where the issuer is your actual OAuth/OIDC authority. The resulting public resource might be:
@@ -399,6 +400,8 @@ services:
       - https://idp.example.com
       - --token-validation
       - jwks
+      - --allowed-host
+      - mcp.example.com
       - --listen
       - http://0.0.0.0:8080
 ~~~
