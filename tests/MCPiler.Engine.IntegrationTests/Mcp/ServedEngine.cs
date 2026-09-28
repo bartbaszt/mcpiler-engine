@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -134,15 +136,19 @@ internal sealed class ServedEngine : IAsyncDisposable
             diagnostics);
         var drain = new DrainCoordinator();
 
+        int port = ReserveLoopbackPort();
+        string authority = $"127.0.0.1:{port}";
+
         WebApplication app = EngineWebHost.Build(
             started,
             new HostBinding(
                 options,
-                new HostListenOptions("http://127.0.0.1:0", HostTransport.Http),
+                new HostListenOptions($"http://{authority}", HostTransport.Http),
                 authorization)
             {
                 TrustedProxies = trustedProxies ?? [],
                 AllowedOrigins = allowedOrigins ?? [],
+                AllowedHosts = authorization is null ? [] : [authority],
                 ResponseCacheOperatorSecret = operatorSecret,
             },
             execution,
@@ -193,6 +199,15 @@ internal sealed class ServedEngine : IAsyncDisposable
         await StopQuietlyAsync(_app);
         _execution.Dispose();
         _drain.Dispose();
+    }
+
+    private static int ReserveLoopbackPort()
+    {
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        return port;
     }
 
     private static async Task StopQuietlyAsync(WebApplication app)
