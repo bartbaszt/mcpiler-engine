@@ -14,6 +14,9 @@ namespace MCPiler.Engine.IntegrationTests.Authorization;
 public sealed class JwksTokenValidatorTests
 {
     private static readonly DateTimeOffset Now = new(2026, 9, 28, 8, 0, 0, TimeSpan.Zero);
+    private static readonly string[] SingletonAudience = ["resource"];
+    private static readonly string[] ResourceThenOtherAudiences = ["resource", "other"];
+    private static readonly string[] OtherThenResourceAudiences = ["other", "resource"];
     private const string Issuer = "https://issuer.example.test";
     private const string JwksUri = "https://issuer.example.test/jwks";
 
@@ -30,13 +33,13 @@ public sealed class JwksTokenValidatorTests
             Mint(key, "resource"),
             TestContext.Current.CancellationToken);
         TokenVerification singleton = await validator.ValidateAsync(
-            Mint(key, new[] { "resource" }),
+            Mint(key, SingletonAudience),
             TestContext.Current.CancellationToken);
         TokenVerification first = await validator.ValidateAsync(
-            Mint(key, new[] { "resource", "other" }),
+            Mint(key, ResourceThenOtherAudiences),
             TestContext.Current.CancellationToken);
         TokenVerification second = await validator.ValidateAsync(
-            Mint(key, new[] { "other", "resource" }),
+            Mint(key, OtherThenResourceAudiences),
             TestContext.Current.CancellationToken);
 
         Assert.True(scalar.Active);
