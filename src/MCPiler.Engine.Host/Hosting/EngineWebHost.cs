@@ -141,6 +141,19 @@ public static class EngineWebHost
         EngineGenerationManager generations,
         bool managed)
     {
+        if (generations.Current is not { } activeGeneration)
+        {
+            throw new InvalidOperationException("The listener has no active Engine generation.");
+        }
+
+        if (HostRouteTopologyValidation.Find(activeGeneration.Mounts) is { Count: > 0 } topologyRefusals)
+        {
+            StartupRefusal first = topologyRefusals[0];
+            generations.Dispose();
+            throw new InvalidOperationException(
+                $"refused {first.Mount} [{first.Code}]: {first.Message}");
+        }
+
         // The authorization pairing is a startup fact, not a request-time surprise. A mount
         // that requires a token exists and the process trusts no issuer: refusing here
         // names the mount, and an operator debugs their deployment rather than a client
