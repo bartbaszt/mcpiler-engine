@@ -63,7 +63,7 @@ public sealed class FixtureCorpusTests
     {
         var expected = new[]
         {
-            "compiled", "compound", "credentials", "files", "jmespath-profile-1", "minimal",
+            "compiled", "compound", "credentials", "files", "jmespath-agent-projection", "jmespath-profile-1", "minimal",
             "multi-surface", "refs", "response-cache", "response-projection-pagination", "sealed-bundle",
             "search", "transformed", "two-origins",
             "manifest-0.3/challenge-session", "manifest-0.3/exchange", "manifest-0.3/managed-provider",
