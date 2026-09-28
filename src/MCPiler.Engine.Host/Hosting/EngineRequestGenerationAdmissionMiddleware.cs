@@ -104,11 +104,11 @@ internal sealed class EngineRequestGenerationAdmissionMiddleware
             return route.ResolveAuthorizationResourcePath(context);
         }
 
-        string path = context.Request.Path.Value ?? "/";
+        string rawPath = RequestAddress.RawPath(context);
 
-        return TransferPath.TryParse(path, out TransferPath transfer)
+        return TransferPath.TryParse(rawPath, out TransferPath transfer)
             ? transfer.ParentAddress
-            : path;
+            : rawPath;
     }
 
 
