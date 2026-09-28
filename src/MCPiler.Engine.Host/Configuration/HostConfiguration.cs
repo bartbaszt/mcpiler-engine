@@ -796,9 +796,9 @@ public static class HostConfiguration
     private static string? PublicAuthority(string key, string value, List<string> rejected)
     {
         if (value.Length > 0
-            && !value.Contains('/', StringComparison.Ordinal)
-            && !value.Contains('?', StringComparison.Ordinal)
-            && !value.Contains('#', StringComparison.Ordinal)
+            && !value.Contains("/", StringComparison.Ordinal)
+            && !value.Contains("?", StringComparison.Ordinal)
+            && !value.Contains("#", StringComparison.Ordinal)
             && Uri.TryCreate("http://" + value, UriKind.Absolute, out Uri? parsed)
             && string.IsNullOrEmpty(parsed.UserInfo)
             && parsed.AbsolutePath == "/"
