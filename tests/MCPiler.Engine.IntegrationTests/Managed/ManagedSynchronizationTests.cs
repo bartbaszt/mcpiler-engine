@@ -195,11 +195,16 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         // replaces the one already serving.
         var broken = new Dictionary<string, object?>
         {
-            ["protocolVersion"] = 1,
+            ["protocolVersion"] = 2,
             ["generationId"] = "g2",
             ["mounts"] = new[]
             {
-                new { prefix = "/mcp/connector", bundle = Convert.ToBase64String(Encoding.UTF8.GetBytes("not an archive")) },
+                new
+                {
+                    prefix = "/mcp/connector",
+                    bundle = Convert.ToBase64String(Encoding.UTF8.GetBytes("not an archive")),
+                    externalResources = new Dictionary<string, string>(StringComparer.Ordinal),
+                },
             },
             ["secrets"] = new Dictionary<string, string>(StringComparer.Ordinal),
             ["metadata"] = new { desiredRevisionId = "g2", engineVersion = "fixture" },
@@ -251,7 +256,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         var original = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
         var malformed = new Dictionary<string, object?>
         {
-            ["protocolVersion"] = 1,
+            ["protocolVersion"] = 2,
             ["generationId"] = "g2",
             ["mounts"] = null,
             ["secrets"] = new Dictionary<string, string>(StringComparer.Ordinal),
@@ -312,6 +317,109 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_protocol_v1_generation_is_refused_as_incompatible_and_leaves_g0_active()
+    {
+        var original = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var legacy = JsonSerializer.SerializeToNode(
+            Generation("g2", ServedManifests.OneSurface, prefix: "/mcp/connector"))!.AsObject();
+        legacy["protocolVersion"] = 1;
+        foreach (var mountNode in legacy["mounts"]!.AsArray())
+        {
+            mountNode!.AsObject().Remove("externalResources");
+        }
+
+        var deliveringLegacy = false;
+        var requests = new ConcurrentQueue<JsonObject>();
+        byte[] originalBytes = JsonSerializer.SerializeToUtf8Bytes(original);
+        byte[] legacyBytes = Encoding.UTF8.GetBytes(legacy.ToJsonString());
+        await using var platform = await PlatformAsync(request =>
+        {
+            requests.Enqueue(request);
+            return Response.Bytes(deliveringLegacy ? legacyBytes : originalBytes, isGeneration: true);
+        });
+        await using ManagedProcess engine = await StartAsync(platform);
+
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        deliveringLegacy = true;
+
+        await WaitForAsync(() => requests.Any(request =>
+            string.Equals(request["lastCandidateOutcome"]?.GetValue<string>(), "candidate-failed", StringComparison.Ordinal)
+            && request["lastCandidateDiagnostics"] is JsonArray diagnostics
+            && diagnostics.Count > 0
+            && diagnostics[0]?["code"]?.GetValue<string>() == "managed/protocol-version-unsupported"));
+
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+    }
+
+    [Fact]
+    public async Task An_unknown_surface_resource_mapping_is_refused_before_activation_and_leaves_g0_active()
+    {
+        var original = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var invalid = Generation(
+            "g2",
+            ServedManifests.OneSurface,
+            prefix: "/mcp/connector",
+            externalResources: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["ghost"] = "https://tunnel.example/v1/mcp/ghost",
+            });
+
+        var deliveringInvalid = false;
+        var requests = new ConcurrentQueue<JsonObject>();
+        await using var platform = await PlatformAsync(request =>
+        {
+            requests.Enqueue(request);
+            return Response.Generation(deliveringInvalid ? invalid : original);
+        });
+        await using ManagedProcess engine = await StartAsync(platform);
+
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        deliveringInvalid = true;
+
+        await WaitForAsync(() => requests.Any(request =>
+            string.Equals(request["lastCandidateOutcome"]?.GetValue<string>(), "candidate-failed", StringComparison.Ordinal)
+            && request["lastCandidateDiagnostics"] is JsonArray diagnostics
+            && diagnostics.Count > 0
+            && diagnostics[0]?["code"]?.GetValue<string>() == "managed/external-resource-surface-unknown"));
+
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+    }
+
+    [Fact]
+    public async Task A_non_https_surface_resource_mapping_is_refused_before_activation_and_leaves_g0_active()
+    {
+        var original = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var invalid = Generation(
+            "g2",
+            ServedManifests.OneSurface,
+            prefix: "/mcp/connector",
+            externalResources: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["full"] = "http://tunnel.example/v1/mcp/not-https",
+            });
+
+        var deliveringInvalid = false;
+        var requests = new ConcurrentQueue<JsonObject>();
+        await using var platform = await PlatformAsync(request =>
+        {
+            requests.Enqueue(request);
+            return Response.Generation(deliveringInvalid ? invalid : original);
+        });
+        await using ManagedProcess engine = await StartAsync(platform);
+
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        deliveringInvalid = true;
+
+        await WaitForAsync(() => requests.Any(request =>
+            string.Equals(request["lastCandidateOutcome"]?.GetValue<string>(), "candidate-failed", StringComparison.Ordinal)
+            && request["lastCandidateDiagnostics"] is JsonArray diagnostics
+            && diagnostics.Count > 0
+            && diagnostics[0]?["code"]?.GetValue<string>() == "managed/external-resource-invalid"));
+
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+    }
+
+    [Fact]
     public async Task A_duplicate_delivery_of_the_active_generation_is_acknowledged_without_a_second_swap()
     {
         var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
@@ -350,11 +458,16 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         // A mount whose bundle is not an archive, so the loader refuses the candidate whole.
         var broken = new Dictionary<string, object?>
         {
-            ["protocolVersion"] = 1,
+            ["protocolVersion"] = 2,
             ["generationId"] = "g2",
             ["mounts"] = new[]
             {
-                new { prefix = "/mcp/connector", bundle = Convert.ToBase64String(Encoding.UTF8.GetBytes("not an archive")) },
+                new
+                {
+                    prefix = "/mcp/connector",
+                    bundle = Convert.ToBase64String(Encoding.UTF8.GetBytes("not an archive")),
+                    externalResources = new Dictionary<string, string>(StringComparer.Ordinal),
+                },
             },
             ["secrets"] = new Dictionary<string, string>(StringComparer.Ordinal),
             ["metadata"] = new { desiredRevisionId = "g2", engineVersion = "fixture" },
@@ -422,11 +535,16 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         var broken = new Dictionary<string, object?>
         {
-            ["protocolVersion"] = 1,
+            ["protocolVersion"] = 2,
             ["generationId"] = "g2",
             ["mounts"] = new[]
             {
-                new { prefix = "/mcp/connector", bundle = Convert.ToBase64String(Encoding.UTF8.GetBytes("not an archive")) },
+                new
+                {
+                    prefix = "/mcp/connector",
+                    bundle = Convert.ToBase64String(Encoding.UTF8.GetBytes("not an archive")),
+                    externalResources = new Dictionary<string, string>(StringComparer.Ordinal),
+                },
             },
             ["secrets"] = new Dictionary<string, string>(StringComparer.Ordinal),
             ["metadata"] = new { desiredRevisionId = "g2", engineVersion = "fixture" },
@@ -906,7 +1024,8 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         string id,
         string manifest,
         string prefix,
-        string? providerValue = null)
+        string? providerValue = null,
+        IReadOnlyDictionary<string, string>? externalResources = null)
     {
         var bundle = Bundle(manifest);
 
@@ -916,9 +1035,18 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         return new Dictionary<string, object?>(StringComparer.Ordinal)
         {
-            ["protocolVersion"] = 1,
+            ["protocolVersion"] = 2,
             ["generationId"] = id,
-            ["mounts"] = new[] { new { prefix, bundle } },
+            ["mounts"] = new[]
+            {
+                new
+                {
+                    prefix,
+                    bundle,
+                    externalResources = externalResources
+                        ?? new Dictionary<string, string>(StringComparer.Ordinal),
+                },
+            },
             ["secrets"] = secrets,
             ["metadata"] = new { desiredRevisionId = id, engineVersion = "fixture" },
             ["kind"] = "generation",

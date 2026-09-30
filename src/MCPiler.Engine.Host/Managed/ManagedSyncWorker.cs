@@ -487,10 +487,16 @@ internal sealed class ManagedSyncWorker : IDisposable
             return false;
         }
 
+        Dictionary<string, string> externalResources = generation.ExternalResources.ToDictionary(
+            binding => binding.MountPrefix + "/" + binding.SurfaceSlug,
+            binding => binding.ExternalResourceUri,
+            StringComparer.Ordinal);
+
         EngineGeneration candidate = new(
             number,
             MountSet.From(generation.Mounts),
-            generation.TakeExecution());
+            generation.TakeExecution(),
+            externalResources: externalResources);
 
         Task retirement = _generations.Activate(candidate);
 

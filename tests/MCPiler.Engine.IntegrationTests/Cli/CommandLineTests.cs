@@ -126,6 +126,43 @@ public sealed class CommandLineTests
     }
 
     [Fact]
+    public void External_resource_bindings_are_repeatable_and_preserve_exact_values()
+    {
+        CommandLineResult parsed = CommandLine.Parse(
+            [
+                "serve",
+                "--external-resource", "/api/full=https://tunnel.example.test/v1/mcp/one",
+                "--external-resource=/crm/default=https://tunnel.example.test/v1/mcp/two/",
+            ]);
+
+        Assert.Empty(parsed.Refusals);
+        Assert.Equal(
+            [
+                new KeyValuePair<string, string>(
+                    HostConfiguration.ExternalResourcePrefix + "/api/full",
+                    "https://tunnel.example.test/v1/mcp/one"),
+                new KeyValuePair<string, string>(
+                    HostConfiguration.ExternalResourcePrefix + "/crm/default",
+                    "https://tunnel.example.test/v1/mcp/two/"),
+            ],
+            parsed.Settings.Where(setting => setting.Key.StartsWith(HostConfiguration.ExternalResourcePrefix, StringComparison.Ordinal)));
+    }
+
+    [Theory]
+    [InlineData("/api/full")]
+    [InlineData("=https://tunnel.example.test/v1/mcp/one")]
+    [InlineData("/api/full=")]
+    public void A_malformed_external_resource_mapping_is_refused_as_cli_syntax(string value)
+    {
+        CommandLineResult parsed = CommandLine.Parse(["serve", "--external-resource", value]);
+
+        Assert.NotEmpty(parsed.Refusals);
+        Assert.DoesNotContain(
+            parsed.Settings,
+            setting => setting.Key.StartsWith(HostConfiguration.ExternalResourcePrefix, StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void A_switch_with_no_value_is_true()
     {
         CommandLineResult parsed = CommandLine.Parse(["serve", "--require-sealed", "--file-store-root", "/var/files"]);

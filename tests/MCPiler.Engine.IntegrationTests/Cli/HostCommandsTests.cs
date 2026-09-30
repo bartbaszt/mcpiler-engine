@@ -152,6 +152,77 @@ public sealed class HostCommandsTests : IDisposable
     }
 
     [Fact]
+    public async Task Inspect_accepts_the_exact_explicit_surface_route_external_resource_binding()
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "inspect",
+                "--mount", "/api=" + ScopedManifest("external-resource-valid"),
+                "--file-store-root", Store(),
+                "--external-resource", "/api/full=https://tunnel.example.test/v1/mcp/one",
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Success, outcome.ExitCode);
+        Assert.Contains("/api surface full", outcome.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task The_default_surface_alias_is_not_a_second_external_resource_selector()
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "inspect",
+                "--mount", "/api=" + ScopedManifest("external-resource-default-alias"),
+                "--file-store-root", Store(),
+                "--external-resource", "/api=https://tunnel.example.test/v1/mcp/one",
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
+        Assert.Contains("unknown or disabled surface route '/api'", outcome.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("tool list-pets", outcome.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Serve_refuses_an_unknown_external_resource_surface_before_listener_startup()
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "serve",
+                "--mount", "/api=" + ScopedManifest("external-resource-unknown"),
+                "--file-store-root", Store(),
+                "--external-resource", "/api/missing=https://tunnel.example.test/v1/mcp/one",
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
+        Assert.Contains("unknown or disabled surface route '/api/missing'", outcome.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("tool list-pets", outcome.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Inspect_refuses_a_disabled_external_resource_surface()
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "inspect",
+                "--mount", "/api=" + DisabledSiblingManifest("external-resource-disabled"),
+                "--file-store-root", Store(),
+                "--external-resource", "/api/hidden=https://tunnel.example.test/v1/mcp/one",
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
+        Assert.Contains("unknown or disabled surface route '/api/hidden'", outcome.Output, StringComparison.Ordinal);
+        Assert.DoesNotContain("tool list-pets", outcome.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Inspect_reports_the_operator_channel_presence_without_the_secret()
     {
         string store = Store();
@@ -647,6 +718,49 @@ public sealed class HostCommandsTests : IDisposable
               "name": "Scoped API",
               "surfaces": [
                 { "slug": "full", "isDefault": true, "requiredScopes": ["probe.read"],
+                  "operations": [ { "operation": "list-pets", "exposure": "direct" } ] }
+              ]
+            } },
+            "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+            "operations": {
+              "inline": {
+                "operations": [ { "key": "GET /pets", "method": "GET", "path": "/pets" } ]
+              }
+            },
+            "agentSurface": {
+              "inline": {
+                "operations": [
+                  {
+                    "slug": "list-pets",
+                    "name": "List pets",
+                    "binding": { "type": "http", "operation": "GET /pets" }
+                  }
+                ]
+              }
+            }
+          }
+        }
+        """;
+
+    private string DisabledSiblingManifest(string name)
+    {
+        string directory = Path.Combine(_root, name);
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "manifest.json"), DisabledSiblingManifestText);
+        return directory;
+    }
+
+    private const string DisabledSiblingManifestText = """
+        {
+          "manifestFormatVersion": "0.3",
+          "sections": {
+            "server": { "inline": {
+              "name": "Scoped API",
+              "authenticationRequired": false,
+              "surfaces": [
+                { "slug": "full", "isDefault": true,
+                  "operations": [ { "operation": "list-pets", "exposure": "direct" } ] },
+                { "slug": "hidden", "enabled": false,
                   "operations": [ { "operation": "list-pets", "exposure": "direct" } ] }
               ]
             } },

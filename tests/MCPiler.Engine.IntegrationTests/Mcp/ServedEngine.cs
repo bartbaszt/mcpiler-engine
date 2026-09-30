@@ -115,7 +115,8 @@ internal sealed class ServedEngine : IAsyncDisposable
         ILoggerProvider? loggerProvider = null,
         IReadOnlyList<string>? trustedProxies = null,
         IReadOnlyList<string>? allowedOrigins = null,
-        string? operatorSecret = null)
+        string? operatorSecret = null,
+        IReadOnlyDictionary<string, string>? externalResources = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -144,6 +145,8 @@ internal sealed class ServedEngine : IAsyncDisposable
                 TrustedProxies = trustedProxies ?? [],
                 AllowedOrigins = allowedOrigins ?? [],
                 ResponseCacheOperatorSecret = operatorSecret,
+                ExternalResources = externalResources
+                    ?? new Dictionary<string, string>(StringComparer.Ordinal),
             },
             execution,
             drain);

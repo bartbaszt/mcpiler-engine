@@ -65,27 +65,16 @@ internal static class SurfaceMetadata
     private const string WellKnownPrefix = "/.well-known/oauth-protected-resource";
 
     /// <summary>
-    /// Whether the mount an addressed resource belongs to requires a token, or <c>null</c> when
-    /// no mount serves the address this request named.
+    /// Builds metadata from one immutable generation lease, or returns null when the addressed
+    /// surface is absent or open.
     /// </summary>
-    /// <remarks>
-    /// <para>
-    /// This is the same decision the mount middleware makes, taken from the same generation lease,
-    /// so the document a client fetches and the response it later receives cannot disagree about
-    /// whether the resource is protected. Reading protection from anywhere else here would
-    /// reintroduce exactly the divergence this change exists to remove.
-    /// </para>
-    /// <para>
-    /// A null is not a permission to serve metadata. An address no mount serves gets the same
-    /// answer an unprotected mount gets — no document — because publishing a document for an
-    /// address that names nothing would confirm the address exists.
-    /// </para>
-    /// </remarks>
-    internal static bool? MountRequiresAuthorization(
+    internal static ProtectedResourceMetadata? Build(
         HttpContext context,
+        HostAuthorizationOptions options,
         EngineGenerationManager generations)
     {
         ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(generations);
 
         string resource = ResourceOf(context);
@@ -105,10 +94,25 @@ internal static class SurfaceMetadata
 
         using (lease)
         {
-            return lease.Generation.TryResolve(address, out SurfaceResolution? resolved)
-                && resolved is not null
-                ? resolved.Mount.RequiresAuthorization()
-                : null;
+            if (!lease.Generation.TryResolve(address, out SurfaceResolution? resolved)
+                || resolved is null
+                || !resolved.Mount.RequiresAuthorization())
+            {
+                return null;
+            }
+
+            string direct = MountAuthorization.CanonicalResource(
+                context.Request.Scheme,
+                context.Request.Host.Value ?? string.Empty,
+                address);
+            string resourceIdentity = lease.Generation.EffectiveResourceIdentity(resolved, direct);
+
+            return new ProtectedResourceMetadata
+            {
+                Resource = resourceIdentity,
+                AuthorizationServers = [options.Issuer],
+                BearerMethodsSupported = ["header"],
+            };
         }
     }
 
@@ -124,22 +128,29 @@ internal static class SurfaceMetadata
             : path;
     }
 
-    internal static ProtectedResourceMetadata Build(
-        HttpContext context,
-        HostAuthorizationOptions options)
+    /// <summary>
+    /// RFC 9728 metadata address for one exact protected-resource identity.
+    /// </summary>
+    /// <remarks>
+    /// The resource string is split rather than round-tripped through <see cref="Uri"/> so an
+    /// external identity is not normalized while constructing the discovery location.
+    /// </remarks>
+    internal static string MetadataAddress(string resourceIdentity)
     {
-        string resource = ResourceOf(context);
+        ArgumentException.ThrowIfNullOrWhiteSpace(resourceIdentity);
 
-        string canonical = MountAuthorization.CanonicalResource(
-            context.Request.Scheme,
-            context.Request.Host.Value ?? string.Empty,
-            string.IsNullOrEmpty(resource) ? "/" : resource);
+        int scheme = resourceIdentity.IndexOf("://", StringComparison.Ordinal);
+        int path = scheme < 0
+            ? -1
+            : resourceIdentity.IndexOf('/', scheme + 3);
 
-        return new ProtectedResourceMetadata
+        if (scheme <= 0)
         {
-            Resource = canonical,
-            AuthorizationServers = [options.Issuer],
-            BearerMethodsSupported = ["header"],
-        };
+            throw new InvalidOperationException("A protected-resource identity must be an absolute URI.");
+        }
+
+        return path < 0
+            ? resourceIdentity + WellKnownPrefix
+            : resourceIdentity[..path] + WellKnownPrefix + resourceIdentity[path..];
     }
 }

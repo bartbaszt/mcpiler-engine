@@ -71,6 +71,9 @@ public static class CommandLine
     /// <summary>The option narrowing one bound across every mount, as <c>bound=value</c>.</summary>
     public const string FloorOption = "--floor";
 
+    /// <summary>The repeatable file-mode external-resource binding option.</summary>
+    public const string ExternalResourceOption = "--external-resource";
+
     /// <summary>The option reporting identity and exiting.</summary>
     public const string VersionOption = "--version";
 
@@ -94,6 +97,8 @@ public static class CommandLine
           --mount <prefix>=<dir>   A Manifest bundle directory answering on <prefix>. Repeatable.
           --mount-limit <p>:<b>=<v>  Narrow bound <b> on mount <p>.
           --floor <bound>=<value>  Narrow a bound across every mount.
+          --external-resource <surface-route>=<absolute-resource-uri>
+                                  Bind one exact file-mode surface route to one external HTTPS resource. Repeatable.
           --<setting> <value>      Any setting the host accepts; an unknown one is named and refused.
           --<switch>               A switch, equivalent to --<switch> true.
         """;
@@ -155,6 +160,15 @@ public static class CommandLine
                     break;
                 case FloorOption:
                     SplitPrefixed(value, Configuration.HostConfiguration.FloorPrefix, FloorOption, "<bound>=<value>", settings, refusals);
+                    break;
+                case ExternalResourceOption:
+                    SplitPrefixed(
+                        value,
+                        Configuration.HostConfiguration.ExternalResourcePrefix,
+                        ExternalResourceOption,
+                        "<surface-route>=<absolute-resource-uri>",
+                        settings,
+                        refusals);
                     break;
                 case VersionOption:
                     verb ??= HostVerb.Version;

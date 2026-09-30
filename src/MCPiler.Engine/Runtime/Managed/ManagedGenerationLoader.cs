@@ -14,7 +14,22 @@ namespace MCPiler.Engine.Runtime.Managed;
 /// <summary>One mount of a delivered generation: where it is addressed and what it contains.</summary>
 /// <param name="Prefix">The route prefix this mount is served under.</param>
 /// <param name="Bundle">The packed Manifest bundle, exactly as delivered.</param>
-public sealed record ManagedMountDelivery(string Prefix, ReadOnlyMemory<byte> Bundle);
+/// <param name="ExternalResources">
+/// Protocol-v2 non-secret mapping from explicit surface slug to exact external resource URI.
+/// </param>
+public sealed record ManagedMountDelivery(
+    string Prefix,
+    ReadOnlyMemory<byte> Bundle,
+    IReadOnlyDictionary<string, string> ExternalResources);
+
+/// <summary>One validated managed external-resource binding owned by a loaded generation.</summary>
+/// <param name="MountPrefix">Exact mount prefix that owns the surface.</param>
+/// <param name="SurfaceSlug">Exact enabled surface slug.</param>
+/// <param name="ExternalResourceUri">Exact external resource identity as delivered.</param>
+public sealed record ManagedSurfaceResourceBinding(
+    string MountPrefix,
+    string SurfaceSlug,
+    string ExternalResourceUri);
 
 /// <summary>
 /// One committed refresh-token rotation, reported in primitives so a host can act on it without
@@ -86,12 +101,14 @@ public sealed class ManagedGeneration : IDisposable
         string generationId,
         string? engineVersion,
         RuntimeStartResult started,
-        EngineExecution execution)
+        EngineExecution execution,
+        IReadOnlyList<ManagedSurfaceResourceBinding> externalResources)
     {
         GenerationId = generationId;
         EngineVersion = engineVersion;
         _started = started;
         _execution = execution;
+        ExternalResources = [.. externalResources];
     }
 
     /// <summary>The producer's deterministic generation identity.</summary>
@@ -105,6 +122,11 @@ public sealed class ManagedGeneration : IDisposable
 
     /// <summary>Warnings the load produced; nothing here blocks serving.</summary>
     public IReadOnlyList<StartupRefusal> Warnings => _started.Warnings;
+
+    /// <summary>
+    /// Validated non-secret external-resource bindings frozen with this immutable generation.
+    /// </summary>
+    public IReadOnlyList<ManagedSurfaceResourceBinding> ExternalResources { get; }
 
     /// <summary>The execution graph a lease resolves through.</summary>
     public EngineExecution Execution => _execution;
@@ -349,6 +371,60 @@ public sealed class ManagedGenerationLoader : IDisposable
             return new ManagedGenerationLoad(null, refusals, warnings);
         }
 
+        List<ManagedSurfaceResourceBinding> externalResources = [];
+        Dictionary<string, string> resourceOwners = new(StringComparer.Ordinal);
+
+        for (var index = 0; index < mounts.Count; index++)
+        {
+            ManagedMountDelivery delivered = delivery.Mounts[index];
+            MountedManifest mounted = mounts[index];
+            HashSet<string> enabledSurfaceSlugs = mounted.Surfaces
+                .Select(surface => surface.Slug)
+                .ToHashSet(StringComparer.Ordinal);
+
+            foreach (var binding in delivered.ExternalResources.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+            {
+                if (!enabledSurfaceSlugs.Contains(binding.Key))
+                {
+                    refusals.Add(new StartupRefusal(
+                        delivered.Prefix,
+                        "managed/external-resource-surface-unknown",
+                        $"The external-resource mapping names unknown or disabled surface '{binding.Key}' on mount '{delivered.Prefix}'."));
+                    continue;
+                }
+
+                if (!IsValidExternalResource(binding.Value))
+                {
+                    refusals.Add(new StartupRefusal(
+                        delivered.Prefix,
+                        "managed/external-resource-invalid",
+                        $"Surface '{binding.Key}' has an invalid external resource. Managed external resources must be absolute HTTPS URIs without query or fragment."));
+                    continue;
+                }
+
+                string owner = delivered.Prefix + "/" + binding.Key;
+                if (resourceOwners.TryGetValue(binding.Value, out string? previousOwner))
+                {
+                    refusals.Add(new StartupRefusal(
+                        delivered.Prefix,
+                        "managed/external-resource-duplicate",
+                        $"The external resource assigned to '{owner}' is already assigned to '{previousOwner}'. One resource identity may select only one surface."));
+                    continue;
+                }
+
+                resourceOwners.Add(binding.Value, owner);
+                externalResources.Add(new ManagedSurfaceResourceBinding(
+                    delivered.Prefix,
+                    binding.Key,
+                    binding.Value));
+            }
+        }
+
+        if (refusals.Count > 0)
+        {
+            return new ManagedGenerationLoad(null, refusals, warnings);
+        }
+
         // Provider values are bound per mount after every Manifest is known, because one mount's
         // value must never satisfy another mount's reference.
         foreach (MountedManifest mount in mounts)
@@ -419,10 +495,23 @@ public sealed class ManagedGenerationLoader : IDisposable
         }
 
         return new ManagedGenerationLoad(
-            new ManagedGeneration(delivery.GenerationId, delivery.EngineVersion, started, execution),
+            new ManagedGeneration(
+                delivery.GenerationId,
+                delivery.EngineVersion,
+                started,
+                execution,
+                externalResources),
             refusals,
             warnings);
     }
+
+    private static bool IsValidExternalResource(string resource)
+        => !string.IsNullOrWhiteSpace(resource)
+            && resource.Length <= 2048
+            && Uri.TryCreate(resource, UriKind.Absolute, out Uri? uri)
+            && string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal)
+            && string.IsNullOrEmpty(uri.Query)
+            && string.IsNullOrEmpty(uri.Fragment);
 
     /// <summary>
     /// Reads one committed mutable slot back from the local encrypted store, so a host reconciles

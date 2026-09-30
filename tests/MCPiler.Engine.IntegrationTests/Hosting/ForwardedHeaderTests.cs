@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -133,6 +134,45 @@ public sealed class ForwardedHeaderTests : IDisposable
 
         Assert.StartsWith("http://", resource, StringComparison.Ordinal);
         Assert.Contains("/api/full", resource, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task An_explicit_external_resource_ignores_host_and_forwarding_claims()
+    {
+        await using FakeAuthorizationServer authorization =
+            await FakeAuthorizationServer.StartAsync(active: true, Token);
+        await using LoopbackHost upstream = await UpstreamAsync();
+        string manifest = ServedManifests.Write(
+            _root,
+            "external-forwarded-" + Guid.NewGuid().ToString("N"),
+            Manifest(upstream.Address));
+        const string external = "https://tunnel.example.test/v1/mcp/stable-resource";
+
+        await using ServedEngine engine = await ServedEngine.StartAsync(
+            RuntimeOptionsFor(manifest),
+            Token,
+            authorization: AuthorizationFor(authorization.Address),
+            trustedProxies: ["127.0.0.1"],
+            externalResources: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["/api/full"] = external,
+            });
+
+        using HttpClient client = new();
+        using HttpRequestMessage request = new(
+            HttpMethod.Get,
+            engine.At("/.well-known/oauth-protected-resource/api/full"));
+        request.Headers.Host = "attacker.example.test";
+        request.Headers.TryAddWithoutValidation("Forwarded", "for=192.0.2.10;proto=http;host=forwarded.example.test");
+        request.Headers.TryAddWithoutValidation("X-Forwarded-Proto", "http");
+        request.Headers.TryAddWithoutValidation("X-Forwarded-Host", "x-forwarded.example.test");
+        request.Headers.TryAddWithoutValidation("X-Forwarded-For", "192.0.2.20");
+
+        using HttpResponseMessage served = await client.SendAsync(request, Token);
+
+        Assert.Equal(HttpStatusCode.OK, served.StatusCode);
+        using JsonDocument document = JsonDocument.Parse(await served.Content.ReadAsStringAsync(Token));
+        Assert.Equal(external, document.RootElement.GetProperty("resource").GetString());
     }
 
     private static async Task<LoopbackHost> UpstreamAsync() =>

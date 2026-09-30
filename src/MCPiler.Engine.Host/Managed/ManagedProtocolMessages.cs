@@ -73,6 +73,18 @@ public sealed class ManagedMountMessage
     [JsonRequired]
     [JsonPropertyName("bundle")]
     public string Bundle { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Protocol-v2 non-secret mapping from explicit surface slug to exact external resource URI.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately not <see cref="JsonRequiredAttribute"/>: the reader checks the protocol
+    /// version before shape validation so a protocol-v1 payload follows the explicit version
+    /// incompatibility path. A protocol-v2 payload with this member missing is still refused by
+    /// shape validation and is never interpreted as an empty mapping.
+    /// </remarks>
+    [JsonPropertyName("externalResources")]
+    public Dictionary<string, string>? ExternalResources { get; set; }
 }
 
 /// <summary>Producer metadata carried for correlation and diagnostics.</summary>

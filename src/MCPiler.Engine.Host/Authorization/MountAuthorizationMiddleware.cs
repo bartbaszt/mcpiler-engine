@@ -85,12 +85,6 @@ internal sealed class MountAuthorizationMiddleware
             return;
         }
 
-        // File-mode transfer children carry their parent in endpoint metadata. A managed catch-all
-        // has no such metadata, so the request admission's folded parent address is the binding.
-        // Establish it once and use it for both discovery and audience validation.
-        string resourcePath = route.AuthorizationResourcePath
-            ?? admission.Address;
-
         if (!admission.Resolution.Mount.RequiresAuthorization())
         {
             // An open mount states its identity explicitly rather than leaving a consumer to
@@ -104,14 +98,11 @@ internal sealed class MountAuthorizationMiddleware
 
         if (!verification.Active)
         {
-            await ChallengeAsync(context, resourcePath).ConfigureAwait(false);
+            await ChallengeAsync(context, admission.ResourceIdentity).ConfigureAwait(false);
             return;
         }
 
-        string canonical = MountAuthorization.CanonicalResource(
-            context.Request.Scheme,
-            context.Request.Host.Value ?? string.Empty,
-            resourcePath);
+        string canonical = admission.ResourceIdentity;
 
         if (verification.Audience is null
             || !MountAuthorization.AudienceNames(verification.Audience, canonical))
@@ -171,17 +162,11 @@ internal sealed class MountAuthorizationMiddleware
     /// ever come back authorized, and an unknown resource would answer with nothing, which is
     /// what "unknown" has to mean to a client that has not authenticated yet.
     /// </summary>
-    private static Task ChallengeAsync(HttpContext context, string resourcePath)
+    private static Task ChallengeAsync(HttpContext context, string resourceIdentity)
     {
         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
 
-        // The resource_metadata URI mirrors the request path under the well-known prefix,
-        // except for transfer children, which inherit their parent MCP surface rather than
-        // becoming protected resources of their own. The caller has already resolved that
-        // parent path from request admission or endpoint metadata; no route is re-resolved here.
-        string metadata = $"{context.Request.Scheme}://{context.Request.Host.Value}"
-            + "/.well-known/oauth-protected-resource"
-            + resourcePath;
+        string metadata = SurfaceMetadata.MetadataAddress(resourceIdentity);
 
         context.Response.Headers.WWWAuthenticate = $"Bearer resource_metadata=\"{metadata}\"";
 

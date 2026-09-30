@@ -269,6 +269,102 @@ public sealed class AuthorizationTests : IDisposable
     }
 
     [Fact]
+    public async Task An_external_resource_binding_owns_metadata_challenge_and_audience_identity()
+    {
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(active: true, Token);
+        await using LoopbackHost upstream = await Upstream();
+        string manifest = ServedManifests.Write(
+            _root,
+            "external-resource-" + Guid.NewGuid().ToString("N"),
+            Manifest(upstream.Address, scoped: true));
+        const string external = "https://tunnel.example.test/v1/mcp/tunnel-one";
+
+        await using ServedEngine engine = await ServedEngine.StartAsync(
+            RuntimeOptionsFor("/api", manifest),
+            Token,
+            authorization: AuthorizationFor(authorization.Address),
+            externalResources: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["/api/full"] = external,
+            });
+
+        using HttpClient client = new();
+        using HttpResponseMessage metadata = await client.GetAsync(
+            engine.At("/.well-known/oauth-protected-resource/api/full"),
+            Token);
+        Assert.Equal(HttpStatusCode.OK, metadata.StatusCode);
+        JsonElement document = await Document(metadata);
+        Assert.Equal(external, document.GetProperty("resource").GetString());
+
+        using HttpResponseMessage challenged = await client.GetAsync(engine.At("/api/full"), Token);
+        Assert.Equal(HttpStatusCode.Unauthorized, challenged.StatusCode);
+        AuthenticationHeaderValue challenge =
+            AuthenticationHeaderValue.Parse(challenged.Headers.WwwAuthenticate.Single().ToString());
+        Assert.Contains(
+            "https://tunnel.example.test/.well-known/oauth-protected-resource/v1/mcp/tunnel-one",
+            challenge.Parameter,
+            StringComparison.Ordinal);
+
+        using HttpResponseMessage admitted = await Authorized(
+            client,
+            engine.At("/api/full"),
+            authorization.Mint(external, "tools.invoke"));
+        AssertAdmitted(admitted);
+
+        string privateResource = $"{engine.Address.Scheme}://{engine.Address.Authority}/api/full";
+        using HttpResponseMessage privateAudience = await Authorized(
+            client,
+            engine.At("/api/full"),
+            authorization.Mint(privateResource, "tools.invoke"));
+        using HttpResponseMessage trailingSlashAudience = await Authorized(
+            client,
+            engine.At("/api/full"),
+            authorization.Mint(external + "/", "tools.invoke"));
+
+        Assert.Equal(HttpStatusCode.NotFound, privateAudience.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, trailingSlashAudience.StatusCode);
+    }
+
+    [Fact]
+    public async Task A_tunnel_audience_for_one_bound_surface_is_refused_by_another()
+    {
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(active: true, Token);
+        await using LoopbackHost upstream = await Upstream();
+        string firstManifest = ServedManifests.Write(
+            _root,
+            "external-first-" + Guid.NewGuid().ToString("N"),
+            Manifest(upstream.Address, scoped: true));
+        string secondManifest = ServedManifests.Write(
+            _root,
+            "external-second-" + Guid.NewGuid().ToString("N"),
+            Manifest(upstream.Address, scoped: true));
+        string store = Directory.CreateDirectory(
+            Path.Combine(_root, "files-" + Guid.NewGuid().ToString("N"))).FullName;
+        const string first = "https://tunnel.example.test/v1/mcp/first";
+        const string second = "https://tunnel.example.test/v1/mcp/second";
+
+        await using ServedEngine engine = await ServedEngine.StartAsync(
+            new RuntimeOptions(
+                [new MountRequest("/first", firstManifest), new MountRequest("/second", secondManifest)],
+                store),
+            Token,
+            authorization: AuthorizationFor(authorization.Address),
+            externalResources: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["/first/full"] = first,
+                ["/second/full"] = second,
+            });
+
+        using HttpClient client = new();
+        using HttpResponseMessage refused = await Authorized(
+            client,
+            engine.At("/second/full"),
+            authorization.Mint(first, "tools.invoke"));
+
+        Assert.Equal(HttpStatusCode.NotFound, refused.StatusCode);
+    }
+
+    [Fact]
     public async Task A_token_for_one_mount_is_refused_by_the_other_in_both_directions()
     {
         await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(active: true, Token);

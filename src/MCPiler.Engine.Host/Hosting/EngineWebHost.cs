@@ -86,7 +86,8 @@ public static class EngineWebHost
             number: 0,
             mounts,
             execution,
-            ownsExecution: false));
+            ownsExecution: false,
+            externalResources: binding.ExternalResources));
 
         return BuildCore(
             binding,
@@ -216,27 +217,22 @@ public static class EngineWebHost
                     _ => { })
                 .AddMcp(options =>
                 {
-                    // Per-surface metadata is derived from the addressed path by the event:
-                    // the canonical resource identifier is the exact address the client
-                    // connected to, which only the request knows.
+                    // Per-surface metadata resolves through one generation lease so protection
+                    // and the generation-owned effective resource identity are one decision.
                     options.Events.OnResourceMetadataRequest = context =>
                     {
-                        // A mount that declares it is not a protected resource publishes no
-                        // metadata: a document naming an authorization server for a resource that
-                        // requires no token would send a client through a flow it does not need.
-                        // The address is resolved through the same generation lease the mount
-                        // middleware uses, so the two can never disagree about protection.
-                        if (SurfaceMetadata.MountRequiresAuthorization(
-                                context.HttpContext,
-                                generations) is not true)
+                        var metadata = SurfaceMetadata.Build(
+                            context.HttpContext,
+                            binding.Authorization!,
+                            generations);
+
+                        if (metadata is null)
                         {
                             context.SkipHandler();
                             return Task.CompletedTask;
                         }
 
-                        context.ResourceMetadata = SurfaceMetadata.Build(
-                            context.HttpContext,
-                            binding.Authorization!);
+                        context.ResourceMetadata = metadata;
                         return Task.CompletedTask;
                     };
                 });

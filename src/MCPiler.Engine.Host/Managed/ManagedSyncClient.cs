@@ -422,7 +422,9 @@ internal sealed class ManagedSyncClient : IDisposable
 
         foreach (ManagedMountMessage mount in parsed.Mounts)
         {
-            if (string.IsNullOrWhiteSpace(mount.Prefix) || string.IsNullOrEmpty(mount.Bundle))
+            if (string.IsNullOrWhiteSpace(mount.Prefix)
+                || string.IsNullOrEmpty(mount.Bundle)
+                || mount.ExternalResources is null)
             {
                 return ManagedPollResult.Unreachable;
             }
@@ -438,7 +440,10 @@ internal sealed class ManagedSyncClient : IDisposable
                 return ManagedPollResult.Unreachable;
             }
 
-            mounts.Add(new ManagedMountDelivery(mount.Prefix, bundle));
+            mounts.Add(new ManagedMountDelivery(
+                mount.Prefix,
+                bundle,
+                new SortedDictionary<string, string>(mount.ExternalResources, StringComparer.Ordinal)));
         }
 
         return new ManagedPollResult(
@@ -494,7 +499,13 @@ internal sealed class ManagedSyncClient : IDisposable
             if (mount is null
                 || string.IsNullOrWhiteSpace(mount.Prefix)
                 || mount.Prefix.Length > 256
-                || string.IsNullOrEmpty(mount.Bundle))
+                || string.IsNullOrEmpty(mount.Bundle)
+                || mount.ExternalResources is null
+                || mount.ExternalResources.Any(pair =>
+                    string.IsNullOrWhiteSpace(pair.Key)
+                    || pair.Key.Length > 256
+                    || pair.Value is null
+                    || pair.Value.Length > 2048))
             {
                 return false;
             }

@@ -52,10 +52,13 @@ internal sealed class EngineRequestGenerationAdmissionMiddleware
                 return;
             }
 
-            string resourceIdentity = MountAuthorization.CanonicalResource(
+            string requestDerivedIdentity = MountAuthorization.CanonicalResource(
                 context.Request.Scheme,
                 context.Request.Host.Value ?? string.Empty,
                 address);
+            string resourceIdentity = lease.Generation.EffectiveResourceIdentity(
+                resolved,
+                requestDerivedIdentity);
 
             context.Features.Set(new EngineRequestGenerationAdmission(
                 address,
