@@ -145,7 +145,7 @@ public sealed record CompatibilityDescriptor(
             }),
         new Dictionary<string, CompatibilityRange>(StringComparer.Ordinal)
         {
-            [CompatibilitySchema.ManagedGeneration] = new("1", "1"),
+            [CompatibilitySchema.ManagedGeneration] = new("2", "2"),
             [CompatibilitySchema.ResponseCacheOperator] = new("1", "1"),
         });
 

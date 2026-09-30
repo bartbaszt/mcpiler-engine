@@ -13,6 +13,9 @@ internal static class ManagedProtocol
     /// <summary>The protocol version this Engine speaks.</summary>
     public const int Version = 1;
 
+    /// <summary>Platform-issued fencing epoch carried on accepted managed polls.</summary>
+    public const string SessionEpochHeader = "X-MCPiler-Managed-Session-Epoch";
+
     /// <summary>The outcome spelling for a candidate that became active.</summary>
     public const string Active = "active";
 

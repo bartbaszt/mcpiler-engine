@@ -106,7 +106,7 @@ public sealed class CompatibilityDescriptorTests
         {
             Contracts = new Dictionary<string, CompatibilityRange>(StringComparer.Ordinal)
             {
-                [CompatibilitySchema.ManagedGeneration] = new("01", "1"),
+                [CompatibilitySchema.ManagedGeneration] = new("02", "2"),
             },
         };
 

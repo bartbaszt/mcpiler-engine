@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -108,6 +109,30 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         Assert.False(initial.Started);
         Assert.Equal("managed/initial-generation-absent", initial.Refusal!.Code);
+    }
+
+    [Fact]
+    public async Task A_no_content_poll_learns_the_platform_epoch_and_the_next_poll_echoes_it()
+    {
+        await using var platform = await PlatformAsync(_ => Response.NoContent());
+        using var client = new ManagedSyncClient(platform.Options());
+
+        var first = await client.PollAsync(
+            PollRequest(sequence: 1),
+            sessionEpoch: null,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ManagedPollOutcome.Unchanged, first.Outcome);
+        Assert.Equal(1, first.SessionEpoch);
+
+        var second = await client.PollAsync(
+            PollRequest(sequence: 2),
+            first.SessionEpoch,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ManagedPollOutcome.Unchanged, second.Outcome);
+        Assert.Equal(1, second.SessionEpoch);
+        Assert.Equal([null, "1"], platform.PollSessionEpochHeaders.Take(2).ToArray());
     }
 
     [Fact]
@@ -1085,6 +1110,8 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         public Uri Address { get; private set; }
 
+        public ConcurrentQueue<string?> PollSessionEpochHeaders { get; } = new();
+
         /// <summary>Handles a reconciliation report; assigned by the test before the process starts.</summary>
         public Func<string, Response> OnReconcile { get; set; } = _ => Response.Status(HttpStatusCode.ServiceUnavailable);
 
@@ -1114,6 +1141,9 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             {
                 var body = await ReadAsync(context, cancellationToken);
                 JsonObject request = JsonNode.Parse(body)?.AsObject() ?? [];
+                var presentedEpoch = context.Request.Headers[ManagedProtocol.SessionEpochHeader].ToString();
+                standIn.PollSessionEpochHeaders.Enqueue(
+                    string.IsNullOrEmpty(presentedEpoch) ? null : presentedEpoch);
 
                 if (!Authorized(context))
                 {
@@ -1129,6 +1159,10 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
                 Response response = answer(request);
 
                 context.Response.StatusCode = response.StatusCode;
+                if (response.StatusCode is >= 200 and < 300)
+                {
+                    context.Response.Headers[ManagedProtocol.SessionEpochHeader] = "1";
+                }
 
                 if (response.Body is { } payload)
                 {
@@ -1217,4 +1251,15 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             return await reader.ReadToEndAsync(cancellationToken);
         }
     }
+
+    private static ManagedPollRequestMessage PollRequest(long sequence) => new()
+    {
+        ProtocolVersion = ManagedProtocol.Version,
+        EngineVersion = "test-engine",
+        SupportedManifestRange = EngineRuntime.SupportedManifestFormatRange,
+        PendingReconciliationCount = 0,
+        EngineInstanceId = "test-engine-instance",
+        EngineReportSequence = sequence,
+        Compatibility = CompatibilityDescriptor.EngineSupport(),
+    };
 }
