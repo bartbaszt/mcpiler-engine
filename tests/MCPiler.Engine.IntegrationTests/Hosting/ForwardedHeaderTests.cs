@@ -68,7 +68,8 @@ public sealed class ForwardedHeaderTests : IDisposable
             RuntimeOptionsFor(manifest),
             Token,
             authorization: AuthorizationFor(authorization.Address),
-            trustedProxies: ["127.0.0.1"]);
+            trustedProxies: ["127.0.0.1"],
+            allowedHosts: ["PUBLIC.EXAMPLE.TEST"]);
 
         using HttpClient client = new();
         using HttpRequestMessage request = new(
@@ -93,8 +94,44 @@ public sealed class ForwardedHeaderTests : IDisposable
             document.RootElement.GetProperty("resource").GetString());
     }
 
+    [Theory]
+    [InlineData("example.com", "example.com")]
+    [InlineData("example.com:8080", "example.com:8080")]
+    [InlineData("example.com:80", "example.com:80")]
+    [InlineData("[::1]", "[::1]")]
+    [InlineData("[::1]:8080", "[::1]:8080")]
+    [InlineData("HOST.EXAMPLE", "host.example")]
+    public async Task A_configured_public_authority_accepts_the_matching_host_header(
+        string configuredAuthority,
+        string requestAuthority)
+    {
+        await using FakeAuthorizationServer authorization =
+            await FakeAuthorizationServer.StartAsync(active: true, Token);
+        await using LoopbackHost upstream = await UpstreamAsync();
+        string manifest = ServedManifests.Write(
+            _root,
+            "authority-" + Guid.NewGuid().ToString("N"),
+            Manifest(upstream.Address));
+
+        await using ServedEngine engine = await ServedEngine.StartAsync(
+            RuntimeOptionsFor(manifest),
+            Token,
+            authorization: AuthorizationFor(authorization.Address),
+            allowedHosts: [configuredAuthority]);
+
+        using HttpClient client = new();
+        using HttpRequestMessage request = new(
+            HttpMethod.Get,
+            new Uri(engine.At("/.well-known/oauth-protected-resource/api/full").ToString()));
+        request.Headers.Host = requestAuthority;
+
+        using HttpResponseMessage served = await client.SendAsync(request, Token);
+
+        Assert.Equal(HttpStatusCode.OK, served.StatusCode);
+    }
+
     [Fact]
-    public async Task An_untrusted_client_cannot_claim_the_scheme()
+    public async Task An_untrusted_client_cannot_claim_the_scheme_or_authority()
     {
         await using FakeAuthorizationServer authorization =
             await FakeAuthorizationServer.StartAsync(active: true, Token);
@@ -121,19 +158,10 @@ public sealed class ForwardedHeaderTests : IDisposable
 
         using HttpResponseMessage served = await client.SendAsync(request, Token);
 
-        Assert.Equal(HttpStatusCode.OK, served.StatusCode);
-
-        using JsonDocument document = JsonDocument.Parse(await served.Content.ReadAsStringAsync(Token));
-
-        // The scheme is the assertion that matters: an untrusted client claimed https and the
-        // process still publishes http, so the audience it will accept is the address a client
-        // that actually reached it over http would present. The host comes from the Host header,
-        // which is what every HTTP server reads and what a deployment constrains through the
-        // proxy and AllowedHosts rather than through forwarded headers.
-        string resource = document.RootElement.GetProperty("resource").GetString()!;
-
-        Assert.StartsWith("http://", resource, StringComparison.Ordinal);
-        Assert.Contains("/api/full", resource, StringComparison.Ordinal);
+        // The forwarded scheme is ignored because the peer is untrusted, and the attacker-chosen
+        // Host is not an allowed protected-resource authority. The resource is hidden rather than
+        // reflected into metadata.
+        Assert.Equal(HttpStatusCode.NotFound, served.StatusCode);
     }
 
     [Fact]

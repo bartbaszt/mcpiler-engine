@@ -253,6 +253,35 @@ internal static class MountAuthorizationSetup
     }
 
     /// <summary>
+    /// Validates local authorization startup material without constructing the validator.
+    /// </summary>
+    /// <remarks>
+    /// The same reader is used by <see cref="Validator"/>. Returning a structured refusal here
+    /// lets <c>inspect</c> and <c>serve</c> agree about a missing, empty or unreadable
+    /// introspection client secret before either path builds a web host.
+    /// </remarks>
+    internal static StartupRefusal? FindStartupRefusal(HostAuthorizationOptions options)
+    {
+        if (options.IntrospectionClientSecretFile is not { } path)
+        {
+            return null;
+        }
+
+        if (IntrospectionClientSecret.TryRead(path, out _, out string? refusal))
+        {
+            return null;
+        }
+
+        return new StartupRefusal(
+            string.Empty,
+            "auth/introspection-client-secret-unusable",
+            $"The introspection client is configured but its secret is unusable: {refusal}")
+        {
+            Setting = HostConfiguration.IntrospectionClientSecretFileKey,
+        };
+    }
+
+    /// <summary>
     /// How long validation waits on the issuer.
     /// </summary>
     /// <remarks>

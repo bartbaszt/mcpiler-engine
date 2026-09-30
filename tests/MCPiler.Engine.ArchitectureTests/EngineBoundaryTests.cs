@@ -110,7 +110,7 @@ public sealed class EngineBoundaryTests
             var text = File.ReadAllText(file);
             foreach (var reference in ForbiddenDocumentationReferences)
             {
-                if (text.Contains(reference, StringComparison.OrdinalIgnoreCase))
+                if (ContainsForbiddenDocumentationReference(text, reference))
                 {
                     offenders.Add($"{EngineRepository.Relative(file)} -> {reference}");
                 }
@@ -122,6 +122,64 @@ public sealed class EngineBoundaryTests
             "Engine documentation must not reference private MCPiler Platform locations: "
                 + string.Join(", ", offenders));
     }
+
+    [Theory]
+    [InlineData("framework/provider-driven", "work/", false)]
+    [InlineData("network/workflow", "work/", false)]
+    [InlineData("output work/bytes", "work/", true)]
+    [InlineData("work/engine-serving-runtime", "work/", true)]
+    [InlineData("../work/engine-serving-runtime", "work/", true)]
+    [InlineData(@"C:\repo\work\engine-serving-runtime", "work/", true)]
+    [InlineData(@"C:\repo\specs\manifest.md", "specs/", true)]
+    [InlineData("(specs/manifest.md)", "specs/", true)]
+    [InlineData("AGENTS.md", "AGENTS.md", true)]
+    [InlineData("MYAGENTS.md", "AGENTS.md", false)]
+    public void Private_documentation_reference_matching_respects_path_and_token_boundaries(
+        string text,
+        string reference,
+        bool expected)
+        => Assert.Equal(expected, ContainsForbiddenDocumentationReference(text, reference));
+
+    private static bool ContainsForbiddenDocumentationReference(string text, string reference)
+    {
+        text = text.Replace('\\', '/');
+        reference = reference.Replace('\\', '/');
+
+        if (reference.StartsWith("github.com/", StringComparison.Ordinal))
+        {
+            return text.Contains(reference, StringComparison.OrdinalIgnoreCase);
+        }
+
+        bool needsRightBoundary = !reference.EndsWith('/');
+        int start = 0;
+
+        while (start < text.Length)
+        {
+            int found = text.IndexOf(reference, start, StringComparison.OrdinalIgnoreCase);
+            if (found < 0)
+            {
+                return false;
+            }
+
+            bool leftBoundary = found == 0 || !IsPathTokenCharacter(text[found - 1]);
+            int after = found + reference.Length;
+            bool rightBoundary = !needsRightBoundary
+                || after == text.Length
+                || !IsPathTokenCharacter(text[after]);
+
+            if (leftBoundary && rightBoundary)
+            {
+                return true;
+            }
+
+            start = found + 1;
+        }
+
+        return false;
+    }
+
+    private static bool IsPathTokenCharacter(char value)
+        => char.IsAsciiLetterOrDigit(value) || value is '_' or '.' or '-';
 
     /// <summary>
     /// Decision records live only in the private Platform repository, so an <c>ADR-NNNN</c>

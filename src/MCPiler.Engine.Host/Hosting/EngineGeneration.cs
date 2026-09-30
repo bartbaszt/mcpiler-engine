@@ -177,11 +177,43 @@ internal sealed class EngineGeneration : IDisposable
         ArgumentNullException.ThrowIfNull(resolution);
         ArgumentException.ThrowIfNullOrWhiteSpace(requestDerivedIdentity);
 
+        return TryExternalResourceIdentity(resolution, out string? external)
+            ? external!
+            : requestDerivedIdentity;
+    }
+
+    /// <summary>
+    /// Gets the explicit deployment-owned resource identity for one surface, when present.
+    /// </summary>
+    internal bool TryExternalResourceIdentity(
+        SurfaceResolution resolution,
+        out string? resourceIdentity)
+    {
+        ArgumentNullException.ThrowIfNull(resolution);
+
         string surfaceRoute = resolution.Mount.Prefix + "/" + resolution.Surface.Slug;
 
-        return _externalResources.TryGetValue(surfaceRoute, out string? external)
-            ? external
-            : requestDerivedIdentity;
+        return _externalResources.TryGetValue(surfaceRoute, out resourceIdentity);
+    }
+
+    /// <summary>
+    /// Whether any protected surface in this generation derives its resource from the request
+    /// authority and therefore needs the listener's allowed-host boundary.
+    /// </summary>
+    internal bool RequiresAllowedHostForProtectedResources
+        => NeedsAllowedHostForProtectedResources(Mounts, _externalResources);
+
+    internal static bool NeedsAllowedHostForProtectedResources(
+        MountSet mounts,
+        IReadOnlyDictionary<string, string> externalResources)
+    {
+        ArgumentNullException.ThrowIfNull(mounts);
+        ArgumentNullException.ThrowIfNull(externalResources);
+
+        return mounts.Mounts.Any(mount =>
+            mount.RequiresAuthorization()
+            && mount.Surfaces.Any(surface =>
+                !externalResources.ContainsKey(mount.Prefix + "/" + surface.Slug)));
     }
 
     /// <summary>

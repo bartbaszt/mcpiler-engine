@@ -1,0 +1,145 @@
+{
+  "manifestFormatVersion": "0.3",
+  "sections": {
+    "server": {
+      "inline": {
+        "formatVersion": 2,
+        "name": "Vector Search Example",
+        "surfaces": [
+          {
+            "slug": "default",
+            "isDefault": true,
+            "navigator": {
+              "enabled": true
+            },
+            "operations": [
+              {
+                "operation": "list-pets",
+                "exposure": "direct"
+              },
+              {
+                "operation": "get-pet",
+                "exposure": "navigator"
+              }
+            ]
+          }
+        ],
+        "authenticationRequired": false
+      }
+    },
+    "policy": {
+      "inline": {
+        "formatVersion": 2,
+        "baseUrl": "https://api.example.com"
+      }
+    },
+    "operations": {
+      "inline": {
+        "formatVersion": 1,
+        "operations": [
+          {
+            "key": "GET /pets",
+            "method": "GET",
+            "path": "/pets"
+          },
+          {
+            "key": "GET /pets/{petId}",
+            "method": "GET",
+            "path": "/pets/{petId}",
+            "parameters": [
+              {
+                "name": "petId",
+                "in": "path",
+                "required": true,
+                "schema": {
+                  "type": "string"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "formatVersion": 5,
+        "operations": [
+          {
+            "slug": "list-pets",
+            "name": "List pets",
+            "summary": "Lists pets",
+            "binding": {
+              "type": "http",
+              "operation": "GET /pets"
+            }
+          },
+          {
+            "slug": "get-pet",
+            "name": "Get pet",
+            "summary": "Gets one pet by identifier",
+            "inputSchema": {
+              "type": "object",
+              "required": [
+                "petId"
+              ],
+              "properties": {
+                "petId": {
+                  "type": "string"
+                }
+              }
+            },
+            "binding": {
+              "type": "http",
+              "operation": "GET /pets/{petId}"
+            }
+          }
+        ]
+      }
+    },
+    "search": {
+      "inline": {
+        "formatVersion": 1,
+        "operations": [
+          {
+            "operation": "list-pets",
+            "summary": "Lists pets",
+            "terms": {
+              "list": [
+                "name",
+                "summary"
+              ],
+              "pets": [
+                "name",
+                "summary"
+              ]
+            }
+          },
+          {
+            "operation": "get-pet",
+            "summary": "Gets one pet by identifier",
+            "terms": {
+              "get": [
+                "name",
+                "summary"
+              ],
+              "pet": [
+                "name",
+                "summary"
+              ],
+              "identifier": [
+                "summary"
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "vectors": {
+      "path": "vectors.bin",
+      "sha256": "5019335ff2533f675e11eb2ded450dca7ff0bf61a4859e14ff707ca54a18ab1f",
+      "bytes": 150,
+      "model": "example-embedding-3d",
+      "dimension": 3
+    }
+  }
+}

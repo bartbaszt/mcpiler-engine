@@ -1,6 +1,7 @@
 using MCPiler.Engine.Host.Configuration;
 using MCPiler.Engine.Host.Files;
 using MCPiler.Engine.Host.Hosting;
+using MCPiler.Engine.Host.Mcp;
 using MCPiler.Engine.Runtime;
 
 using Microsoft.AspNetCore.Http;
@@ -71,20 +72,34 @@ internal static class SurfaceMetadata
     internal static ProtectedResourceMetadata? Build(
         HttpContext context,
         HostAuthorizationOptions options,
-        EngineGenerationManager generations)
+        EngineGenerationManager generations,
+        IReadOnlyList<string> allowedHosts)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(generations);
+        ArgumentNullException.ThrowIfNull(allowedHosts);
 
-        string resource = ResourceOf(context);
-        string address = string.IsNullOrEmpty(resource) ? "/" : resource;
+        if (!TryResourcePaths(context, out string decodedResource, out string rawResource))
+        {
+            return null;
+        }
+
+        string address = string.IsNullOrEmpty(decodedResource) ? "/" : decodedResource;
+        string authorizationResourcePath = string.IsNullOrEmpty(rawResource) ? "/" : rawResource;
 
         // A transfer child is not a protected resource of its own: it inherits the mount that
         // owns the surface it hangs off, which is the same resolution the middleware performs.
         if (TransferPath.TryParse(address, out TransferPath transfer))
         {
             address = transfer.ParentAddress;
+
+            if (!TransferPath.TryParse(authorizationResourcePath, out TransferPath rawTransfer))
+            {
+                return null;
+            }
+
+            authorizationResourcePath = rawTransfer.ParentAddress;
         }
 
         if (generations.LeaseSource() is not { } lease)
@@ -92,11 +107,23 @@ internal static class SurfaceMetadata
             return null;
         }
 
+        string resolutionAddress = RequestAddress.NormalizeResolutionAddress(address);
+
         using (lease)
         {
-            if (!lease.Generation.TryResolve(address, out SurfaceResolution? resolved)
+            if (!lease.Generation.TryResolve(resolutionAddress, out SurfaceResolution? resolved)
                 || resolved is null
                 || !resolved.Mount.RequiresAuthorization())
+            {
+                return null;
+            }
+
+            bool hasExternalResource = lease.Generation.TryExternalResourceIdentity(resolved, out _);
+
+            if (!hasExternalResource
+                && !EngineRequestGenerationAdmissionMiddleware.AuthorityAllowed(
+                    context.Request.Host.Value,
+                    allowedHosts))
             {
                 return null;
             }
@@ -104,7 +131,7 @@ internal static class SurfaceMetadata
             string direct = MountAuthorization.CanonicalResource(
                 context.Request.Scheme,
                 context.Request.Host.Value ?? string.Empty,
-                address);
+                authorizationResourcePath);
             string resourceIdentity = lease.Generation.EffectiveResourceIdentity(resolved, direct);
 
             return new ProtectedResourceMetadata
@@ -117,15 +144,54 @@ internal static class SurfaceMetadata
     }
 
     /// <summary>
-    /// The resource path a metadata request mirrors, with the well-known prefix removed.
+    /// Splits the metadata route into decoded and raw resource paths only when the Engine-owned
+    /// well-known prefix is present literally and case-exactly in both representations.
     /// </summary>
-    private static string ResourceOf(HttpContext context)
+    private static bool TryResourcePaths(
+        HttpContext context,
+        out string decodedResource,
+        out string rawResource)
     {
-        string path = context.Request.Path.Value ?? "/";
+        string decodedPath = context.Request.Path.Value ?? "/";
+        string rawPath = RequestAddress.RawPath(context);
 
-        return path.StartsWith(WellKnownPrefix, StringComparison.Ordinal)
-            ? path[WellKnownPrefix.Length..]
-            : path;
+        if (!decodedPath.StartsWith(WellKnownPrefix, StringComparison.Ordinal)
+            || !rawPath.StartsWith(WellKnownPrefix, StringComparison.Ordinal))
+        {
+            decodedResource = string.Empty;
+            rawResource = string.Empty;
+            return false;
+        }
+
+        decodedResource = decodedPath[WellKnownPrefix.Length..];
+        rawResource = rawPath[WellKnownPrefix.Length..];
+        return true;
+    }
+
+    internal static ProtectedResourceMetadata Build(
+        HttpContext context,
+        HostAuthorizationOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(options);
+
+        if (!TryResourcePaths(context, out _, out string resource))
+        {
+            throw new InvalidOperationException(
+                "Protected-resource metadata was built for a noncanonical well-known request path.");
+        }
+
+        string canonical = MountAuthorization.CanonicalResource(
+            context.Request.Scheme,
+            context.Request.Host.Value ?? string.Empty,
+            string.IsNullOrEmpty(resource) ? "/" : resource);
+
+        return new ProtectedResourceMetadata
+        {
+            Resource = canonical,
+            AuthorizationServers = [options.Issuer],
+            BearerMethodsSupported = ["header"],
+        };
     }
 
     /// <summary>

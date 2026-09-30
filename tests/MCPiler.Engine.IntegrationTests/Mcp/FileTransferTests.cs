@@ -147,6 +147,61 @@ public sealed class FileTransferTests : IDisposable
     }
 
     [Fact]
+    public async Task Slash_terminated_parent_resource_keeps_its_identity_across_upload_and_download()
+    {
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(active: true, Token);
+        await using LoopbackHost upstream = await LoopbackHost.StartAsync(
+            async context =>
+            {
+                context.Response.ContentType = "application/octet-stream";
+                await context.Response.Body.WriteAsync(DownloadPayload, context.RequestAborted);
+            },
+            Token);
+        await using ServedEngine engine = await ServeAsync(
+            upstream.Address,
+            scoped: true,
+            authorization.Address);
+
+        using HttpClient http = new();
+        string parent = $"{engine.Address.Scheme}://{engine.Address.Authority}/api/full/";
+        string token = authorization.Mint(parent, "tools.invoke");
+
+        string uploadHandle = await UploadAsync(
+            http,
+            engine.At("/api/full//files/upload"),
+            UploadPayload,
+            token);
+
+        using McpHttpSession session = await McpHttpSession.OpenAsync(
+            engine.At("/api/full/"),
+            Token,
+            bearerToken: token);
+
+        McpExchange upload = await session.CallAsync(
+            "upload-file",
+            JsonSerializer.Serialize(new { attachment = uploadHandle }),
+            31,
+            Token);
+        Assert.Equal(HttpStatusCode.OK, upload.Status);
+
+        McpExchange binary = await session.CallAsync("download-file", "{}", 32, Token);
+        string downloadHandle = HandleFromToolResult(binary.Payload);
+
+        using HttpRequestMessage downloadRequest = new(
+            HttpMethod.Get,
+            engine.At("/api/full//files/" + downloadHandle));
+        downloadRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        using HttpResponseMessage downloaded = await http.SendAsync(
+            downloadRequest,
+            HttpCompletionOption.ResponseHeadersRead,
+            Token);
+
+        Assert.Equal(HttpStatusCode.OK, downloaded.StatusCode);
+        Assert.Equal(DownloadPayload, await downloaded.Content.ReadAsByteArrayAsync(Token));
+    }
+
+    [Fact]
     public async Task Protected_transfer_uses_the_parent_resource_for_challenge_and_audience()
     {
         await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(active: true, Token);
@@ -179,6 +234,22 @@ public sealed class FileTransferTests : IDisposable
 
         string parent = $"{engine.Address.Scheme}://{engine.Address.Authority}/api/full";
         string child = parent + "/files/upload";
+
+        using HttpRequestMessage spoofedAuthority = new(HttpMethod.Post, upload)
+        {
+            Content = new ByteArrayContent(UploadPayload),
+            Headers =
+            {
+                Host = "engine-b.example",
+                Authorization = new AuthenticationHeaderValue(
+                    "Bearer",
+                    authorization.Mint($"{engine.Address.Scheme}://engine-b.example/api/full", "tools.invoke")),
+            },
+        };
+        using HttpResponseMessage spoofedAuthorityResponse = await http.SendAsync(
+            spoofedAuthority,
+            Token);
+        Assert.Equal(HttpStatusCode.NotFound, spoofedAuthorityResponse.StatusCode);
 
         using HttpResponseMessage wrongAudience = await AuthorizedUploadAsync(
             http,

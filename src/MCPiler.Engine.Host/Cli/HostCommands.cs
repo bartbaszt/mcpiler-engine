@@ -103,20 +103,19 @@ public static class HostCommands
             return refused;
         }
 
-        // Before either transport opens anything: a mode that needs an endpoint the issuer does
-        // not publish can only ever reject every token, and an operator should read that as a
-        // setting to change rather than as a client that cannot authenticate.
-        if (await AuthorizationEndpointCheck
-                .FindAsync(binding.Authorization, cancellationToken)
-                .ConfigureAwait(false) is { } unusable)
-        {
-            return new CommandOutcome(
-                ExitCodes.Configuration,
-                identity + Environment.NewLine + StartupReport.RenderRefusal(unusable) + Environment.NewLine);
-        }
-
         if (binding.Mode is HostDeploymentMode.Managed)
         {
+            // Managed mode has no local generation yet, so validate the authorization settings
+            // that do not depend on one before waiting for initial synchronization.
+            if (await AuthorizationStartupValidation
+                    .FindConfigurationAsync(binding.Authorization, binding.Listener.Transport, cancellationToken)
+                    .ConfigureAwait(false) is { } unusable)
+            {
+                return new CommandOutcome(
+                    ExitCodes.Configuration,
+                    identity + Environment.NewLine + StartupReport.RenderRefusal(unusable) + Environment.NewLine);
+            }
+
             return await ServeManagedAsync(binding, identity, progress, cancellationToken).ConfigureAwait(false);
         }
 
@@ -146,6 +145,33 @@ public static class HostCommands
             }
 
             return new CommandOutcome(ExitCodes.Configuration, refusalText.ToString());
+        }
+
+        if (await AuthorizationStartupValidation
+                .FindAsync(result.Mounts, binding.Authorization, binding.Listener.Transport, cancellationToken)
+                .ConfigureAwait(false) is { } authorizationRefusal)
+        {
+            return new CommandOutcome(
+                ExitCodes.Configuration,
+                report + StartupReport.RenderRefusal(authorizationRefusal) + Environment.NewLine);
+        }
+
+        if (binding.Listener.Transport is HostTransport.Http)
+        {
+            IReadOnlyList<StartupRefusal> httpRefusals =
+                FindHttpHostRefusals(MountSet.From(result), binding);
+
+            if (httpRefusals.Count > 0)
+            {
+                StringBuilder refusedReport = new(report);
+                foreach (StartupRefusal httpRefusal in httpRefusals)
+                {
+                    refusedReport.Append(StartupReport.RenderRefusal(httpRefusal));
+                    refusedReport.AppendLine();
+                }
+
+                return new CommandOutcome(ExitCodes.Configuration, refusedReport.ToString());
+            }
         }
 
         if (binding.Listener.Transport is HostTransport.Stdio
@@ -275,6 +301,7 @@ public static class HostCommands
             options,
             generationsLoader,
             generations,
+            binding,
             EngineRuntime.SupportedManifestFormatRange,
             diagnostic =>
             {
@@ -294,6 +321,25 @@ public static class HostCommands
                     + Environment.NewLine;
 
             return new CommandOutcome(ExitCodes.Configuration, identity + Environment.NewLine + refusal);
+        }
+
+        EngineGeneration activeGeneration = generations.Current
+            ?? throw new InvalidOperationException(
+                "Initial managed synchronization reported success without an active generation.");
+
+        IReadOnlyList<StartupRefusal> managedHttpRefusals =
+            FindHttpHostRefusals(activeGeneration.Mounts, binding);
+        if (managedHttpRefusals.Count > 0)
+        {
+            StringBuilder refused = new(identity);
+            refused.AppendLine();
+            foreach (StartupRefusal httpRefusal in managedHttpRefusals)
+            {
+                refused.Append(StartupReport.RenderRefusal(httpRefusal));
+                refused.AppendLine();
+            }
+
+            return new CommandOutcome(ExitCodes.Configuration, refused.ToString());
         }
 
         progress?.Write(identity + Environment.NewLine + StartupReport.RenderManaged(
@@ -437,25 +483,30 @@ public static class HostCommands
         text.AppendLine();
         text.Append(StartupReport.Render(result, operatorChannelConfigured: binding.ResponseCacheOperatorSecret is not null));
 
-        // Inspection runs the same mount path as serving and stops before the listener. The one
-        // thing that path cannot report on its own is the host-side pairing rule, because it
-        // depends on configuration rather than on the Manifest: a protected mount with no
-        // configured issuer refuses to start. Reporting it here is the difference between an
-        // inspection that answers "will this endpoint demand a token" and one that answers "will
-        // this configuration run at all".
-        if (AuthorizationRefusal.Find(result.Mounts, binding.Authorization) is { } unstartable)
+        bool unstartable = false;
+
+        if (binding.Listener.Transport is HostTransport.Http)
         {
-            text.Append(StartupReport.RenderUnstartable(unstartable));
+            foreach (StartupRefusal httpRefusal in FindHttpHostRefusals(MountSet.From(result), binding))
+            {
+                text.Append(StartupReport.RenderUnstartable(httpRefusal));
+                unstartable = true;
+            }
         }
 
-        // The other host-side pairing rule: a configured validation mode whose issuer publishes
-        // no endpoint for it. Also invisible to the mount path, and also the difference between
-        // "what would be exposed" and "whether this configuration would run".
-        if (await AuthorizationEndpointCheck
-                .FindAsync(binding.Authorization, cancellationToken)
-                .ConfigureAwait(false) is { } unreachable)
+        if (await AuthorizationStartupValidation
+                .FindAsync(result.Mounts, binding.Authorization, binding.Listener.Transport, cancellationToken)
+                .ConfigureAwait(false) is { } authorizationRefusal)
         {
-            text.Append(StartupReport.RenderUnstartable(unreachable));
+            text.Append(StartupReport.RenderUnstartable(authorizationRefusal));
+            unstartable = true;
+        }
+
+        if (binding.Listener.Transport is HostTransport.Stdio
+            && !StdioTransport.TrySelectSurface(result, out _, out string? stdioRefusal))
+        {
+            text.AppendLine(stdioRefusal);
+            unstartable = true;
         }
 
         foreach (MountedManifest mount in result.Mounts)
@@ -485,7 +536,32 @@ public static class HostCommands
 
         text.AppendLine("Nothing was served. This command opened no listener.");
 
-        return new CommandOutcome(ExitCodes.Success, text.ToString());
+        return new CommandOutcome(
+            unstartable ? ExitCodes.Configuration : ExitCodes.Success,
+            text.ToString());
+    }
+
+    private static IReadOnlyList<StartupRefusal> FindHttpHostRefusals(
+        MountSet mounts,
+        HostBinding binding)
+    {
+        List<StartupRefusal> refusals = [.. HostRouteTopologyValidation.Find(mounts)];
+
+        if (binding.Authorization is not null
+            && EngineGeneration.NeedsAllowedHostForProtectedResources(mounts, binding.ExternalResources)
+            && binding.AllowedHosts.Count == 0)
+        {
+            refusals.Add(new StartupRefusal(
+                string.Empty,
+                "auth/allowed-host-missing",
+                $"Protected HTTP serving requires at least one '{HostConfiguration.AllowedHostKey}' "
+                + $"when '{HostConfiguration.ListenKey}' does not name one concrete authority.")
+            {
+                Setting = HostConfiguration.AllowedHostKey,
+            });
+        }
+
+        return refusals;
     }
 
     private static async Task<CommandOutcome> FilesAsync(CommandLineResult parsed, CancellationToken cancellationToken)

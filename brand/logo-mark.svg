@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 96" role="img" aria-labelledby="title desc">
+  <title id="title">MCPiler mark</title>
+  <desc id="desc">Final MCPiler 06F logo mark: M-shaped compiler gate with connected input/output layers.</desc>
+  <g fill="none" stroke="currentColor" aria-hidden="true">
+      <g stroke-width="2.5" stroke-linecap="round"><path d="M12 40H41.5"/><path d="M118.5 40H148"/><path d="M12 50H41.5"/><path d="M118.5 50H148"/><path d="M12 60H41.5"/><path d="M118.5 60H148"/></g>
+      <g fill="currentColor" stroke="none"><circle cx="12" cy="40" r="3"/><circle cx="148" cy="40" r="3"/><circle cx="12" cy="50" r="3"/><circle cx="148" cy="50" r="3"/><circle cx="12" cy="60" r="3"/><circle cx="148" cy="60" r="3"/></g>
+      <path d="M46 76V18L80 40L114 18V76" stroke-width="9" stroke-linecap="square" stroke-linejoin="miter"/>
+      <path d="M54 44L80 61L106 44" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="miter"/>
+      <path d="M54 58L80 75L106 58" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="miter"/>
+    </g>
+</svg>

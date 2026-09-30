@@ -124,6 +124,16 @@ public sealed record HostBinding(
         new Dictionary<string, string>(StringComparer.Ordinal);
 
     /// <summary>
+    /// Authorities accepted in the HTTP Host/:authority field for protected MCP resources.
+    /// </summary>
+    /// <remarks>
+    /// Audience identity includes the authority. Keeping an explicit deployment allow-list prevents
+    /// a caller from choosing that part of the protected-resource identity with an arbitrary Host
+    /// header. Direct concrete listeners derive their own authority when no value is supplied.
+    /// </remarks>
+    public IReadOnlyList<string> AllowedHosts { get; init; } = [];
+
+    /// <summary>
     /// The dedicated response-cache operator secret, or null when the operator channel is absent.
     /// </summary>
     /// <remarks>
@@ -413,6 +423,12 @@ public static class HostConfiguration
     /// </summary>
     public const string ExternalResourcePrefix = "external-resource:";
 
+    /// <summary>
+    /// Repeatable public authority accepted for protected resource identity, for example
+    /// <c>mcp.example.test</c> or <c>mcp.example.test:8443</c>.
+    /// </summary>
+    public const string AllowedHostKey = "allowed-host";
+
     private static readonly string[] Simple =
     [
         FileStoreRootKey,
@@ -442,6 +458,7 @@ public static class HostConfiguration
         DeploymentSecretFileKey,
         TrustedProxyKey,
         AllowedOriginKey,
+        AllowedHostKey,
     ];
 
     /// <summary>Every key this deployable accepts, excluding the two prefixed families.</summary>
@@ -520,6 +537,7 @@ public static class HostConfiguration
         List<string> trustedProxies = [];
         List<string> allowedOrigins = [];
         Dictionary<string, string> externalResources = new(StringComparer.Ordinal);
+        List<string> allowedHosts = [];
 
         foreach ((string key, string value) in settings)
         {
@@ -661,6 +679,13 @@ public static class HostConfiguration
                     }
 
                     break;
+                case AllowedHostKey:
+                    if (PublicAuthority(key, value, rejected) is { } authority)
+                    {
+                        allowedHosts.Add(authority);
+                    }
+
+                    break;
                 default:
                     rejected.Add($"'{key}' is not a setting this host accepts. It accepts {string.Join(", ", Simple)}, '{MountNarrowingPrefix}{{prefix}}:{{bound}}', '{FloorPrefix}{{bound}}' and '{ExternalResourcePrefix}{{surface-route}}'.");
                     break;
@@ -702,11 +727,20 @@ public static class HostConfiguration
             }
         }
 
+        BindMountPrefixes(mounts, rejected);
         BindDeploymentMode(mode, modeExplicit, mounts.Count, rejected);
         BindExternalResourceMode(mode, externalResources.Count, rejected);
 
         ManagedSyncOptions? managed = BindManaged(
             mode, managementEndpoint, deploymentId, deploymentSecretFile, rejected);
+
+        if (authorization is not null
+            && transport is HostTransport.Http
+            && allowedHosts.Count == 0
+            && TryListenerAuthority(listen, out string? listenerAuthority))
+        {
+            allowedHosts.Add(listenerAuthority!);
+        }
 
         if (rejected.Count > 0)
         {
@@ -754,6 +788,7 @@ public static class HostConfiguration
             TrustedProxies = trustedProxies,
             AllowedOrigins = allowedOrigins,
             ExternalResources = externalResources,
+            AllowedHosts = allowedHosts,
             ResponseCacheOperatorSecret = responseCacheOperatorSecret,
         };
         refusals = [];
@@ -838,6 +873,88 @@ public static class HostConfiguration
 
         rejected.Add($"'{key}' was given '{value}'. Name an IP address such as '172.28.0.2'.");
         return null;
+    }
+
+    private static string? PublicAuthority(string key, string value, List<string> rejected)
+    {
+        if (value.Length > 0
+            && !value.Contains('/')
+            && !value.Contains('?')
+            && !value.Contains('#')
+            && Uri.TryCreate("http://" + value, UriKind.Absolute, out Uri? parsed)
+            && string.IsNullOrEmpty(parsed.UserInfo)
+            && parsed.AbsolutePath == "/"
+            && string.IsNullOrEmpty(parsed.Query)
+            && string.IsNullOrEmpty(parsed.Fragment))
+        {
+            // Validation uses a synthetic scheme, but the setting itself is scheme-neutral.
+            // Uri.Authority would erase an explicitly written default port such as :80 and
+            // silently change the operator's exact authority allow-list.
+            return value;
+        }
+
+        rejected.Add(
+            $"'{key}' was given '{value}'. Name one HTTP authority such as 'mcp.example.test' "
+            + "or 'mcp.example.test:8443', without a scheme, path, query or fragment.");
+        return null;
+    }
+
+    private static bool TryListenerAuthority(string listen, out string? authority)
+    {
+        authority = null;
+
+        if (!Uri.TryCreate(listen, UriKind.Absolute, out Uri? parsed)
+            || parsed.Port == 0)
+        {
+            return false;
+        }
+
+        string host = parsed.Host;
+
+        if (host.Length >= 2 && host[0] == '[' && host[^1] == ']')
+        {
+            host = host[1..^1];
+        }
+
+        if (host is "*" or "+")
+        {
+            return false;
+        }
+
+        if (System.Net.IPAddress.TryParse(host, out System.Net.IPAddress? address)
+            && (System.Net.IPAddress.Any.Equals(address)
+                || System.Net.IPAddress.IPv6Any.Equals(address)))
+        {
+            return false;
+        }
+
+        // Uri.Authority canonicalizes an explicitly written default port away. AllowedHosts is
+        // an exact, scheme-neutral authority policy, so derive it from the operator's declared
+        // listener authority after the URI has been validated and the host classified above.
+        int authorityStart = parsed.Scheme.Length + Uri.SchemeDelimiter.Length;
+        int authorityEnd = listen.Length;
+
+        int slash = listen.IndexOf('/', authorityStart);
+        int query = listen.IndexOf('?', authorityStart);
+        int fragment = listen.IndexOf('#', authorityStart);
+
+        if (slash >= 0 && slash < authorityEnd)
+        {
+            authorityEnd = slash;
+        }
+
+        if (query >= 0 && query < authorityEnd)
+        {
+            authorityEnd = query;
+        }
+
+        if (fragment >= 0 && fragment < authorityEnd)
+        {
+            authorityEnd = fragment;
+        }
+
+        authority = listen[authorityStart..authorityEnd];
+        return true;
     }
 
     /// <summary>
@@ -957,6 +1074,22 @@ public static class HostConfiguration
             DeploymentId = deploymentId!,
             SecretFile = secretFile!,
         };
+    }
+
+    private static void BindMountPrefixes(
+        IReadOnlyList<KeyValuePair<string, string>> mounts,
+        List<string> rejected)
+    {
+        foreach ((string prefix, _) in mounts)
+        {
+            if (!HostRouteTopologyValidation.IsCanonicalMountPrefix(prefix))
+            {
+                rejected.Add(
+                    $"Mount prefix '{prefix}' is not a canonical literal HTTP path. "
+                    + "Use an absolute non-root path beginning with '/', without a trailing slash, "
+                    + "empty segments, percent-encoding, whitespace, query/fragment syntax or route-template metacharacters.");
+            }
+        }
     }
 
     /// <summary>

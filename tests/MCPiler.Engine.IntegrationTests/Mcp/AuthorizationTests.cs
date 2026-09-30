@@ -457,6 +457,81 @@ public sealed class AuthorizationTests : IDisposable
     }
 
     [Fact]
+    public async Task A_trailing_slash_request_is_a_distinct_authorization_resource()
+    {
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(active: true, Token);
+        await using LoopbackHost upstream = await Upstream();
+        await using ServedEngine engine = await ServeScopedAsync(upstream.Address, authorization.Address);
+
+        using HttpClient client = new();
+
+        string withoutSlash = $"{engine.Address.Scheme}://{engine.Address.Authority}/api/full";
+        string withSlash = withoutSlash + "/";
+
+        using HttpResponseMessage wrongAudience = await Authorized(
+            client,
+            engine.At("/api/full/"),
+            authorization.Mint(withoutSlash, "tools.invoke"));
+
+        Assert.Equal(HttpStatusCode.NotFound, wrongAudience.StatusCode);
+
+        using HttpResponseMessage exactAudience = await Authorized(
+            client,
+            engine.At("/api/full/"),
+            authorization.Mint(withSlash, "tools.invoke"));
+
+        AssertAdmitted(exactAudience);
+    }
+
+    [Fact]
+    public async Task File_mode_does_not_case_fold_a_surface_address()
+    {
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(active: true, Token);
+        await using LoopbackHost upstream = await Upstream();
+        await using ServedEngine engine = await ServeScopedAsync(upstream.Address, authorization.Address);
+
+        using HttpClient client = new();
+        string upper = $"{engine.Address.Scheme}://{engine.Address.Authority}/API/FULL";
+
+        using HttpResponseMessage response = await Authorized(
+            client,
+            engine.At("/API/FULL"),
+            authorization.Mint(upper, "tools.invoke"));
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Protected_resource_metadata_preserves_a_trailing_slash_resource()
+    {
+        await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(active: true, Token);
+        await using LoopbackHost upstream = await Upstream();
+        await using ServedEngine engine = await ServeScopedAsync(upstream.Address, authorization.Address);
+
+        using HttpClient client = new();
+
+        using HttpResponseMessage challenge = await client.PostAsync(
+            engine.At("/api/full/"),
+            new StringContent(
+                """{"jsonrpc":"2.0","id":2,"method":"tools/list"}""",
+                System.Text.Encoding.UTF8,
+                "application/json"),
+            Token);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, challenge.StatusCode);
+
+        string expectedResource = $"{engine.Address.Scheme}://{engine.Address.Authority}/api/full/";
+        string metadataAddress = $"{engine.Address.Scheme}://{engine.Address.Authority}"
+            + "/.well-known/oauth-protected-resource/api/full/";
+
+        using HttpResponseMessage metadataResponse = await client.GetAsync(metadataAddress, Token);
+        Assert.Equal(HttpStatusCode.OK, metadataResponse.StatusCode);
+
+        JsonElement metadata = await Document(metadataResponse);
+        Assert.Equal(expectedResource, metadata.GetProperty("resource").GetString());
+    }
+
+    [Fact]
     public async Task A_declared_scope_is_enforced_and_the_refusal_is_uniform()
     {
         await using FakeAuthorizationServer authorization = await FakeAuthorizationServer.StartAsync(active: true, Token);

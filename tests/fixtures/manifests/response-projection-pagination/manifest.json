@@ -1,0 +1,110 @@
+{
+  "manifestFormatVersion": "0.3",
+  "sections": {
+    "server": {
+      "inline": {
+        "formatVersion": 2,
+        "name": "Paginated Item API"
+      }
+    },
+    "policy": {
+      "inline": {
+        "formatVersion": 2,
+        "baseUrl": "https://api.example.com"
+      }
+    },
+    "operations": {
+      "inline": {
+        "formatVersion": 1,
+        "operations": [
+          {
+            "key": "GET /items",
+            "method": "GET",
+            "path": "/items",
+            "parameters": [
+              {
+                "name": "cursor",
+                "in": "query",
+                "schema": { "type": "string" }
+              }
+            ],
+            "responses": {
+              "200": {
+                "content": {
+                  "application/json": {
+                    "schema": {
+                      "type": "object",
+                      "properties": {
+                        "items": {
+                          "type": "array",
+                          "items": { "type": "object" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "formatVersion": 5,
+        "operations": [
+          {
+            "slug": "list-items",
+            "name": "List items",
+            "inputSchema": {
+              "type": "object",
+              "properties": {
+                "cursor": { "type": "string" }
+              }
+            },
+            "outputSchema": {
+              "type": "object",
+              "properties": {
+                "data": { "type": "object" },
+                "pagination": { "type": "object" }
+              }
+            },
+            "outputSchemaPolicy": {
+              "generate": false,
+              "advertise": "yes",
+              "useInternally": true
+            },
+            "annotations": {
+              "readOnly": true,
+              "destructive": false,
+              "idempotent": true,
+              "openWorld": true
+            },
+            "binding": {
+              "type": "http",
+              "operation": "GET /items"
+            },
+            "outputProjection": {
+              "bodyTarget": "/data",
+              "pagination": {
+                "target": "/pagination",
+                "source": {
+                  "kind": "responseHeader",
+                  "name": "X-Next-Cursor",
+                  "scalarType": "string"
+                },
+                "nextArguments": [
+                  {
+                    "target": "/cursor",
+                    "from": { "kind": "extractedValue" },
+                    "as": "string"
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

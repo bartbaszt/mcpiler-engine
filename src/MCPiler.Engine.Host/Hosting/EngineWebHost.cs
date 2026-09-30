@@ -142,6 +142,28 @@ public static class EngineWebHost
         EngineGenerationManager generations,
         bool managed)
     {
+        if (generations.Current is not { } activeGeneration)
+        {
+            throw new InvalidOperationException("The listener has no active Engine generation.");
+        }
+
+        if (HostRouteTopologyValidation.Find(activeGeneration.Mounts) is { Count: > 0 } topologyRefusals)
+        {
+            StartupRefusal first = topologyRefusals[0];
+            generations.Dispose();
+            throw new InvalidOperationException(
+                $"refused {first.Mount} [{first.Code}]: {first.Message}");
+        }
+
+        if (binding.Authorization is not null
+            && activeGeneration.RequiresAllowedHostForProtectedResources
+            && binding.AllowedHosts.Count == 0)
+        {
+            generations.Dispose();
+            throw new InvalidOperationException(
+                $"refused [auth/allowed-host-missing]: protected HTTP serving requires at least one '{HostConfiguration.AllowedHostKey}'.");
+        }
+
         // The authorization pairing is a startup fact, not a request-time surprise. A mount
         // that requires a token exists and the process trusts no issuer: refusing here
         // names the mount, and an operator debugs their deployment rather than a client
@@ -194,6 +216,7 @@ public static class EngineWebHost
             });
         }
 
+        builder.Services.AddSingleton(binding);
         builder.Services.AddSingleton(execution);
         builder.Services.AddSingleton(drain);
         builder.Services.AddSingleton(generations);
@@ -224,7 +247,8 @@ public static class EngineWebHost
                         var metadata = SurfaceMetadata.Build(
                             context.HttpContext,
                             binding.Authorization!,
-                            generations);
+                            generations,
+                            binding.AllowedHosts);
 
                         if (metadata is null)
                         {
@@ -289,28 +313,29 @@ public static class EngineWebHost
             app.UseMiddleware<MountAuthorizationMiddleware>();
         }
 
+        // Transfer children are recognised in middleware for both deployment modes. This keeps
+        // file mode capable of serving slash-terminated parent resources whose exact child URL
+        // contains a deliberate double slash, which ASP.NET route templates cannot express.
+        // Admission and authorization have already bound the request to the exact parent resource.
+        app.Use(async (context, next) =>
+        {
+            if (await FileTransferEndpoints.TryServeAsync(context).ConfigureAwait(false))
+            {
+                return;
+            }
+
+            await next(context).ConfigureAwait(false);
+        });
+
         if (managed)
         {
-            // One template for every address, because an activation may introduce a mount the
-            // process has never seen. The template also matches the transfer children, which
-            // cannot be mapped separately under a catch-all, so they are recognised from the
-            // request path before the protocol handler would see them.
-            app.Use(async (context, next) =>
-            {
-                if (await FileTransferEndpoints.TryServeAsync(context).ConfigureAwait(false))
-                {
-                    return;
-                }
-
-                await next(context).ConfigureAwait(false);
-            });
-
+            // One template for every MCP address, because an activation may introduce a mount the
+            // process has never seen.
             McpRegistration.MapManagedTemplate(app);
         }
         else
         {
             McpRegistration.MapMounts(app, generations.Current!.Mounts);
-            FileTransferEndpoints.Map(app, generations.Current!.Mounts);
         }
 
         HealthEndpoints.Map(app, binding.Runtime.FileStoreRoot, drain);

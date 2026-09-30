@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -106,6 +108,10 @@ internal sealed class ServedEngine : IAsyncDisposable
     /// The dedicated response-cache operator secret. Null leaves the operator channel unmapped, which
     /// is the safe default; a test that exercises read/clear supplies one.
     /// </param>
+    /// <param name="allowedHosts">
+    /// Explicit public authorities for protected-resource identity. Null derives the concrete
+    /// loopback listener authority when authorization is configured.
+    /// </param>
     public static async Task<ServedEngine> StartAsync(
         RuntimeOptions options,
         CancellationToken cancellationToken,
@@ -116,7 +122,8 @@ internal sealed class ServedEngine : IAsyncDisposable
         IReadOnlyList<string>? trustedProxies = null,
         IReadOnlyList<string>? allowedOrigins = null,
         string? operatorSecret = null,
-        IReadOnlyDictionary<string, string>? externalResources = null)
+        IReadOnlyDictionary<string, string>? externalResources = null,
+        IReadOnlyList<string>? allowedHosts = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -135,15 +142,19 @@ internal sealed class ServedEngine : IAsyncDisposable
             diagnostics);
         var drain = new DrainCoordinator();
 
+        int port = ReserveLoopbackPort();
+        string authority = $"127.0.0.1:{port}";
+
         WebApplication app = EngineWebHost.Build(
             started,
             new HostBinding(
                 options,
-                new HostListenOptions("http://127.0.0.1:0", HostTransport.Http),
+                new HostListenOptions($"http://{authority}", HostTransport.Http),
                 authorization)
             {
                 TrustedProxies = trustedProxies ?? [],
                 AllowedOrigins = allowedOrigins ?? [],
+                AllowedHosts = allowedHosts ?? (authorization is null ? [] : [authority]),
                 ResponseCacheOperatorSecret = operatorSecret,
                 ExternalResources = externalResources
                     ?? new Dictionary<string, string>(StringComparer.Ordinal),
@@ -196,6 +207,15 @@ internal sealed class ServedEngine : IAsyncDisposable
         await StopQuietlyAsync(_app);
         _execution.Dispose();
         _drain.Dispose();
+    }
+
+    private static int ReserveLoopbackPort()
+    {
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        return port;
     }
 
     private static async Task StopQuietlyAsync(WebApplication app)

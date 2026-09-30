@@ -1,0 +1,69 @@
+{
+  "manifestFormatVersion": "0.3",
+  "sections": {
+    "server": {
+      "inline": {
+        "formatVersion": 2,
+        "name": "Cached Pet API"
+      }
+    },
+    "policy": {
+      "inline": {
+        "formatVersion": 2,
+        "baseUrl": "https://api.example.com"
+      }
+    },
+    "operations": {
+      "inline": {
+        "formatVersion": 1,
+        "operations": [
+          {
+            "key": "GET /pets",
+            "method": "GET",
+            "path": "/pets",
+            "responses": {
+              "200": {
+                "content": {
+                  "application/json": {
+                    "schema": {
+                      "type": "array",
+                      "items": { "type": "object" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "agentSurface": {
+      "inline": {
+        "formatVersion": 5,
+        "operations": [
+          {
+            "slug": "list-pets",
+            "name": "List pets",
+            "inputSchema": {
+              "type": "object",
+              "properties": {}
+            },
+            "annotations": {
+              "readOnly": true,
+              "destructive": false,
+              "idempotent": true,
+              "openWorld": true
+            },
+            "binding": {
+              "type": "http",
+              "operation": "GET /pets"
+            },
+            "responseCache": {
+              "ttlSeconds": 300
+            }
+          }
+        ]
+      }
+    }
+  }
+}

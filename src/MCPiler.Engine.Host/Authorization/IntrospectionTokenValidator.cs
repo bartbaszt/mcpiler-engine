@@ -286,7 +286,7 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
                 : null;
         }
 
-        JsonElement? metadata;
+        IssuerMetadataDiscovery metadata;
 
         try
         {
@@ -295,12 +295,13 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
                 _issuer,
                 cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception failure) when (failure is HttpRequestException or TaskCanceledException)
+        catch (Exception failure) when (failure is HttpRequestException or TaskCanceledException or UriFormatException)
         {
             return null;
         }
 
-        if (metadata is not { } discovered
+        if (metadata.InvalidReason is not null
+            || metadata.Document is not { } discovered
             || !discovered.TryGetProperty("introspection_endpoint", out JsonElement endpoint)
             || endpoint.ValueKind is not JsonValueKind.String
             || endpoint.GetString() is not { } address
@@ -315,14 +316,12 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
     }
 
     /// <summary>
-    /// Reads the audience, tolerating the multi-valued form the claim is allowed to take.
+    /// Reads exactly one audience resource name from either the scalar or array claim form.
     /// </summary>
     /// <remarks>
-    /// RFC 7662 declares <c>aud</c> a string, but the JWT claim it mirrors is defined as an
-    /// array, and at least one major issuer sends the array through introspection. The
-    /// byte-exact binding compares one name, so a multi-valued audience is one that names no
-    /// single resource and is refused — but reading it as a string array and taking none of
-    /// them is the same refusal without the parse failure.
+    /// A singleton JSON array still names exactly one protected resource and is therefore
+    /// equivalent to the scalar form. An empty array, a mixed array or a multi-valued array names
+    /// no single resource for Engine's byte-exact binding and is refused by returning no audience.
     /// </remarks>
     private static string? ReadString(JsonElement root, string member)
     {
@@ -331,17 +330,26 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
             return null;
         }
 
-        switch (value.ValueKind)
+        if (value.ValueKind is JsonValueKind.String)
         {
-            case JsonValueKind.String:
-                return value.GetString();
-
-            case JsonValueKind.Array when value.EnumerateArray().Any(static item => item.ValueKind is JsonValueKind.String):
-                return null;
-
-            default:
-                return null;
+            return value.GetString();
         }
+
+        if (value.ValueKind is not JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        JsonElement.ArrayEnumerator items = value.EnumerateArray();
+        if (!items.MoveNext() || items.Current.ValueKind is not JsonValueKind.String)
+        {
+            return null;
+        }
+
+        string? audience = items.Current.GetString();
+        return audience is not null && !items.MoveNext()
+            ? audience
+            : null;
     }
 
     private static IReadOnlyList<string> ReadScopes(JsonElement root)
