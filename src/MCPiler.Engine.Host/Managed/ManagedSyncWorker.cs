@@ -47,6 +47,7 @@ internal sealed class ManagedSyncWorker : IDisposable
     private readonly string _instanceId = Guid.NewGuid().ToString("N");
 
     private long _reportSequence;
+    private long? _sessionEpoch;
 
     private string? _activeGenerationId;
     private string? _deliveredGenerationId;
@@ -258,8 +259,13 @@ internal sealed class ManagedSyncWorker : IDisposable
             while (true)
             {
                 ManagedPollResult result = await _client
-                    .PollAsync(BuildRequest(), bound.Token)
+                    .PollAsync(BuildRequest(), _sessionEpoch, bound.Token)
                     .ConfigureAwait(false);
+
+                if (result.SessionEpoch is { } sessionEpoch)
+                {
+                    _sessionEpoch = sessionEpoch;
+                }
 
                 switch (result.Outcome)
                 {
@@ -349,8 +355,13 @@ internal sealed class ManagedSyncWorker : IDisposable
                 }
 
                 ManagedPollResult result = await _client
-                    .PollAsync(BuildRequest(), cancellationToken)
+                    .PollAsync(BuildRequest(), _sessionEpoch, cancellationToken)
                     .ConfigureAwait(false);
+
+                if (result.SessionEpoch is { } sessionEpoch)
+                {
+                    _sessionEpoch = sessionEpoch;
+                }
 
                 switch (result.Outcome)
                 {

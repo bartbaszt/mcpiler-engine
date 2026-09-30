@@ -139,9 +139,8 @@ public sealed class ManagedPollRequestMessage
     public string? EngineInstanceId { get; set; }
 
     /// <summary>
-    /// This process's report counter, incremented for every poll it sends. Combined with
-    /// <see cref="EngineInstanceId"/> it gives every report a total order, which is what lets the
-    /// Platform refuse a delayed request rather than record it over a newer observation.
+    /// This process's report counter, incremented for every poll it sends. Platform orders it
+    /// within the fencing epoch assigned to this process.
     /// </summary>
     [JsonPropertyName("engineReportSequence")]
     public long EngineReportSequence { get; set; }

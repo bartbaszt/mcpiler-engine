@@ -34,16 +34,19 @@ internal enum ManagedPollOutcome
 /// <param name="Outcome">Which of the three cases the Platform's answer fell into.</param>
 /// <param name="Delivery">The delivered generation, when one arrived.</param>
 /// <param name="Diagnostics">Sanitized diagnostics the Platform reported, if any.</param>
+/// <param name="SessionEpoch">Platform-issued fencing epoch returned by an accepted poll.</param>
 internal sealed record ManagedPollResult(
     ManagedPollOutcome Outcome,
     ManagedGenerationDelivery? Delivery,
-    IReadOnlyList<ManagedDiagnosticMessage> Diagnostics)
+    IReadOnlyList<ManagedDiagnosticMessage> Diagnostics,
+    long? SessionEpoch)
 {
     /// <summary>A result that carried no generation and no diagnostics.</summary>
-    public static ManagedPollResult Unchanged { get; } = new(ManagedPollOutcome.Unchanged, null, []);
+    public static ManagedPollResult Unchanged(long sessionEpoch)
+        => new(ManagedPollOutcome.Unchanged, null, [], sessionEpoch);
 
     /// <summary>A result for an exchange that could not complete.</summary>
-    public static ManagedPollResult Unreachable { get; } = new(ManagedPollOutcome.Unreachable, null, []);
+    public static ManagedPollResult Unreachable { get; } = new(ManagedPollOutcome.Unreachable, null, [], null);
 }
 
 /// <summary>
@@ -107,9 +110,11 @@ internal sealed class ManagedSyncClient : IDisposable
     /// Runs one long poll and reports what came back.
     /// </summary>
     /// <param name="request">What this Engine currently serves, so the Platform can decide.</param>
+    /// <param name="sessionEpoch">The Platform-issued epoch from the preceding accepted poll, when assigned.</param>
     /// <param name="cancellationToken">Cancels the poll, including the Platform's bounded wait.</param>
     public async Task<ManagedPollResult> PollAsync(
         ManagedPollRequestMessage request,
+        long? sessionEpoch,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -155,12 +160,20 @@ internal sealed class ManagedSyncClient : IDisposable
         };
 
         message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", secret);
+        if (sessionEpoch is { } epoch)
+        {
+            message.Headers.TryAddWithoutValidation(
+                ManagedProtocol.SessionEpochHeader,
+                epoch.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
 
         using HttpResponseMessage response = await SendAsync(message, cancellationToken).ConfigureAwait(false);
 
         if (response.StatusCode == HttpStatusCode.NoContent)
         {
-            return ManagedPollResult.Unchanged;
+            return TryReadSessionEpoch(response, out var acceptedEpoch)
+                ? ManagedPollResult.Unchanged(acceptedEpoch)
+                : ManagedPollResult.Unreachable;
         }
 
         if (response.StatusCode == HttpStatusCode.Unauthorized)
@@ -181,7 +194,31 @@ internal sealed class ManagedSyncClient : IDisposable
             return ManagedPollResult.Unreachable;
         }
 
-        return await ReadDeliveryAsync(response, cancellationToken).ConfigureAwait(false);
+        if (!TryReadSessionEpoch(response, out var responseEpoch))
+        {
+            return ManagedPollResult.Unreachable;
+        }
+
+        var result = await ReadDeliveryAsync(response, cancellationToken).ConfigureAwait(false);
+        return result with { SessionEpoch = responseEpoch };
+    }
+
+    private static bool TryReadSessionEpoch(HttpResponseMessage response, out long sessionEpoch)
+    {
+        sessionEpoch = 0;
+        if (!response.Headers.TryGetValues(ManagedProtocol.SessionEpochHeader, out var values))
+        {
+            return false;
+        }
+
+        var raw = values.SingleOrDefault();
+        return raw is not null
+            && long.TryParse(
+                raw,
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out sessionEpoch)
+            && sessionEpoch > 0;
     }
 
     /// <summary>
@@ -411,7 +448,8 @@ internal sealed class ManagedSyncClient : IDisposable
                 parsed.Metadata.EngineVersion,
                 mounts,
                 parsed.Secrets),
-            []);
+            [],
+            null);
     }
 
     private static bool HasValidShape(ManagedGenerationMessage message)
@@ -469,7 +507,8 @@ internal sealed class ManagedSyncClient : IDisposable
         => new(
             ManagedPollOutcome.CandidateRefused,
             null,
-            [new ManagedDiagnosticMessage { Code = code, Message = message }]);
+            [new ManagedDiagnosticMessage { Code = code, Message = message }],
+            null);
 
 
     private static async Task<byte[]> ReadBoundedAsync(
