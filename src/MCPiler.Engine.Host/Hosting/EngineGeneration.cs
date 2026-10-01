@@ -30,12 +30,18 @@ internal sealed class EngineGeneration : IDisposable
 {
     private readonly object _gate = new();
     private readonly Dictionary<string, IReadOnlyList<Tool>> _definitions = new(StringComparer.Ordinal);
+    private readonly IReadOnlyDictionary<string, string> _externalResources;
     private readonly TaskCompletionSource _drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _leases;
     private bool _retired;
     private bool _disposed;
 
-    internal EngineGeneration(long number, MountSet mounts, EngineExecution execution, bool ownsExecution = true)
+    internal EngineGeneration(
+        long number,
+        MountSet mounts,
+        EngineExecution execution,
+        bool ownsExecution = true,
+        IReadOnlyDictionary<string, string>? externalResources = null)
     {
         ArgumentNullException.ThrowIfNull(mounts);
         ArgumentNullException.ThrowIfNull(execution);
@@ -44,6 +50,9 @@ internal sealed class EngineGeneration : IDisposable
         Mounts = mounts;
         Execution = execution;
         OwnsExecution = ownsExecution;
+        _externalResources = externalResources is null
+            ? new Dictionary<string, string>(StringComparer.Ordinal)
+            : new Dictionary<string, string>(externalResources, StringComparer.Ordinal);
     }
 
     /// <summary>Monotonic identity, for diagnostics and tests only.</summary>
@@ -150,6 +159,61 @@ internal sealed class EngineGeneration : IDisposable
 
         resolution = null;
         return false;
+    }
+
+    /// <summary>
+    /// Returns the one protected-resource identity this generation owns for an admitted surface.
+    /// </summary>
+    /// <remarks>
+    /// External-resource bindings are keyed by the explicit surface route, even when a default
+    /// surface was reached through its shorter mount-prefix alias. That keeps one canonical
+    /// external identity per concrete surface. An unbound surface retains the request-derived
+    /// direct identity, including the exact address alias the client used.
+    /// </remarks>
+    internal string EffectiveResourceIdentity(
+        SurfaceResolution resolution,
+        string requestDerivedIdentity)
+    {
+        ArgumentNullException.ThrowIfNull(resolution);
+        ArgumentException.ThrowIfNullOrWhiteSpace(requestDerivedIdentity);
+
+        return TryExternalResourceIdentity(resolution, out string? external)
+            ? external!
+            : requestDerivedIdentity;
+    }
+
+    /// <summary>
+    /// Gets the explicit deployment-owned resource identity for one surface, when present.
+    /// </summary>
+    internal bool TryExternalResourceIdentity(
+        SurfaceResolution resolution,
+        out string? resourceIdentity)
+    {
+        ArgumentNullException.ThrowIfNull(resolution);
+
+        string surfaceRoute = resolution.Mount.Prefix + "/" + resolution.Surface.Slug;
+
+        return _externalResources.TryGetValue(surfaceRoute, out resourceIdentity);
+    }
+
+    /// <summary>
+    /// Whether any protected surface in this generation derives its resource from the request
+    /// authority and therefore needs the listener's allowed-host boundary.
+    /// </summary>
+    internal bool RequiresAllowedHostForProtectedResources
+        => NeedsAllowedHostForProtectedResources(Mounts, _externalResources);
+
+    internal static bool NeedsAllowedHostForProtectedResources(
+        MountSet mounts,
+        IReadOnlyDictionary<string, string> externalResources)
+    {
+        ArgumentNullException.ThrowIfNull(mounts);
+        ArgumentNullException.ThrowIfNull(externalResources);
+
+        return mounts.Mounts.Any(mount =>
+            mount.RequiresAuthorization()
+            && mount.Surfaces.Any(surface =>
+                !externalResources.ContainsKey(mount.Prefix + "/" + surface.Slug)));
     }
 
     /// <summary>

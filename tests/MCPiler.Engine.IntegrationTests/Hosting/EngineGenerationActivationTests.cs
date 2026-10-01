@@ -5,7 +5,6 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Net.Sockets;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -87,6 +86,64 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
         }
 
         await retired.WaitAsync(TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task A_lease_keeps_its_generation_owned_resource_identity_across_activation()
+    {
+        string store = Store();
+        RuntimeStartResult initial = Load("/api", ServedManifests.ThreeSurfaces, store);
+        const string g0 = "https://tunnel.example.test/v1/mcp/g0";
+        const string g1 = "https://tunnel.example.test/v1/mcp/g1";
+
+        await using ManagedListener listener = await ManagedListener.StartAsync(
+            initial,
+            store,
+            Token,
+            externalResources: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["/api/read"] = g0,
+            });
+
+        Assert.True(listener.Manager.TryLease(out EngineGenerationLease? oldLease));
+        Task retirement;
+
+        using (oldLease)
+        {
+            Assert.True(oldLease!.Generation.TryResolve("/api/read", out SurfaceResolution? oldResolution));
+            Assert.Equal(
+                g0,
+                oldLease.Generation.EffectiveResourceIdentity(
+                    oldResolution!,
+                    "http://private.example.test/api/read"));
+
+            EngineGeneration candidate = listener.NewGeneration(
+                Load("/api", ServedManifests.ThreeSurfaces, store),
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["/api/read"] = g1,
+                });
+            retirement = listener.Manager.Activate(candidate);
+
+            Assert.Equal(
+                g0,
+                oldLease.Generation.EffectiveResourceIdentity(
+                    oldResolution!,
+                    "http://private.example.test/api/read"));
+
+            Assert.True(listener.Manager.TryLease(out EngineGenerationLease? newLease));
+            using (newLease)
+            {
+                Assert.True(newLease!.Generation.TryResolve("/api/read", out SurfaceResolution? newResolution));
+                Assert.Equal(
+                    g1,
+                    newLease.Generation.EffectiveResourceIdentity(
+                        newResolution!,
+                        "http://private.example.test/api/read"));
+            }
+        }
+
+        await retirement.WaitAsync(Token);
     }
 
     [Fact]
@@ -1447,7 +1504,8 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
             CancellationToken cancellationToken,
             HostAuthorizationOptions? authorization = null,
             string? operatorSecret = null,
-            bool allowHostWithoutAuthorization = false)
+            bool allowHostWithoutAuthorization = false,
+            IReadOnlyDictionary<string, string>? externalResources = null)
         {
             ArgumentNullException.ThrowIfNull(initial);
 
@@ -1455,7 +1513,7 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
             var drain = new DrainCoordinator();
 
             EngineExecution initialExecution = EngineExecution.Create(initial, ServedEngine.Permissive());
-            _ = manager.Activate(Generation(0, initial, initialExecution));
+            _ = manager.Activate(Generation(0, initial, initialExecution, externalResources));
 
             int port = ReserveLoopbackPort();
             string authority = $"127.0.0.1:{port}";
@@ -1507,12 +1565,14 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
         /// mirrors file mode, where the command runner owns the execution and the generation only
         /// borrows it.
         /// </remarks>
-        public EngineGeneration NewGeneration(RuntimeStartResult started)
+        public EngineGeneration NewGeneration(
+            RuntimeStartResult started,
+            IReadOnlyDictionary<string, string>? externalResources = null)
         {
             EngineExecution execution = EngineExecution.Create(started, ServedEngine.Permissive());
             _executions.Add(execution);
 
-            return Generation(_nextNumber++, started, execution);
+            return Generation(_nextNumber++, started, execution, externalResources);
         }
 
         /// <summary>Loads, builds and activates a replacement generation.</summary>
@@ -1521,14 +1581,7 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
 
         public Uri At(string route) => new(Address, route);
 
-        private static int ReserveLoopbackPort()
-        {
-            using TcpListener listener = new(IPAddress.Loopback, 0);
-            listener.Start();
-            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-            listener.Stop();
-            return port;
-        }
+        private static int ReserveLoopbackPort() => LoopbackPorts.Reserve();
 
         public async ValueTask DisposeAsync()
         {
@@ -1553,7 +1606,16 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
             _drain.Dispose();
         }
 
-        private static EngineGeneration Generation(long number, RuntimeStartResult started, EngineExecution execution)
-            => new(number, MountSet.From(started), execution, ownsExecution: false);
+        private static EngineGeneration Generation(
+            long number,
+            RuntimeStartResult started,
+            EngineExecution execution,
+            IReadOnlyDictionary<string, string>? externalResources = null)
+            => new(
+                number,
+                MountSet.From(started),
+                execution,
+                ownsExecution: false,
+                externalResources: externalResources);
     }
 }

@@ -26,7 +26,8 @@ namespace MCPiler.Engine.UnitTests.Manifest.Managed;
 /// </remarks>
 public sealed class ManagedGenerationFixtureTests
 {
-    private const string GenerationFile = "generation-v1.json";
+    private const string GenerationFile = "generation-v2.json";
+    private const string LegacyGenerationFile = "generation-v1.json";
     private const string MetadataFile = "expected-metadata.json";
     private const string ProviderKey = "MCPILER_OAUTH2_CLIENT_CREDENTIALS_CLIENTSECRET";
 
@@ -37,7 +38,7 @@ public sealed class ManagedGenerationFixtureTests
     {
         var root = Root();
 
-        Assert.Equal(1, root["protocolVersion"]!.GetValue<int>());
+        Assert.Equal(2, root["protocolVersion"]!.GetValue<int>());
         Assert.True(root["generationId"]!.GetValue<string>().Length > 0);
 
         var mounts = Assert.IsType<JsonArray>(root["mounts"]);
@@ -52,10 +53,24 @@ public sealed class ManagedGenerationFixtureTests
             // mounts indistinguishable at the routing layer.
             Assert.StartsWith("/", prefix, StringComparison.Ordinal);
             Assert.NotEmpty(mount["bundle"]!.GetValue<string>());
+            Assert.NotNull(mount["externalResources"]!.AsObject());
         }
 
         Assert.NotNull(root["secrets"]!.AsObject());
         Assert.NotNull(root["metadata"]!.AsObject());
+    }
+
+    [Fact]
+    public void The_v1_fixture_is_retained_as_an_explicitly_incompatible_legacy_contract()
+    {
+        var legacy = JsonNode.Parse(
+            File.ReadAllText(Path.Combine(FixtureDirectory, LegacyGenerationFile)))!.AsObject();
+
+        Assert.Equal(1, legacy["protocolVersion"]!.GetValue<int>());
+        foreach (var mountNode in legacy["mounts"]!.AsArray())
+        {
+            Assert.False(mountNode!.AsObject().ContainsKey("externalResources"));
+        }
     }
 
     [Fact]

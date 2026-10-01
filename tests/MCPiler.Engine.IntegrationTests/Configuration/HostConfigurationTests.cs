@@ -236,6 +236,89 @@ public sealed class HostConfigurationTests
         Assert.Equal(HostDeploymentMode.File, binding!.Mode);
     }
 
+    [Fact]
+    public void File_mode_binds_repeatable_external_resources_by_exact_surface_route()
+    {
+        List<KeyValuePair<string, string>> settings =
+        [
+            new(HostConfiguration.FileStoreRootKey, "/var/lib/mcpiler"),
+            new(
+                HostConfiguration.ExternalResourcePrefix + "/api/full",
+                "https://tunnel.example.test/v1/mcp/one"),
+            new(
+                HostConfiguration.ExternalResourcePrefix + "/crm/default",
+                "https://tunnel.example.test/v1/mcp/two/"),
+        ];
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), settings, out HostBinding? binding, out IReadOnlyList<string> refusals));
+
+        Assert.Empty(refusals);
+        Assert.Equal("https://tunnel.example.test/v1/mcp/one", binding!.ExternalResources["/api/full"]);
+        Assert.Equal("https://tunnel.example.test/v1/mcp/two/", binding.ExternalResources["/crm/default"]);
+        Assert.False(binding.ExternalResources.ContainsKey("/api"));
+    }
+
+    [Theory]
+    [InlineData("http://tunnel.example.test/v1/mcp/one")]
+    [InlineData("/v1/mcp/one")]
+    [InlineData("https://tunnel.example.test/v1/mcp/one?channel=main")]
+    [InlineData("https://tunnel.example.test/v1/mcp/one#fragment")]
+    public void File_mode_refuses_invalid_external_resource_uris(string resource)
+    {
+        List<KeyValuePair<string, string>> settings =
+        [
+            new(HostConfiguration.FileStoreRootKey, "/var/lib/mcpiler"),
+            new(HostConfiguration.ExternalResourcePrefix + "/api/full", resource),
+        ];
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), settings, out _, out IReadOnlyList<string> refusals));
+        Assert.Contains(
+            refusals,
+            refusal => refusal.Contains("external resource", StringComparison.Ordinal)
+                && refusal.Contains("HTTPS", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void File_mode_refuses_one_external_resource_assigned_to_two_surface_routes()
+    {
+        const string resource = "https://tunnel.example.test/v1/mcp/shared";
+        List<KeyValuePair<string, string>> settings =
+        [
+            new(HostConfiguration.FileStoreRootKey, "/var/lib/mcpiler"),
+            new(HostConfiguration.ExternalResourcePrefix + "/api/full", resource),
+            new(HostConfiguration.ExternalResourcePrefix + "/crm/default", resource),
+        ];
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), settings, out _, out IReadOnlyList<string> refusals));
+        Assert.Contains(
+            refusals,
+            refusal => refusal.Contains("already assigned", StringComparison.Ordinal)
+                && refusal.Contains("/api/full", StringComparison.Ordinal)
+                && refusal.Contains("/crm/default", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Managed_mode_refuses_local_external_resource_configuration()
+    {
+        List<KeyValuePair<string, string>> settings =
+        [
+            new(HostConfiguration.FileStoreRootKey, "/var/lib/mcpiler"),
+            new(HostConfiguration.ModeKey, HostConfiguration.ManagedModeName),
+            new(HostConfiguration.ManagementEndpointKey, "https://platform.example.test"),
+            new(HostConfiguration.DeploymentIdKey, "deployment-1"),
+            new(HostConfiguration.DeploymentSecretFileKey, "/run/secrets/deployment"),
+            new(
+                HostConfiguration.ExternalResourcePrefix + "/api/full",
+                "https://tunnel.example.test/v1/mcp/one"),
+        ];
+
+        Assert.False(HostConfiguration.TryBind([], settings, out _, out IReadOnlyList<string> refusals));
+        Assert.Contains(
+            refusals,
+            refusal => refusal.Contains(HostConfiguration.ManagedModeName, StringComparison.Ordinal)
+                && refusal.Contains("--external-resource", StringComparison.Ordinal));
+    }
+
     /// <summary>
     /// A managed process refuses local mounts, because the two are competing authorities.
     /// </summary>

@@ -134,6 +134,19 @@ public static class HostCommands
             return new CommandOutcome(StartupReport.ExitCode(result), report);
         }
 
+        if (!TryValidateExternalResources(result, binding.ExternalResources, out IReadOnlyList<string>? externalResourceRefusals))
+        {
+            StringBuilder refusalText = new(identity);
+            refusalText.AppendLine();
+
+            foreach (string resourceRefusal in externalResourceRefusals)
+            {
+                refusalText.AppendLine(resourceRefusal);
+            }
+
+            return new CommandOutcome(ExitCodes.Configuration, refusalText.ToString());
+        }
+
         if (await AuthorizationStartupValidation
                 .FindAsync(result.Mounts, binding.Authorization, binding.Listener.Transport, cancellationToken)
                 .ConfigureAwait(false) is { } authorizationRefusal)
@@ -453,6 +466,19 @@ public static class HostCommands
                 identity + Environment.NewLine + StartupReport.Render(result, operatorChannelConfigured: binding.ResponseCacheOperatorSecret is not null));
         }
 
+        if (!TryValidateExternalResources(result, binding.ExternalResources, out IReadOnlyList<string>? externalResourceRefusals))
+        {
+            StringBuilder refusalText = new(identity);
+            refusalText.AppendLine();
+
+            foreach (string resourceRefusal in externalResourceRefusals)
+            {
+                refusalText.AppendLine(resourceRefusal);
+            }
+
+            return new CommandOutcome(ExitCodes.Configuration, refusalText.ToString());
+        }
+
         StringBuilder text = new(identity);
         text.AppendLine();
         text.Append(StartupReport.Render(result, operatorChannelConfigured: binding.ResponseCacheOperatorSecret is not null));
@@ -522,7 +548,7 @@ public static class HostCommands
         List<StartupRefusal> refusals = [.. HostRouteTopologyValidation.Find(mounts)];
 
         if (binding.Authorization is not null
-            && mounts.Mounts.Any(mount => mount.RequiresAuthorization())
+            && EngineGeneration.NeedsAllowedHostForProtectedResources(mounts, binding.ExternalResources)
             && binding.AllowedHosts.Count == 0)
         {
             refusals.Add(new StartupRefusal(
@@ -648,5 +674,35 @@ public static class HostCommands
             "At least one '--mount <prefix>=<dir>' is required. Engine serves configured Manifest mounts and does not start with an empty surface."
                 + Environment.NewLine);
         return false;
+    }
+
+    private static bool TryValidateExternalResources(
+        RuntimeStartResult started,
+        IReadOnlyDictionary<string, string> externalResources,
+        out IReadOnlyList<string> refusals)
+    {
+        if (externalResources.Count == 0)
+        {
+            refusals = [];
+            return true;
+        }
+
+        HashSet<string> surfaceRoutes = started.Mounts
+            .SelectMany(mount => mount.Surfaces.Select(surface => mount.Prefix + "/" + surface.Slug))
+            .ToHashSet(StringComparer.Ordinal);
+
+        List<string> rejected = [];
+
+        foreach ((string route, _) in externalResources.OrderBy(static pair => pair.Key, StringComparer.Ordinal))
+        {
+            if (!surfaceRoutes.Contains(route))
+            {
+                rejected.Add(
+                    $"The external-resource mapping names unknown or disabled surface route '{route}'. Use the exact '<mount-prefix>/<surface-slug>' route of an enabled surface.");
+            }
+        }
+
+        refusals = rejected;
+        return rejected.Count == 0;
     }
 }

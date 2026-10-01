@@ -113,6 +113,17 @@ public sealed record HostBinding(
     public IReadOnlyList<string> AllowedOrigins { get; init; } = [];
 
     /// <summary>
+    /// Exact file-mode surface route to exact external protected-resource identity.
+    /// </summary>
+    /// <remarks>
+    /// Deployment state only. Keys are canonical explicit surface routes such as
+    /// <c>/api/full</c>; values are preserved exactly as supplied after validation.
+    /// Managed mode receives this state from the managed generation protocol instead.
+    /// </remarks>
+    public IReadOnlyDictionary<string, string> ExternalResources { get; init; } =
+        new Dictionary<string, string>(StringComparer.Ordinal);
+
+    /// <summary>
     /// Authorities accepted in the HTTP Host/:authority field for protected MCP resources.
     /// </summary>
     /// <remarks>
@@ -407,6 +418,12 @@ public static class HostConfiguration
     public const string AllowedOriginKey = "allowed-origin";
 
     /// <summary>
+    /// Prefix for a file-mode external protected-resource binding:
+    /// <c>external-resource:{surface-route}</c>.
+    /// </summary>
+    public const string ExternalResourcePrefix = "external-resource:";
+
+    /// <summary>
     /// Repeatable public authority accepted for protected resource identity, for example
     /// <c>mcp.example.test</c> or <c>mcp.example.test:8443</c>.
     /// </summary>
@@ -519,6 +536,7 @@ public static class HostConfiguration
         string? deploymentSecretFile = null;
         List<string> trustedProxies = [];
         List<string> allowedOrigins = [];
+        Dictionary<string, string> externalResources = new(StringComparer.Ordinal);
         List<string> allowedHosts = [];
 
         foreach ((string key, string value) in settings)
@@ -532,6 +550,16 @@ public static class HostConfiguration
             if (key.StartsWith(FloorPrefix, StringComparison.Ordinal))
             {
                 floors[key[FloorPrefix.Length..]] = value;
+                continue;
+            }
+
+            if (key.StartsWith(ExternalResourcePrefix, StringComparison.Ordinal))
+            {
+                BindExternalResource(
+                    key[ExternalResourcePrefix.Length..],
+                    value,
+                    externalResources,
+                    rejected);
                 continue;
             }
 
@@ -659,7 +687,7 @@ public static class HostConfiguration
 
                     break;
                 default:
-                    rejected.Add($"'{key}' is not a setting this host accepts. It accepts {string.Join(", ", Simple)}, '{MountNarrowingPrefix}{{prefix}}:{{bound}}' and '{FloorPrefix}{{bound}}'.");
+                    rejected.Add($"'{key}' is not a setting this host accepts. It accepts {string.Join(", ", Simple)}, '{MountNarrowingPrefix}{{prefix}}:{{bound}}', '{FloorPrefix}{{bound}}' and '{ExternalResourcePrefix}{{surface-route}}'.");
                     break;
             }
         }
@@ -701,6 +729,7 @@ public static class HostConfiguration
 
         BindMountPrefixes(mounts, rejected);
         BindDeploymentMode(mode, modeExplicit, mounts.Count, rejected);
+        BindExternalResourceMode(mode, externalResources.Count, rejected);
 
         ManagedSyncOptions? managed = BindManaged(
             mode, managementEndpoint, deploymentId, deploymentSecretFile, rejected);
@@ -758,11 +787,73 @@ public static class HostConfiguration
             Managed = managed,
             TrustedProxies = trustedProxies,
             AllowedOrigins = allowedOrigins,
+            ExternalResources = externalResources,
             AllowedHosts = allowedHosts,
             ResponseCacheOperatorSecret = responseCacheOperatorSecret,
         };
         refusals = [];
         return true;
+    }
+
+    private static void BindExternalResource(
+        string route,
+        string resource,
+        Dictionary<string, string> externalResources,
+        List<string> rejected)
+    {
+        string key = ExternalResourcePrefix + route;
+
+        if (string.IsNullOrWhiteSpace(route) || route[0] != '/')
+        {
+            rejected.Add($"'{key}' does not name an exact mounted surface route such as '/api/full'.");
+            return;
+        }
+
+        if (!IsValidExternalResource(resource))
+        {
+            rejected.Add(
+                $"'{key}' was given an invalid external resource. External resources must be absolute HTTPS URIs without query or fragment.");
+            return;
+        }
+
+        if (externalResources.ContainsKey(route))
+        {
+            rejected.Add($"'{key}' was given more than once. One surface route may have only one external resource.");
+            return;
+        }
+
+        string? existingRoute = externalResources
+            .FirstOrDefault(pair => string.Equals(pair.Value, resource, StringComparison.Ordinal))
+            .Key;
+
+        if (existingRoute is not null)
+        {
+            rejected.Add(
+                $"The external resource assigned to '{route}' is already assigned to '{existingRoute}'. One resource identity may select only one surface.");
+            return;
+        }
+
+        externalResources.Add(route, resource);
+    }
+
+    private static bool IsValidExternalResource(string resource)
+        => !string.IsNullOrWhiteSpace(resource)
+            && resource.Length <= 2048
+            && Uri.TryCreate(resource, UriKind.Absolute, out Uri? uri)
+            && string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal)
+            && string.IsNullOrEmpty(uri.Query)
+            && string.IsNullOrEmpty(uri.Fragment);
+
+    private static void BindExternalResourceMode(
+        HostDeploymentMode mode,
+        int externalResourceCount,
+        List<string> rejected)
+    {
+        if (mode is HostDeploymentMode.Managed && externalResourceCount > 0)
+        {
+            rejected.Add(
+                $"'{ManagedModeName}' mode receives external-resource mappings from managed generation state and does not accept local '--external-resource' configuration.");
+        }
     }
 
     /// <summary>

@@ -495,6 +495,11 @@ internal sealed class ManagedSyncWorker : IDisposable
             return false;
         }
 
+        Dictionary<string, string> externalResources = generation.ExternalResources.ToDictionary(
+            binding => binding.MountPrefix + "/" + binding.SurfaceSlug,
+            binding => binding.ExternalResourceUri,
+            StringComparer.Ordinal);
+
         MountSet mounts = MountSet.From(generation.Mounts);
         IReadOnlyList<StartupRefusal> topologyRefusals = HostRouteTopologyValidation.Find(mounts);
 
@@ -521,7 +526,7 @@ internal sealed class ManagedSyncWorker : IDisposable
         }
 
         if (_binding.Listener.Transport is HostTransport.Http
-            && mounts.Mounts.Any(mount => mount.RequiresAuthorization())
+            && EngineGeneration.NeedsAllowedHostForProtectedResources(mounts, externalResources)
             && _binding.AllowedHosts.Count == 0)
         {
             generation.Dispose();
@@ -536,7 +541,8 @@ internal sealed class ManagedSyncWorker : IDisposable
         EngineGeneration candidate = new(
             number,
             mounts,
-            generation.TakeExecution());
+            generation.TakeExecution(),
+            externalResources: externalResources);
 
         Task retirement = _generations.Activate(candidate);
 

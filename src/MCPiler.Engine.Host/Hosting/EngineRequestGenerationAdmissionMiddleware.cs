@@ -62,9 +62,12 @@ internal sealed class EngineRequestGenerationAdmissionMiddleware
                 return;
             }
 
+            bool hasExternalResource = lease.Generation.TryExternalResourceIdentity(resolved, out _);
+
             if (resolved.Mount.RequiresAuthorization()
                 && (_binding.Authorization is null
-                    || !AuthorityAllowed(context.Request.Host.Value, _binding.AllowedHosts)))
+                    || (!hasExternalResource
+                        && !AuthorityAllowed(context.Request.Host.Value, _binding.AllowedHosts))))
             {
                 // Defense in depth for managed mode: a protected generation must never flow to
                 // handlers when this listener was built without an authorization boundary, even
@@ -77,6 +80,9 @@ internal sealed class EngineRequestGenerationAdmissionMiddleware
                 context.Request.Scheme,
                 context.Request.Host.Value ?? string.Empty,
                 authorizationResourcePath);
+            resourceIdentity = lease.Generation.EffectiveResourceIdentity(
+                resolved,
+                resourceIdentity);
 
             var admission = new EngineRequestGenerationAdmission(
                 address,
