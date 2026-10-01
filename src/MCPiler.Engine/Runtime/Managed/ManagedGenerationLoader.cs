@@ -393,12 +393,14 @@ public sealed class ManagedGenerationLoader : IDisposable
                     continue;
                 }
 
-                if (!IsValidExternalResource(binding.Value))
+                ExternalResourceViolation violation = ExternalResourceContract.Evaluate(binding.Value);
+                if (violation is not ExternalResourceViolation.None)
                 {
                     refusals.Add(new StartupRefusal(
                         delivered.Prefix,
                         "managed/external-resource-invalid",
-                        $"Surface '{binding.Key}' has an invalid external resource. Managed external resources must be absolute HTTPS URIs without query or fragment."));
+                        $"Surface '{binding.Key}' has an invalid external resource (violated rule '{ExternalResourceContract.RuleName(violation)}'): "
+                        + $"{ExternalResourceContract.RuleRequirement(violation)}."));
                     continue;
                 }
 
@@ -505,13 +507,6 @@ public sealed class ManagedGenerationLoader : IDisposable
             warnings);
     }
 
-    private static bool IsValidExternalResource(string resource)
-        => !string.IsNullOrWhiteSpace(resource)
-            && resource.Length <= 2048
-            && Uri.TryCreate(resource, UriKind.Absolute, out Uri? uri)
-            && string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal)
-            && string.IsNullOrEmpty(uri.Query)
-            && string.IsNullOrEmpty(uri.Fragment);
 
     /// <summary>
     /// Reads one committed mutable slot back from the local encrypted store, so a host reconciles

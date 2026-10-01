@@ -510,8 +510,17 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         Assert.Equal("g1", engine.Worker.ActiveGenerationId);
     }
 
-    [Fact]
-    public async Task A_non_https_surface_resource_mapping_is_refused_before_activation_and_leaves_g0_active()
+    [Theory]
+    [InlineData("http://tunnel.example/v1/mcp/not-https")]
+    [InlineData("/v1/mcp/not-https")]
+    [InlineData("https://tunnel.example/v1/mcp/one?channel=main")]
+    [InlineData("https://tunnel.example/v1/mcp/one#fragment")]
+    [InlineData("https://user:secret@tunnel.example/v1/mcp/one")]
+    [InlineData("https://user@tunnel.example/v1/mcp/one")]
+    [InlineData("https://user:@tunnel.example/v1/mcp/one")]
+    [InlineData("https://:@tunnel.example/v1/mcp/one")]
+    [InlineData("https://@tunnel.example/v1/mcp/one")]
+    public async Task An_invalid_surface_resource_mapping_is_refused_before_activation_and_leaves_g0_active(string invalidResource)
     {
         var original = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
         var invalid = Generation(
@@ -520,7 +529,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             prefix: "/mcp/connector",
             externalResources: new Dictionary<string, string>(StringComparer.Ordinal)
             {
-                ["full"] = "http://tunnel.example/v1/mcp/not-https",
+                ["full"] = invalidResource,
             });
 
         var deliveringInvalid = false;

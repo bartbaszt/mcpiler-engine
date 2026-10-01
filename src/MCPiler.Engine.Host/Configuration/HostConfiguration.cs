@@ -6,6 +6,8 @@ using MCPiler.Engine.Host.Hosting;
 using MCPiler.Engine.Host.Managed;
 using MCPiler.Engine.Runtime;
 
+using MCPiler.Engine.Runtime.Managed;
+
 namespace MCPiler.Engine.Host.Configuration;
 
 /// <summary>
@@ -809,10 +811,12 @@ public static class HostConfiguration
             return;
         }
 
-        if (!IsValidExternalResource(resource))
+        ExternalResourceViolation violation = ExternalResourceContract.Evaluate(resource);
+        if (violation is not ExternalResourceViolation.None)
         {
             rejected.Add(
-                $"'{key}' was given an invalid external resource. External resources must be absolute HTTPS URIs without query or fragment.");
+                $"'{key}' was given an invalid external resource (violated rule '{ExternalResourceContract.RuleName(violation)}'): "
+                + $"{ExternalResourceContract.RuleRequirement(violation)}.");
             return;
         }
 
@@ -835,14 +839,6 @@ public static class HostConfiguration
 
         externalResources.Add(route, resource);
     }
-
-    private static bool IsValidExternalResource(string resource)
-        => !string.IsNullOrWhiteSpace(resource)
-            && resource.Length <= 2048
-            && Uri.TryCreate(resource, UriKind.Absolute, out Uri? uri)
-            && string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal)
-            && string.IsNullOrEmpty(uri.Query)
-            && string.IsNullOrEmpty(uri.Fragment);
 
     private static void BindExternalResourceMode(
         HostDeploymentMode mode,

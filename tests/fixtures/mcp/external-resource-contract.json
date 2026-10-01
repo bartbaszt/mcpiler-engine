@@ -1,0 +1,187 @@
+{
+  "note": "Authored, not generated. The expected outcome of every row is written by hand and is deliberately independent of both implementations, so a defect the two share cannot be recorded here as the contract. A corpus generated from one implementation preserves that implementation's beliefs and would hide exactly the disagreement this file exists to expose.",
+  "contract": {
+    "subject": "An external MCP resource identity, and separately the tunnel id it is built from.",
+    "maxLength": 2048,
+    "scheme": "https",
+    "rules": ["non-blank", "max-length", "absolute-uri", "scheme-https", "no-query", "no-fragment", "no-userinfo"],
+    "evaluationOrder": ["non-blank", "max-length", "absolute-uri", "scheme-https", "no-query", "no-fragment", "no-userinfo"],
+    "evaluationOrderWhy": "A value may violate more than one rule. Both implementations must evaluate in this order and report the same rule name, so an operator reading Platform's refusal and Engine's refusal sees the same diagnosis rather than two different facts about the same value.",
+    "userinfoRuleNote": "The rule is that no userinfo component was written into the authority. System.Uri reports an empty UserInfo for 'https://@host/', so the repository's established string.IsNullOrEmpty(UserInfo) test accepts a value that a storage-level constraint looking for '@' refuses. The authority substring between '://' and the first '/', '?' or '#' is therefore the normative test, which is exactly equivalent: a host cannot contain '@'.",
+    "identityRuleNote": "The resource is an opaque identity compared byte-exactly. Host case, an explicit ':443', and any path spelling are part of that identity and are not rule violations."
+  },
+  "tunnelIdRules": ["non-blank", "tunnel-id-escaping", "tunnel-id-form"],
+  "tunnelIdEvaluationOrder": ["non-blank", "tunnel-id-escaping", "tunnel-id-form"],
+  "tunnelIdEvaluationOrderWhy": "The order is the pinned companion's own order. openai/tunnel-client v0.0.15 ValidateTunnelID rejects an empty id, then requires url.PathEscape(id) == id, and only then matches ^tunnel_[a-z0-9]{32}$. Because escaping is checked first, a value that breaks both escaping and form is reported as an escaping problem, which is the diagnosis the companion would give. Declaring the rules without the order left a corpus row that asserted a rule the declared order could not produce.",
+  "scopeNote": "resourceCases are cross-implementation: Platform and Engine both evaluate the same seven rules and must agree on both the outcome and the reported rule. tunnelIdCases are Platform-only because Engine receives no tunnel id and never parses the resource; the id contract belongs to the tunnel-client companion, which is why each row names the pinned companion release.",
+  "resourceCases": [
+    {
+      "name": "canonical",
+      "resource": "https://tunnel.example/v1/mcp/tunnel_0123456789abcdef0123456789abcdef",
+      "expected": "accepted",
+      "rule": null,
+      "why": "The shape both implementations must accept: absolute HTTPS, no query, no fragment, no userinfo, 70 characters."
+    },
+    {
+      "name": "at-max-length",
+      "resource": "https://tunnel.example/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/v1/mcp/tunnel_0123456789abcdef0123456789abcdef",
+      "expected": "accepted",
+      "rule": null,
+      "why": "Exactly 2048 characters. The bound is inclusive. The padding is one long path segment because no realistic deployment resource is this long, which is the whole reason the bound exists."
+    },
+    {
+      "name": "over-max-length",
+      "resource": "https://tunnel.example/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/v1/mcp/tunnel_0123456789abcdef0123456789abcdef",
+      "expected": "refused",
+      "rule": "max-length",
+      "why": "One character over the bound and identical to the accepted row in every other respect. This is the value Platform accepted as authoritative, published into a generation, and counted as a saved binding while Engine refused it deterministically. SQLite does not enforce a HasMaxLength on TEXT."
+    },
+    {
+      "name": "over-max-length-and-userinfo",
+      "resource": "https://user:secret@tunnel.example/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/v1/mcp/tunnel_0123456789abcdef0123456789abcdef",
+      "expected": "refused",
+      "rule": "max-length",
+      "why": "Violates two rules at once and pins evaluation order: max-length is reported, not no-userinfo. Without a row like this the two implementations could disagree about which problem the operator is told about."
+    },
+    {
+      "name": "userinfo-with-password",
+      "resource": "https://user:secret@tunnel.example/v1/mcp/tunnel_0123456789abcdef0123456789abcdef",
+      "expected": "refused",
+      "rule": "no-userinfo",
+      "why": "A password in the authority of a value documented as non-secret deployment state. It would be persisted in plaintext, copied into the managed generation envelope, displayed in Client Setup, and spliced into a WWW-Authenticate header by string surgery. No refusal message may echo the password."
+    },
+    {
+      "name": "userinfo-user-only",
+      "resource": "https://user@tunnel.example/v1/mcp/tunnel_0123456789abcdef0123456789abcdef",
+      "expected": "refused",
+      "rule": "no-userinfo",
+      "why": "No password, still a written userinfo component. Refusing only the password shape would leave the same channel open."
+    },
+    {
+      "name": "userinfo-empty-password",
+      "resource": "https://user:@tunnel.example/v1/mcp/tunnel_0123456789abcdef0123456789abcdef",
+      "expected": "refused",
+      "rule": "no-userinfo",
+      "why": "System.Uri reports UserInfo as 'user:'. A test that only checked whether a password was present would miss this."
+    },
+    {
+      "name": "userinfo-colon-only",
+      "resource": "https://:@tunnel.example/v1/mcp/tunnel_0123456789abcdef0123456789abcdef",
+      "expected": "refused",
+      "rule": "no-userinfo",
+      "why": "System.Uri reports UserInfo as ':'. No user, no password, and still an '@' written into the authority."
+    },
+    {
+      "name": "userinfo-empty-user",
+      "resource": "https://@tunnel.example/v1/mcp/tunnel_0123456789abcdef0123456789abcdef",
+      "expected": "refused",
+      "rule": "no-userinfo",
+      "why": "System.Uri reports UserInfo as the empty string here, so the repository's established string.IsNullOrEmpty(UserInfo) test accepts this value while a storage constraint looking for '@' refuses it. This row keeps the authority predicate and the storage constraint from diverging."
+    },
+    {
+      "name": "query-present",
+      "resource": "https://tunnel.example/v1/mcp/tunnel_0123456789abcdef0123456789abcdef?audience=other",
+      "expected": "refused",
+      "rule": "no-query",
+      "why": "A resource identity carries no query; an absent query is the only accepted form."
+    },
+    {
+      "name": "query-empty-marker",
+      "resource": "https://tunnel.example/v1/mcp/tunnel_0123456789abcdef0123456789abcdef?",
+      "expected": "refused",
+      "rule": "no-query",
+      "why": "System.Uri keeps the bare '?' in Query, so the parsed property and the literal marker agree here. A reader must not assume either."
+    },
+    {
+      "name": "fragment-present",
+      "resource": "https://tunnel.example/v1/mcp/tunnel_0123456789abcdef0123456789abcdef#mcp",
+      "expected": "refused",
+      "rule": "no-fragment",
+      "why": "A resource identity carries no fragment; clients do not send it and byte-exact comparison across the managed boundary would depend on it."
+    },
+    {
+      "name": "fragment-empty-marker",
+      "resource": "https://tunnel.example/v1/mcp/tunnel_0123456789abcdef0123456789abcdef#",
+      "expected": "refused",
+      "rule": "no-fragment",
+      "why": "System.Uri keeps the bare '#' in Fragment, so the parsed property and the literal marker agree here."
+    },
+    {
+      "name": "fragment-before-query",
+      "resource": "https://tunnel.example/v1/mcp/tunnel_0123456789abcdef0123456789abcdef#a?b",
+      "expected": "refused",
+      "rule": "no-fragment",
+      "why": "A '?' inside a fragment is not a query. Reading the raw string for a marker instead of the parsed property would report the wrong rule, and the storage constraint's literal marker checks must be understood as that constraint's weaker approximation rather than as the rule itself."
+    },
+    {
+      "name": "scheme-http",
+      "resource": "http://tunnel.example/v1/mcp/tunnel_0123456789abcdef0123456789abcdef",
+      "expected": "refused",
+      "rule": "scheme-https",
+      "why": "A published MCP resource is an OAuth protected-resource identifier and must be HTTPS."
+    },
+    {
+      "name": "scheme-uppercase-https",
+      "resource": "HTTPS://tunnel.example/v1/mcp/tunnel_0123456789abcdef0123456789abcdef",
+      "expected": "accepted",
+      "rule": null,
+      "why": "Scheme comparison is case-insensitive by specification and System.Uri normalises it. Refusing the uppercase spelling would be an accident of textual comparison, not a rule."
+    },
+    {
+      "name": "host-uppercase",
+      "resource": "https://TUNNEL.EXAMPLE/v1/mcp/tunnel_0123456789abcdef0123456789abcdef",
+      "expected": "accepted",
+      "rule": null,
+      "why": "The resource is opaque identity compared byte-exactly, so host case is part of the identity rather than a rule violation. Accepting it here does not make it equal to the lowercase spelling."
+    },
+    {
+      "name": "explicit-default-port",
+      "resource": "https://tunnel.example:443/v1/mcp/tunnel_0123456789abcdef0123456789abcdef",
+      "expected": "accepted",
+      "rule": null,
+      "why": "No rule constrains the port, and an explicit ':443' is a legitimate byte difference from the implicit form. It is a different identity, not an invalid one."
+    },
+    {
+      "name": "relative-path",
+      "resource": "/v1/mcp/tunnel_0123456789abcdef0123456789abcdef",
+      "expected": "refused",
+      "rule": "absolute-uri",
+      "why": "An OAuth resource identifier must be absolute."
+    },
+    {
+      "name": "scheme-relative",
+      "resource": "//tunnel.example/v1/mcp/tunnel_0123456789abcdef0123456789abcdef",
+      "expected": "refused",
+      "rule": "scheme-https",
+      "why": "System.Uri parses a scheme-relative reference as an absolute UNC URI whose scheme is file, so the scheme rule refuses it rather than the absoluteness rule. The row also proves the scheme check is a real comparison and not a spelling test for the lowercase word https."
+    },
+    {
+      "name": "blank",
+      "resource": "",
+      "expected": "refused",
+      "rule": "non-blank",
+      "why": "The first rule in evaluation order, so it is reported even though the value would also fail the parse."
+    },
+    {
+      "name": "whitespace-only",
+      "resource": "   ",
+      "expected": "refused",
+      "rule": "non-blank",
+      "why": "Whitespace is not blank for a length or parse test but carries no identity, so the blank rule must mean whitespace-only too."
+    }
+  ],
+  "tunnelIdCases": [
+    { "name": "accepted-form", "tunnelId": "tunnel_0123456789abcdef0123456789abcdef", "expected": "accepted", "rule": null, "why": "The form the pinned companion v0.0.15 accepts: 'tunnel_' followed by 32 lowercase alphanumeric characters." },
+    { "name": "accepted-form-non-hex-letters", "tunnelId": "tunnel_zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", "expected": "accepted", "rule": null, "why": "The pinned companion's pattern is [a-z0-9]{32}, not hexadecimal. A validator demanding hexadecimal digits would refuse an id the companion starts with, which is why hexadecimal is forbidden here." },
+    { "name": "accepted-form-padded", "tunnelId": "  tunnel_0123456789abcdef0123456789abcdef  ", "expected": "accepted", "rule": null, "why": "The companion trims surrounding whitespace before matching, so the trimmed form is the identity that gets persisted and compared byte-exactly." },
+    { "name": "suffix-31", "tunnelId": "tunnel_0123456789abcdef0123456789abcde", "expected": "refused", "rule": "tunnel-id-form", "why": "One character short of the pinned form." },
+    { "name": "suffix-33", "tunnelId": "tunnel_0123456789abcdef0123456789abcdefa", "expected": "refused", "rule": "tunnel-id-form", "why": "One character over the pinned form." },
+    { "name": "uppercase-suffix", "tunnelId": "tunnel_0123456789ABCDEF0123456789ABCDEF", "expected": "refused", "rule": "tunnel-id-form", "why": "The pinned pattern is lowercase only, and case is part of the identity compared byte-exactly." },
+    { "name": "uppercase-prefix", "tunnelId": "TUNNEL_0123456789abcdef0123456789abcdef", "expected": "refused", "rule": "tunnel-id-form", "why": "The literal prefix is 'tunnel_'." },
+    { "name": "generic-single-word", "tunnelId": "foo", "expected": "refused", "rule": "tunnel-id-form", "why": "MCPiler previously accepted any single path-safe segment up to 256 characters and reported 'Binding saved' for this, while the companion refuses at startup." },
+    { "name": "generic-with-dashes", "tunnelId": "TUNNEL-X", "expected": "refused", "rule": "tunnel-id-form", "why": "Path-safe under MCPiler's previous rule, refused by the companion." },
+    { "name": "generic-alphanumeric", "tunnelId": "abc123", "expected": "refused", "rule": "tunnel-id-form", "why": "Also path-safe under MCPiler's previous rule, refused by the companion." },
+    { "name": "needs-percent-escaping", "tunnelId": "tunnel_0123456789abcdef0123456789abcde%", "expected": "refused", "rule": "tunnel-id-escaping", "why": "This value breaks two rules: '%' is outside [a-z0-9] so the form rule fails, and url.PathEscape(id) != id so the escaping rule fails. The row pins the evaluation order: escaping is reported because the companion checks it first. An implementation that checked form first would report tunnel-id-form for the same value." },
+    { "name": "empty", "tunnelId": "", "expected": "refused", "rule": "non-blank", "why": "An empty tunnel id has no identity to build a resource from." }
+  ]
+}
