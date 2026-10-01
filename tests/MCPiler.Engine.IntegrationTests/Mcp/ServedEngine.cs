@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
-using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -209,14 +208,7 @@ internal sealed class ServedEngine : IAsyncDisposable
         _drain.Dispose();
     }
 
-    private static int ReserveLoopbackPort()
-    {
-        using TcpListener listener = new(IPAddress.Loopback, 0);
-        listener.Start();
-        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
-    }
+    private static int ReserveLoopbackPort() => LoopbackPorts.Reserve();
 
     private static async Task StopQuietlyAsync(WebApplication app)
     {

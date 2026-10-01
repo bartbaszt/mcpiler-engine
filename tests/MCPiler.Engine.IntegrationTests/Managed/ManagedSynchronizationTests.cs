@@ -5,7 +5,6 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
-using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -1089,14 +1088,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         };
     }
 
-    private static int ReserveLoopbackPort()
-    {
-        using TcpListener listener = new(IPAddress.Loopback, 0);
-        listener.Start();
-        int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
-    }
+    private static int ReserveLoopbackPort() => LoopbackPorts.Reserve();
 
     private async Task<ManagedGenerationLoader> OpenLoaderAsync()
     {

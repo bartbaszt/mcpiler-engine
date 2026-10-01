@@ -5,7 +5,6 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Net.Sockets;
 using System.Text;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -1582,14 +1581,7 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
 
         public Uri At(string route) => new(Address, route);
 
-        private static int ReserveLoopbackPort()
-        {
-            using TcpListener listener = new(IPAddress.Loopback, 0);
-            listener.Start();
-            int port = ((IPEndPoint)listener.LocalEndpoint).Port;
-            listener.Stop();
-            return port;
-        }
+        private static int ReserveLoopbackPort() => LoopbackPorts.Reserve();
 
         public async ValueTask DisposeAsync()
         {
