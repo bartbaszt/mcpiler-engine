@@ -23,7 +23,7 @@ public enum ExternalResourceViolation
     /// <summary>The value is longer than <see cref="ExternalResourceContract.MaxLength"/> characters.</summary>
     TooLong,
 
-    /// <summary>The value does not parse as an absolute URI.</summary>
+    /// <summary>The value does not write a valid absolute URI.</summary>
     NotAbsolute,
 
     /// <summary>The URI scheme is not exactly <c>https</c>.</summary>
@@ -94,22 +94,25 @@ public static class ExternalResourceContract
             return ExternalResourceViolation.TooLong;
         }
 
-        if (!Uri.TryCreate(resource, UriKind.Absolute, out Uri? uri))
+        if (!HasWrittenHttpScheme(resource, Uri.UriSchemeHttps, out bool writesHttpsScheme))
         {
             return ExternalResourceViolation.NotAbsolute;
         }
 
-        if (!string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+        if (!writesHttpsScheme)
         {
             return ExternalResourceViolation.WrongScheme;
         }
 
-        if (!string.IsNullOrEmpty(uri.Query))
+        int queryStart = resource.IndexOf('?');
+        int fragmentStart = resource.IndexOf('#');
+
+        if (queryStart >= 0 && (fragmentStart < 0 || queryStart < fragmentStart))
         {
             return ExternalResourceViolation.HasQuery;
         }
 
-        if (!string.IsNullOrEmpty(uri.Fragment))
+        if (fragmentStart >= 0)
         {
             return ExternalResourceViolation.HasFragment;
         }
@@ -166,6 +169,110 @@ public static class ExternalResourceContract
         ExternalResourceViolation.HasUserInfo => "an external resource must not carry userinfo in its authority, because it is non-secret deployment state",
         _ => "an external resource must satisfy the external-resource contract",
     };
+
+    /// <summary>
+    /// Reports whether <paramref name="resource"/> writes an absolute URI whose scheme is
+    /// <paramref name="expectedScheme"/>, comparing the scheme case-insensitively.
+    /// </summary>
+    /// <param name="resource">The candidate value.</param>
+    /// <param name="expectedScheme">The scheme the value must write.</param>
+    /// <param name="writesExpectedScheme">
+    /// <see langword="true"/> when the scheme is exactly <paramref name="expectedScheme"/>; meaningful
+    /// only when the method returns <see langword="true"/>.
+    /// </param>
+    /// <returns>
+    /// <see langword="true"/> when an absolute URI with a valid scheme is written; <see langword="false"/>
+    /// when no valid scheme is written at all, which the caller reports as
+    /// <see cref="ExternalResourceViolation.NotAbsolute"/>.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// This deliberately does not use <see cref="Uri.TryCreate(string, UriKind, out Uri)"/>. That
+    /// parser is host-dependent for a rooted or scheme-relative value: on Windows
+    /// <c>/v1/mcp/x</c> fails to parse and <c>//host/x</c> parses as a UNC <c>file</c> URI, while on
+    /// Linux <c>/v1/mcp/x</c> parses as <c>file:///v1/mcp/x</c>. The same corpus row therefore
+    /// reported <c>absolute-uri</c> on one host and <c>scheme-https</c> on another, and Platform
+    /// names the rule for the operator, so a host-dependent rule would make the two implementations
+    /// disagree by operating system. The contract is instead decided from the raw value: a scheme is
+    /// written when a valid scheme name, followed by <c>:</c>, prefixes the value, and it is absolute
+    /// only when that scheme is followed by <c>//</c> and a non-empty authority.
+    /// </para>
+    /// <para>
+    /// Every value an OAuth resource can legitimately carry uses the authority form, so the accepted
+    /// set is unchanged for real inputs: an <c>https</c> absolute URI still passes, and a relative or
+    /// scheme-relative reference is still refused (as <c>absolute-uri</c>). What changes is that the
+    /// rule naming no longer depends on the operating system.
+    /// </para>
+    /// </remarks>
+    private static bool HasWrittenHttpScheme(
+        string resource,
+        string expectedScheme,
+        out bool writesExpectedScheme)
+    {
+        writesExpectedScheme = false;
+
+        int colon = resource.IndexOf(':');
+        if (colon <= 0)
+        {
+            return false;
+        }
+
+        ReadOnlySpan<char> scheme = resource.AsSpan(0, colon);
+        if (!IsValidScheme(scheme))
+        {
+            return false;
+        }
+
+        int authorityStart = colon + 1;
+        if (authorityStart + 1 >= resource.Length
+            || resource[authorityStart] != '/'
+            || resource[authorityStart + 1] != '/')
+        {
+            return false;
+        }
+
+        int authorityFrom = authorityStart + 2;
+        int authorityEnd = resource.Length;
+        for (int index = authorityFrom; index < resource.Length; index++)
+        {
+            if (resource[index] is '/' or '?' or '#')
+            {
+                authorityEnd = index;
+                break;
+            }
+        }
+
+        if (authorityEnd == authorityFrom)
+        {
+            return false;
+        }
+
+        writesExpectedScheme = scheme.Equals(expectedScheme, StringComparison.OrdinalIgnoreCase);
+        return true;
+    }
+
+    /// <summary>
+    /// Reports whether <paramref name="scheme"/> is an RFC 3986 scheme: <c>ALPHA *( ALPHA / DIGIT /
+    /// "+" / "-" / "." )</c>.
+    /// </summary>
+    private static bool IsValidScheme(ReadOnlySpan<char> scheme)
+    {
+        if (scheme.IsEmpty || !char.IsAsciiLetter(scheme[0]))
+        {
+            return false;
+        }
+
+        for (int index = 1; index < scheme.Length; index++)
+        {
+            char c = scheme[index];
+            if (!char.IsAsciiLetterOrDigit(c) && c is not ('+' or '-' or '.'))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     /// <summary>
     /// Reports whether a userinfo component was written into the URI authority.

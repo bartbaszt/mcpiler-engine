@@ -152,8 +152,8 @@
       "name": "scheme-relative",
       "resource": "//tunnel.example/v1/mcp/tunnel_0123456789abcdef0123456789abcdef",
       "expected": "refused",
-      "rule": "scheme-https",
-      "why": "System.Uri parses a scheme-relative reference as an absolute UNC URI whose scheme is file, so the scheme rule refuses it rather than the absoluteness rule. The row also proves the scheme check is a real comparison and not a spelling test for the lowercase word https."
+      "rule": "absolute-uri",
+      "why": "A scheme-relative reference writes no scheme, so it is not absolute. System.Uri happened to parse it as a UNC file URI on Windows and a rooted path on Linux, which is exactly why the contract is decided from the raw value rather than from Uri.TryCreate."
     },
     {
       "name": "blank",
