@@ -155,13 +155,16 @@ public static class EngineWebHost
                 $"refused {first.Mount} [{first.Code}]: {first.Message}");
         }
 
-        if (binding.Authorization is not null
-            && activeGeneration.RequiresAllowedHostForProtectedResources
-            && binding.AllowedHosts.Count == 0)
+if (binding.Listener.Transport is HostTransport.Http
+            && ProtectedResourceAuthorityValidation.Find(
+                activeGeneration.Mounts,
+                activeGeneration.ExternalResources,
+                binding.AllowedHosts,
+                binding.Authorization is not null) is { } authorityRefusal)
         {
             generations.Dispose();
             throw new InvalidOperationException(
-                $"refused [auth/allowed-host-missing]: protected HTTP serving requires at least one '{HostConfiguration.AllowedHostKey}'.");
+                $"refused {authorityRefusal.Mount} [{authorityRefusal.Code}]: {authorityRefusal.Message}");
         }
 
         // The authorization pairing is a startup fact, not a request-time surprise. A mount

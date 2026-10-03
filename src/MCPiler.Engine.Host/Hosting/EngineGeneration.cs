@@ -196,25 +196,15 @@ internal sealed class EngineGeneration : IDisposable
         return _externalResources.TryGetValue(surfaceRoute, out resourceIdentity);
     }
 
-    /// <summary>
-    /// Whether any protected surface in this generation derives its resource from the request
-    /// authority and therefore needs the listener's allowed-host boundary.
+/// <summary>
+    /// The deployment-owned resource identity of every surface in this generation, keyed by
+    /// mounted route.
     /// </summary>
-    internal bool RequiresAllowedHostForProtectedResources
-        => NeedsAllowedHostForProtectedResources(Mounts, _externalResources);
-
-    internal static bool NeedsAllowedHostForProtectedResources(
-        MountSet mounts,
-        IReadOnlyDictionary<string, string> externalResources)
-    {
-        ArgumentNullException.ThrowIfNull(mounts);
-        ArgumentNullException.ThrowIfNull(externalResources);
-
-        return mounts.Mounts.Any(mount =>
-            mount.RequiresAuthorization()
-            && mount.Surfaces.Any(surface =>
-                !externalResources.ContainsKey(mount.Prefix + "/" + surface.Slug)));
-    }
+    /// <remarks>
+    /// Exposed so that the listener-authority decision can be made once, against the generation
+    /// that will actually serve, instead of being re-derived by each startup path.
+    /// </remarks>
+    internal IReadOnlyDictionary<string, string> ExternalResources => _externalResources;
 
     /// <summary>
     /// The tool definitions one surface advertises at one negotiated protocol revision.
