@@ -263,6 +263,11 @@ public sealed class HostConfigurationTests
     [InlineData("/v1/mcp/one")]
     [InlineData("https://tunnel.example.test/v1/mcp/one?channel=main")]
     [InlineData("https://tunnel.example.test/v1/mcp/one#fragment")]
+    [InlineData("https://user:secret@tunnel.example.test/v1/mcp/one")]
+    [InlineData("https://user@tunnel.example.test/v1/mcp/one")]
+    [InlineData("https://user:@tunnel.example.test/v1/mcp/one")]
+    [InlineData("https://:@tunnel.example.test/v1/mcp/one")]
+    [InlineData("https://@tunnel.example.test/v1/mcp/one")]
     public void File_mode_refuses_invalid_external_resource_uris(string resource)
     {
         List<KeyValuePair<string, string>> settings =
@@ -274,8 +279,78 @@ public sealed class HostConfigurationTests
         Assert.False(HostConfiguration.TryBind(Mounts(), settings, out _, out IReadOnlyList<string> refusals));
         Assert.Contains(
             refusals,
-            refusal => refusal.Contains("external resource", StringComparison.Ordinal)
-                && refusal.Contains("HTTPS", StringComparison.Ordinal));
+            refusal => refusal.Contains("invalid external resource", StringComparison.Ordinal)
+                && refusal.Contains("violated rule '", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The length bound is a boundary, so the two sides that share it must agree about which value is
+    /// the last permitted one. A producing side that accepts 2049 characters and a consuming side
+    /// that refuses it is the defect this bound exists to remove, and it is invisible until one
+    /// side commits a value the other will not serve.
+    /// </summary>
+    [Fact]
+    public void File_mode_refuses_one_character_past_the_longest_permitted_external_resource()
+    {
+        const string Prefix = "https://tunnel.example.test/";
+        const string Suffix = "/v1/mcp/one";
+        const int MaxLength = 2048;
+        int padding = MaxLength - Prefix.Length - Suffix.Length;
+
+        string longest = Prefix + new string('a', padding) + Suffix;
+        string tooLong = Prefix + new string('a', padding + 1) + Suffix;
+        Assert.Equal(MaxLength, longest.Length);
+        Assert.Equal(MaxLength + 1, tooLong.Length);
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), Settings(Setting("/api/full", longest)), out _, out IReadOnlyList<string> accepted));
+        Assert.Empty(accepted);
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), Settings(Setting("/api/full", tooLong)), out _, out IReadOnlyList<string> refused));
+        Assert.Contains(
+            refused,
+            refusal => refusal.Contains("violated rule 'max-length'", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// A refusal names the rule so an operator can act on it, and never quotes the value, because the
+    /// value is the thing that may be carrying a credential into what is documented non-secret
+    /// deployment state.
+    /// </summary>
+    [Fact]
+    public void A_refusal_names_the_violated_rule_and_does_not_quote_the_offending_value()
+    {
+        const string Credential = "host-configuration-userinfo-canary";
+        List<KeyValuePair<string, string>> settings =
+        [
+            new(HostConfiguration.FileStoreRootKey, "/var/lib/mcpiler"),
+            new(
+                HostConfiguration.ExternalResourcePrefix + "/api/full",
+                $"https://user:{Credential}@tunnel.example.test/v1/mcp/one"),
+        ];
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), settings, out _, out IReadOnlyList<string> refusals));
+
+        string refusal = Assert.Single(
+            refusals,
+            entry => entry.Contains("invalid external resource", StringComparison.Ordinal));
+        Assert.Contains("violated rule 'no-userinfo'", refusal, StringComparison.Ordinal);
+        Assert.Contains("must not carry userinfo", refusal, StringComparison.Ordinal);
+        Assert.DoesNotContain(Credential, refusal, StringComparison.Ordinal);
+    }
+
+    private static KeyValuePair<string, string> Setting(string route, string resource)
+        => new(HostConfiguration.ExternalResourcePrefix + route, resource);
+
+    private static List<KeyValuePair<string, string>> Settings(params KeyValuePair<string, string>[] settings)
+    {
+        var all = new List<KeyValuePair<string, string>>
+        {
+            new(HostConfiguration.FileStoreRootKey, "/var/lib/mcpiler"),
+        };
+
+        all.AddRange(settings);
+
+        return all;
     }
 
     [Fact]

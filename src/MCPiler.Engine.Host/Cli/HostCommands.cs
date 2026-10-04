@@ -545,20 +545,16 @@ public static class HostCommands
         MountSet mounts,
         HostBinding binding)
     {
-        List<StartupRefusal> refusals = [.. HostRouteTopologyValidation.Find(mounts)];
+List<StartupRefusal> refusals = [.. HostRouteTopologyValidation.Find(mounts)];
 
-        if (binding.Authorization is not null
-            && EngineGeneration.NeedsAllowedHostForProtectedResources(mounts, binding.ExternalResources)
-            && binding.AllowedHosts.Count == 0)
+        if (binding.Listener.Transport is HostTransport.Http
+            && ProtectedResourceAuthorityValidation.Find(
+                mounts,
+                binding.ExternalResources,
+                binding.AllowedHosts,
+                binding.Authorization is not null) is { } authorityRefusal)
         {
-            refusals.Add(new StartupRefusal(
-                string.Empty,
-                "auth/allowed-host-missing",
-                $"Protected HTTP serving requires at least one '{HostConfiguration.AllowedHostKey}' "
-                + $"when '{HostConfiguration.ListenKey}' does not name one concrete authority.")
-            {
-                Setting = HostConfiguration.AllowedHostKey,
-            });
+            refusals.Add(authorityRefusal);
         }
 
         return refusals;

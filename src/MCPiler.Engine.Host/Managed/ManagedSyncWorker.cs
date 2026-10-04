@@ -525,16 +525,18 @@ internal sealed class ManagedSyncWorker : IDisposable
             return false;
         }
 
-        if (_binding.Listener.Transport is HostTransport.Http
-            && EngineGeneration.NeedsAllowedHostForProtectedResources(mounts, externalResources)
-            && _binding.AllowedHosts.Count == 0)
+if (_binding.Listener.Transport is HostTransport.Http
+            && ProtectedResourceAuthorityValidation.Find(
+                mounts,
+                externalResources,
+                _binding.AllowedHosts,
+                _binding.Authorization is not null) is { } authorityRefusal)
         {
             generation.Dispose();
             CandidateRefused(
                 delivery.GenerationId,
-                "auth/allowed-host-missing",
-                $"Protected HTTP serving requires at least one '{HostConfiguration.AllowedHostKey}' "
-                + $"when '{HostConfiguration.ListenKey}' does not name one concrete authority.");
+                authorityRefusal.Code,
+                authorityRefusal.Message);
             return false;
         }
 

@@ -123,11 +123,7 @@ public sealed class MountedPolicyExecutionTests : IDisposable
     [Fact]
     public async Task Mounted_deadline_is_enforced_by_real_worker_and_pool_recovers()
     {
-        int requests = 0;
-        byte[] slow = Bytes(Sequence(20_000));
-        byte[] quick = Bytes("[1,2,3]");
-        await using LoopbackHost upstream = await JsonNext(
-            () => Interlocked.Increment(ref requests) == 1 ? slow : quick);
+        await using LoopbackHost upstream = await Json(Sequence(20_000));
 
         WorkerPoolOptions options = WorkerOptions();
         using var validator = new WorkerExpressionValidator(options);
@@ -151,10 +147,14 @@ public sealed class MountedPolicyExecutionTests : IDisposable
         Assert.True(IsError(timedOut), Text(timedOut));
         Assert.Contains("jmespath-operational-timeout", Text(timedOut), StringComparison.Ordinal);
 
-        McpExchange recovered = await CallAsync(engine, "read-value");
-        Assert.False(IsError(recovered), Text(recovered));
-        Assert.Equal("[1,2,3]", Text(recovered));
-        Assert.Equal(2, Volatile.Read(ref requests));
+        // The pool recovered: the timed-out child was killed and reaped and its slot returned, so
+        // the narrow deadline did not leave capacity charged. Asserted on the pool directly rather
+        // than by evaluating again inside the same narrow per-call budget, because that budget
+        // includes a real child-process launch and therefore measures the host as much as the pool.
+        // The "next evaluation succeeds" claim is covered without a narrow budget by
+        // ProjectionWorkerHostTests.A_worker_that_times_out_is_killed_reaped_and_replaced.
+        Assert.Equal(0, worker.ActiveWorkerCount);
+        Assert.Equal(0, worker.PendingWaiterCount);
     }
 
     [Fact]
@@ -262,18 +262,23 @@ public sealed class MountedPolicyExecutionTests : IDisposable
     public async Task Mounted_compound_timeout_bounds_workflow()
     {
         int arrivals = 0;
-        await using LoopbackHost upstream = await DelayedJson(() => Interlocked.Increment(ref arrivals), 250);
+        await using LoopbackHost upstream = await DelayedJson(() => Interlocked.Increment(ref arrivals), 10_000);
         var worker = new RecordingWorker(Bytes("{}"));
 
         await using ServedEngine engine = await ServeAsync(
             Manifest(upstream.Address, compound: true, compoundTimeoutSeconds: 2),
             worker,
-            Narrowing(compoundTimeout: TimeSpan.FromMilliseconds(50)));
+            Narrowing(compoundTimeout: TimeSpan.FromMilliseconds(1500)));
 
         McpExchange call = await CallAsync(engine, "flow");
 
         Assert.True(IsError(call), Text(call));
         Assert.Equal("Timeout", ErrorCode(call));
+
+        // The step request was issued before the workflow timeout fired. Two margins keep this
+        // host-independent: the timeout is far above the cost of issuing one loopback request, and
+        // the upstream response delay is far above the timeout, so the response cannot arrive before
+        // the bound regardless of how slow the host is.
         Assert.Equal(1, Volatile.Read(ref arrivals));
         Assert.Empty(worker.EffectiveLimits);
     }
@@ -375,18 +380,6 @@ public sealed class MountedPolicyExecutionTests : IDisposable
                 context.Response.ContentType = "application/json";
                 context.Response.ContentLength = Bytes(body).Length;
                 await context.Response.Body.WriteAsync(Bytes(body), context.RequestAborted);
-            },
-            Token);
-
-    private static Task<LoopbackHost> JsonNext(Func<byte[]> next)
-        => LoopbackHost.StartAsync(
-            async context =>
-            {
-                byte[] body = next();
-                context.Response.StatusCode = 200;
-                context.Response.ContentType = "application/json";
-                context.Response.ContentLength = body.Length;
-                await context.Response.Body.WriteAsync(body, context.RequestAborted);
             },
             Token);
 

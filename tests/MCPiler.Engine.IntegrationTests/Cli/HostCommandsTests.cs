@@ -718,6 +718,90 @@ public sealed class HostCommandsTests : IDisposable
         Assert.DoesNotContain("auth/allowed-host-missing", outcome.Output, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// Binding one protected surface's resource does not make its protected sibling servable, and
+    /// the refusal names the surface that is actually unbound.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The bound surface carries a fixed audience, so it needs no listener boundary. The unbound
+    /// sibling derives its resource identity from the request authority, which is the whole reason
+    /// the setting exists. A refusal that did not name that sibling would leave an operator with
+    /// one missing setting and no way to tell which surface still wanted it.
+    /// </para>
+    /// <para>
+    /// The last assertion is the distinct case: a mount whose every protected surface is bound
+    /// needs no allowed host at all, even on a wildcard listener. Without it, a test could pass
+    /// because the setting happened to be supplied and never prove that binding every surface
+    /// removes the requirement.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task A_protected_sibling_without_an_external_resource_still_requires_an_allowed_host()
+    {
+        string[] shared =
+        [
+            "--file-store-root", Store(),
+            "--mount", "/api=" + TwoSurfaceProtectedManifest("allowed-host-siblings"),
+            "--issuer", "https://issuer.example",
+            "--token-validation", "introspection",
+            "--introspection-endpoint", "https://issuer.example/introspect",
+            "--listen", "http://0.0.0.0:8080",
+        ];
+
+        CommandOutcome oneBound = await HostCommands.RunAsync(
+            [
+                "inspect",
+                .. shared,
+                "--external-resource", "/api/first=https://tunnel.example.test/v1/mcp/one",
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, oneBound.ExitCode);
+        Assert.Contains("auth/allowed-host-missing", oneBound.Output, StringComparison.Ordinal);
+
+        // The whole sentence is asserted, not just the route: "inspect" already prints every
+        // mounted surface, so an assertion on "/api/second" alone would be satisfied by that
+        // listing whether or not the diagnostic named it. The contiguous sentence can only come
+        // from the refusal itself, and naming only the unbound sibling is the property under test.
+        Assert.Contains(
+            "These protected surfaces have no external resource, so their resource identity is "
+            + "derived from the request authority: /api/second.",
+            oneBound.Output,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "request authority: /api/first",
+            oneBound.Output,
+            StringComparison.Ordinal);
+
+        CommandOutcome withAllowedHost = await HostCommands.RunAsync(
+            [
+                "inspect",
+                .. shared,
+                "--external-resource", "/api/first=https://tunnel.example.test/v1/mcp/one",
+                "--allowed-host", "mcp.example.com",
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Success, withAllowedHost.ExitCode);
+        Assert.DoesNotContain("auth/allowed-host-missing", withAllowedHost.Output, StringComparison.Ordinal);
+
+        CommandOutcome allBound = await HostCommands.RunAsync(
+            [
+                "inspect",
+                .. shared,
+                "--external-resource", "/api/first=https://tunnel.example.test/v1/mcp/one",
+                "--external-resource", "/api/second=https://tunnel.example.test/v1/mcp/two",
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Success, allBound.ExitCode);
+        Assert.DoesNotContain("auth/allowed-host-missing", allBound.Output, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Inspect_reports_an_open_mount_without_a_refusal()
     {
@@ -1041,6 +1125,18 @@ public sealed class HostCommandsTests : IDisposable
         return directory;
     }
 
+    /// <summary>
+    /// A protected mount with two surfaces, because the sibling case is the one the allowed-host
+    /// requirement turns on: binding one surface's resource must not make the other one servable.
+    /// </summary>
+    private string TwoSurfaceProtectedManifest(string name)
+    {
+        string directory = Path.Combine(_root, name);
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "manifest.json"), TwoSurfaceProtectedManifestText);
+        return directory;
+    }
+
     private const string ScopedManifestText = """
         {
           "manifestFormatVersion": "0.3",
@@ -1065,6 +1161,48 @@ public sealed class HostCommandsTests : IDisposable
                     "slug": "list-pets",
                     "name": "List pets",
                     "binding": { "type": "http", "operation": "GET /pets" }
+                  }
+                ]
+              }
+            }
+          }
+        }
+        """;
+
+    private const string TwoSurfaceProtectedManifestText = """
+        {
+          "manifestFormatVersion": "0.3",
+          "sections": {
+            "server": { "inline": {
+              "name": "Two surface API",
+              "surfaces": [
+                { "slug": "first", "isDefault": true, "requiredScopes": ["probe.read"],
+                  "operations": [ { "operation": "list-pets", "exposure": "direct" } ] },
+                { "slug": "second", "requiredScopes": ["probe.read"],
+                  "operations": [ { "operation": "list-orders", "exposure": "direct" } ] }
+              ]
+            } },
+            "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+            "operations": {
+              "inline": {
+                "operations": [
+                  { "key": "GET /pets", "method": "GET", "path": "/pets" },
+                  { "key": "GET /orders", "method": "GET", "path": "/orders" }
+                ]
+              }
+            },
+            "agentSurface": {
+              "inline": {
+                "operations": [
+                  {
+                    "slug": "list-pets",
+                    "name": "List pets",
+                    "binding": { "type": "http", "operation": "GET /pets" }
+                  },
+                  {
+                    "slug": "list-orders",
+                    "name": "List orders",
+                    "binding": { "type": "http", "operation": "GET /orders" }
                   }
                 ]
               }

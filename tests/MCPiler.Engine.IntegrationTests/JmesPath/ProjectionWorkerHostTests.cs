@@ -358,16 +358,24 @@ public sealed class ProjectionWorkerHostTests
     {
         // The evaluation is a legitimate expression over a body large enough that the unchanged
         // evaluator's quadratic sort cannot finish inside the deadline, so the deadline itself —
-        // not a special test mode — is what stops it.
-        using var host = CreateHost(TimeSpan.FromMilliseconds(1500));
+        // not a special test mode — is what stops it. The host ceiling is generous and the timeout
+        // comes from the per-call declared deadline, so the same host can also serve the recovery
+        // call under a full budget. A single narrow host deadline would make the recovery call
+        // (whose budget includes a real child-process launch) fail on a starved host, which is a
+        // property of the machine rather than of the pool.
+        using var host = CreateHost(TimeSpan.FromSeconds(30));
 
         string body = "[" + string.Join(",", Enumerable.Range(1, 20_000).Reverse()) + "]";
 
-        JmesPathEvaluationResult timedOut = await EvaluateAsync(host, "sort(@)", body);
+        JmesPathEvaluationResult timedOut = await EvaluateAsync(host, "sort(@)", body, Deadline(250));
 
         Assert.False(timedOut.Succeeded);
         Assert.Equal(JmesPathFailureClass.OperationalTimeout, timedOut.Failure!.FailureClass);
         Assert.Contains("worker call exceeded", timedOut.Failure!.Message, StringComparison.Ordinal);
+
+        // The slot is released while the host is still alive, so the pool is not deadlocked on the
+        // timed-out child.
+        Assert.Equal(0, host.ActiveWorkerCount);
 
         // The pool survived: the next evaluation gets a fresh, healthy child.
         JmesPathEvaluationResult next = await EvaluateAsync(host, "length(@)", "[1,2,3]");
@@ -497,6 +505,10 @@ public sealed class ProjectionWorkerHostTests
 
         return await waiting.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
     }
+
+    /// <summary>The suite's permissive limits with a narrower declared evaluation deadline.</summary>
+    private static JmesPathLimits Deadline(int milliseconds)
+        => Limits with { MaxEvaluationMilliseconds = milliseconds };
 
     private static async Task<JmesPathEvaluationResult> EvaluateAsync(
         ProjectionWorkerHost host,

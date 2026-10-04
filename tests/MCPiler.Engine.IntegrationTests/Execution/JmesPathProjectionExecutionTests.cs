@@ -295,9 +295,19 @@ public sealed class JmesPathProjectionExecutionTests : IDisposable
         string items = "[" + string.Join(",", CountDown(20_000)) + "]";
         await using var host = await StartJsonAsync(items);
 
-        using var pool = Worker(deadline: TimeSpan.FromMilliseconds(1500));
+        // The host ceiling is generous and the timeout comes from the declared per-call deadline, so
+        // the same pool can serve the recovery call under a full budget. A narrow host deadline would
+        // fold the recovery into the same budget, and because that budget includes a real
+        // child-process launch the recovery would fail on a starved host for a reason that is about
+        // the machine rather than about the pool.
+        using var pool = Worker(deadline: TimeSpan.FromSeconds(30));
+        JmesPathLimits limits = JmesPathLimits.AuthoringDefault with
+        {
+            MaxResultNodes = 50_000,
+            MaxEvaluationMilliseconds = 250,
+        };
 
-        var result = await Execute(host.Address, "sort(@)", worker: pool);
+        var result = await Execute(host.Address, "sort(@)", worker: pool, limits: limits);
 
         Assert.Equal(ExecutionFailureKind.Transformation, result.Failure);
 
