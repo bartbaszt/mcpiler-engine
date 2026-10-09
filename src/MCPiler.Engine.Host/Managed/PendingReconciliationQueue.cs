@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Text.Json;
 
 namespace MCPiler.Engine.Host.Managed;
@@ -37,6 +38,20 @@ internal sealed class PendingReconciliationQueue
         _diagnostics = diagnostics;
     }
 
+    /// <summary>
+    /// Test seam: invoked after <see cref="Add"/> has read the current entry and before it applies
+    /// its conditional write, so a test can interleave a concurrent mutation deterministically.
+    /// Production code never sets it.
+    /// </summary>
+    internal Action? OnAddRead { get; set; }
+
+    /// <summary>
+    /// Test seam: invoked after <see cref="Acknowledge"/> has read the current entry and before it
+    /// applies its conditional remove, so a test can interleave a concurrent mutation deterministically.
+    /// Production code never sets it.
+    /// </summary>
+    internal Action? OnAcknowledgeRead { get; set; }
+
     /// <summary>Records one committed rotation as awaiting acknowledgement.</summary>
     public void Add(
         string mount,
@@ -47,20 +62,47 @@ internal sealed class PendingReconciliationQueue
         long runtimeRevision)
     {
         var key = new Key(mount, profileId, slot);
+        var sequence = Interlocked.Increment(ref _sequence);
 
-        // Keep the newest authoritative revision. A replay that queues an older pair after a live
-        // rotation has already queued a newer one must not overwrite it: the Platform would refuse
-        // RevisionNotSequential and the newer report would be dropped.
-        if (_pending.TryGetValue(key, out Entry? queued) && queued.RuntimeRevision >= runtimeRevision)
+        // A compare-and-swap loop: read-decide-write must be one atomic unit. A plain
+        // TryGetValue-then-indexer set lets two concurrent Add calls interleave so an older revision
+        // overwrites a newer one, and the Platform would then refuse the report as
+        // RevisionNotSequential and the newer credential change would be lost.
+        while (true)
         {
-            return;
-        }
+            _pending.TryGetValue(key, out var queued);
+            OnAddRead?.Invoke();
 
-        _pending[key] = new Entry(
-            authorityEpoch,
-            previousRuntimeRevision,
-            runtimeRevision,
-            Interlocked.Increment(ref _sequence));
+            // Keep the newest authoritative revision. A replay that queues an older pair after a live
+            // rotation has already queued a newer one must not overwrite it.
+            if (queued is not null && queued.RuntimeRevision >= runtimeRevision)
+            {
+                return;
+            }
+
+            // Coalescing must preserve the BASE the Platform has to advance from, not the previous
+            // revision of the newest rotation. Two sequential rotations (0->1 then 1->2) before the
+            // first send report previous=0, revision=2 so the Platform can accept them as one atomic
+            // forward transition (R4.1). Sending previous=1 while the Platform is still at 0 would be
+            // refused as a revision mismatch and the newer credential would be lost.
+            var basePrevious = queued is not null && queued.AuthorityEpoch == authorityEpoch
+                ? queued.PreviousRuntimeRevision
+                : previousRuntimeRevision;
+            var candidate = new Entry(authorityEpoch, basePrevious, runtimeRevision, sequence);
+            if (queued is null)
+            {
+                if (_pending.TryAdd(key, candidate))
+                {
+                    break;
+                }
+            }
+            else if (_pending.TryUpdate(key, candidate, queued))
+            {
+                break;
+            }
+
+            // The entry changed under us; re-read and re-decide against the current value.
+        }
 
         Trim();
     }
@@ -117,10 +159,22 @@ internal sealed class PendingReconciliationQueue
     {
         var key = new Key(mount, profileId, slot);
 
-        if (_pending.TryGetValue(key, out var entry) && entry.RuntimeRevision <= runtimeRevision)
+        if (!_pending.TryGetValue(key, out var entry))
         {
-            _pending.TryRemove(key, out _);
+            return;
         }
+
+        OnAcknowledgeRead?.Invoke();
+
+        if (entry.RuntimeRevision > runtimeRevision)
+        {
+            return;
+        }
+
+        // Remove only the exact pair that was read. A plain TryRemove(key) could delete a newer entry
+        // admitted after the read - a concurrent Add(N+1) racing Acknowledge(N) - which would drop the
+        // newer rotation report even though it was never acknowledged.
+        _pending.TryRemove(new KeyValuePair<Key, Entry>(key, entry));
     }
 
     /// <summary>How many reports are still awaiting acknowledgement.</summary>
@@ -140,8 +194,12 @@ internal sealed class PendingReconciliationQueue
 /// <param name="ProfileId">The manifest-local profile identity.</param>
 /// <param name="Slot">The rotated slot.</param>
 /// <param name="AuthorityEpoch">The authority epoch the rotation happened under.</param>
-/// <param name="PreviousRuntimeRevision">The revision before the rotation.</param>
-/// <param name="RuntimeRevision">The revision the rotation established.</param>
+/// <param name="PreviousRuntimeRevision">
+/// The base revision the Platform must advance from: the previous revision of the earliest
+/// unreconciled rotation for this identity, so coalesced rotations are reported as one atomic
+/// forward transition.
+/// </param>
+/// <param name="RuntimeRevision">The newest revision the rotations established.</param>
 internal sealed record PendingReconciliation(
     string Mount,
     string ProfileId,

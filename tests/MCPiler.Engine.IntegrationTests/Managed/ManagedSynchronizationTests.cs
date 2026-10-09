@@ -876,6 +876,82 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Multiple_rotations_before_the_first_reconciliation_converge_in_one_report()
+    {
+        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+
+        var reconciliations = new List<JsonObject>();
+
+        await using var platform = await PlatformAsync(_ => Response.Generation(generation));
+        platform.OnReconcile = body =>
+        {
+            lock (reconciliations)
+            {
+                reconciliations.Add(JsonNode.Parse(body)!.AsObject());
+            }
+
+            return Response.Bytes(
+                JsonSerializer.SerializeToUtf8Bytes(new { outcome = "recorded" }),
+                isGeneration: false);
+        };
+
+        (ManagedGenerationLoader loader, FileMutableSlotStore slots) = await OpenLoaderWithStateAsync();
+
+        await using var process = await StartAsync(platform, loader);
+
+        Assert.Equal("g1", process.Worker.ActiveGenerationId);
+
+        // Two sequential rotations commit before any report is sent: the durable record advances
+        // 0 -> 1 -> 2 while Platform is still at 0. The report must carry previous=0, revision=2 so
+        // Platform accepts them as one transition instead of refusing a revision mismatch (R4.1).
+        await slots.ReplaceAsync(
+            new MutableSlotRecord(
+                "oauth2-client-credentials",
+                "clientSecret",
+                ScopeFingerprint: null,
+                AuthorityEpoch: 1,
+                RuntimeRevision: 2,
+                "CANARY-rotated-value-twice"),
+            TestContext.Current.CancellationToken);
+
+        process.Worker.RotationCommitted(
+            "/mcp/connector",
+            "oauth2-client-credentials",
+            "clientSecret",
+            authorityEpoch: 1,
+            previousRuntimeRevision: 0,
+            runtimeRevision: 1);
+        process.Worker.RotationCommitted(
+            "/mcp/connector",
+            "oauth2-client-credentials",
+            "clientSecret",
+            authorityEpoch: 1,
+            previousRuntimeRevision: 1,
+            runtimeRevision: 2);
+
+        await WaitForAsync(() =>
+        {
+            lock (reconciliations)
+            {
+                return reconciliations.Count > 0;
+            }
+        });
+
+        JsonObject report;
+
+        lock (reconciliations)
+        {
+            report = reconciliations[0];
+        }
+
+        Assert.Equal(0, report["previousRuntimeRevision"]!.GetValue<long>());
+        Assert.Equal(2, report["runtimeRevision"]!.GetValue<long>());
+        Assert.Equal("CANARY-rotated-value-twice", report["value"]!.GetValue<string>());
+
+        await WaitForAsync(() => process.Worker.PendingReconciliations == 0);
+    }
+
+    [Fact]
     public async Task A_rotation_with_no_durable_record_is_dropped_rather_than_invented()
     {
         var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");

@@ -669,6 +669,193 @@ public sealed class RuntimeSecretStoreTests : IDisposable
             .LoadAsync("oauth", "refreshToken", TestContext.Current.CancellationToken));
     }
 
+    [Fact]
+    public async Task A_regressive_revision_is_refused_and_keeps_the_newer_record()
+    {
+        // R4.3: the durable store enforces monotonicity. An older writer that finishes after a newer
+        // one must not overwrite the newer refresh credential, which the provider has already retired.
+        var store = Store();
+        await store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", 1, 11, "newer-value"),
+            TestContext.Current.CancellationToken);
+
+        var failure = await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", 1, 10, "stale-value"),
+            TestContext.Current.CancellationToken).AsTask());
+
+        Assert.Contains("not newer", failure.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("stale-value", failure.Message, StringComparison.Ordinal);
+
+        var loaded = await store.LoadAsync("oauth", "refreshToken", TestContext.Current.CancellationToken);
+        Assert.Equal(11, loaded!.RuntimeRevision);
+        Assert.Equal("newer-value", loaded.Value);
+    }
+
+    [Fact]
+    public async Task An_equal_revision_replacement_commits_the_newest_value()
+    {
+        // The revision is derived from the declared generation, so two rotations can carry the same
+        // declared revision before reconciliation. An equal revision is not older and the later
+        // commit is the newer credential, so it replaces the previous value in place.
+        var store = Store();
+        await store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", 1, 3, "first"),
+            TestContext.Current.CancellationToken);
+
+        await store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", 1, 3, "second"),
+            TestContext.Current.CancellationToken);
+
+        var loaded = await store.LoadAsync("oauth", "refreshToken", TestContext.Current.CancellationToken);
+        Assert.Equal("second", loaded!.Value);
+        Assert.Equal(3, loaded.RuntimeRevision);
+    }
+
+    [Fact]
+    public async Task A_lower_authority_epoch_is_refused()
+    {
+        var store = Store();
+        await store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", AuthorityEpoch: 3, RuntimeRevision: 9, "epoch-3"),
+            TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", AuthorityEpoch: 2, RuntimeRevision: 100, "epoch-2"),
+            TestContext.Current.CancellationToken).AsTask());
+
+        var loaded = await store.LoadAsync("oauth", "refreshToken", TestContext.Current.CancellationToken);
+        Assert.Equal(3, loaded!.AuthorityEpoch);
+        Assert.Equal("epoch-3", loaded.Value);
+    }
+
+    [Fact]
+    public async Task A_newer_authority_epoch_supersedes_a_higher_revision()
+    {
+        // The revision counter is scoped to its epoch, so an explicit operator epoch advance
+        // supersedes regardless of the previous epoch's revision.
+        var store = Store();
+        await store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", AuthorityEpoch: 1, RuntimeRevision: 9, "epoch-1"),
+            TestContext.Current.CancellationToken);
+
+        await store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", AuthorityEpoch: 2, RuntimeRevision: 0, "epoch-2"),
+            TestContext.Current.CancellationToken);
+
+        var loaded = await store.LoadAsync("oauth", "refreshToken", TestContext.Current.CancellationToken);
+        Assert.Equal(2, loaded!.AuthorityEpoch);
+        Assert.Equal(0, loaded.RuntimeRevision);
+        Assert.Equal("epoch-2", loaded.Value);
+    }
+
+    [Fact]
+    public async Task Concurrent_replacements_of_one_identity_advance_to_the_newest_revision()
+    {
+        // R4.3: replacements for one identity are serialized, so a newer writer cannot interleave
+        // with an older one and leave the older revision authoritative.
+        var store = Store();
+        await store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", 1, 5, "base"),
+            TestContext.Current.CancellationToken);
+
+        using var entered = new ManualResetEventSlim(false);
+        using var release = new ManualResetEventSlim(false);
+        var first = 1;
+        store.TempFlushedBarrier = ct =>
+        {
+            if (Interlocked.Exchange(ref first, 0) == 1)
+            {
+                entered.Set();
+                release.Wait(ct);
+            }
+
+            return ValueTask.CompletedTask;
+        };
+
+        var older = Task.Run(() => store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", 1, 6, "v6"),
+            TestContext.Current.CancellationToken).AsTask(), TestContext.Current.CancellationToken);
+        Assert.True(entered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+
+        var newer = Task.Run(() => store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", 1, 7, "v7"),
+            TestContext.Current.CancellationToken).AsTask(), TestContext.Current.CancellationToken);
+
+        // While the older writer holds the identity gate, the newer writer cannot have committed.
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+        Assert.False(newer.IsCompleted);
+
+        release.Set();
+        await older;
+        await newer;
+
+        var loaded = await store.LoadAsync("oauth", "refreshToken", TestContext.Current.CancellationToken);
+        Assert.Equal(7, loaded!.RuntimeRevision);
+        Assert.Equal("v7", loaded.Value);
+    }
+
+    [Fact]
+    public void The_runtime_state_directory_is_restricted_on_windows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var store = Store();
+
+        Assert.True(FileMutableSlotStore.IsRestrictiveWindowsAcl(store.Root, isDirectory: true));
+    }
+
+    [Fact]
+    public async Task A_committed_record_file_is_restricted_on_windows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var store = Store();
+        await store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", 1, 1, PlaintextCanary),
+            TestContext.Current.CancellationToken);
+
+        var recordPath = Directory
+            .GetFiles(store.Root, "*" + FileMutableSlotStore.RecordExtension)
+            .Single();
+
+        Assert.True(FileMutableSlotStore.IsRestrictiveWindowsAcl(recordPath, isDirectory: false));
+    }
+
+    [Fact]
+    public void An_unrestricted_directory_is_never_silently_accepted_on_windows()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        // A directory that keeps its inherited (unrestricted) ACEs is detected as non-conformant.
+        var loose = Path.Combine(NewRoot(), "loose");
+        Directory.CreateDirectory(loose);
+        _roots.Add(loose);
+        Assert.False(FileMutableSlotStore.IsRestrictiveWindowsAcl(loose, isDirectory: true));
+
+        // And when the store cannot establish the contract it fails closed rather than opening an
+        // unrestricted runtime-state directory.
+        FileMutableSlotStore.WindowsAclApplierForTesting = (_, _) => false;
+        try
+        {
+            var root = Path.Combine(NewRoot(), "mount-a");
+            _roots.Add(root);
+            Assert.Throws<InvalidOperationException>(() => new FileMutableSlotStore(root, "mount-a", Key));
+        }
+        finally
+        {
+            FileMutableSlotStore.WindowsAclApplierForTesting = null;
+        }
+    }
+
     private FileMutableSlotStore Store()
     {
         var root = Path.Combine(NewRoot(), "mount-a");

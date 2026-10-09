@@ -1,5 +1,9 @@
 using System.Collections.Concurrent;
+using System.Runtime.Versioning;
+using System.Security;
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -88,6 +92,15 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
     /// </summary>
     private static readonly ConcurrentDictionary<string, byte> ReclaimedRoots = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// Per-(root, mount, profile, slot) write gates shared by every store instance in this process,
+    /// so a replacement's read-compare-write is atomic against concurrent replacements of the same
+    /// identity. The map is bounded by the identities a process writes (the store itself is bounded
+    /// by <see cref="DefaultMaximumRecords"/>); it is never pruned, matching the store's process
+    /// lifetime.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> IdentityGates = new(StringComparer.Ordinal);
+
     private readonly string _root;
     private readonly string _mountIdentity;
     private readonly byte[] _key;
@@ -142,6 +155,12 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
     /// </summary>
     internal Func<string, bool>? PermissionSetter { get; set; }
 
+    /// <summary>
+    /// Test seam replacing the Windows ACL applier. When set, it decides whether the contract holds
+    /// instead of the real ACL implementation; tests use it to force the fail-closed path.
+    /// </summary>
+    internal static Func<string, bool, bool>? WindowsAclApplierForTesting { get; set; }
+
     /// <summary>The bounded number of committed records retained after a successful replacement.</summary>
     internal int MaximumRecords { get; set; } = DefaultMaximumRecords;
 
@@ -185,12 +204,46 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
     {
         ArgumentNullException.ThrowIfNull(record);
 
+        // Serialize every write to one (mount, profile, slot) identity in this process: the
+        // read-compare-replace below must be atomic, or an older writer that read the record before
+        // a concurrent writer advanced it could overwrite the newer revision afterwards. The gate is
+        // keyed by root and identity and is static, so every store instance over the same directory
+        // shares it. Cross-process serialization is not provided here; the Platform runs a single
+        // Engine process against the store (a second process writing the same root is undefined).
+        var gate = IdentityGate(_root, _mountIdentity, record.ProfileId, record.Slot);
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await ReplaceLockedAsync(record, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private async ValueTask ReplaceLockedAsync(MutableSlotRecord record, CancellationToken cancellationToken)
+    {
+        // Monotonicity: a record may only advance its identity. A write whose authority epoch is
+        // older, or whose runtime revision does not advance within the same epoch, is refused
+        // fail-closed rather than allowed to overwrite a newer committed value — which would lose a
+        // refresh token the provider already retired in favour of the newer one. A newer authority
+        // epoch supersedes unconditionally, because the revision counter is scoped to its epoch.
+        var target = RecordPath(_mountIdentity, record.ProfileId, record.Slot);
+        var existing = ReadExisting(record.ProfileId, record.Slot, target);
+        if (existing is not null && IsRegressive(record, existing))
+        {
+            throw Failed(
+                record.ProfileId,
+                record.Slot,
+                "the runtime-state record is not newer than the stored revision and was refused.");
+        }
+
         // Refuse a new identity at the cap before anything is written, so a bounded store never
         // has to evict a live identity to make room.
         EnsureCapacityFor(record);
 
         var envelope = Encode(record);
-        var target = RecordPath(_mountIdentity, record.ProfileId, record.Slot);
         var temporary = target + TemporarySuffix + Convert.ToHexString(RandomNumberGenerator.GetBytes(8));
 
         try
@@ -243,6 +296,52 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
         // reported as failed because the directory could not be compacted.
         TryCompactBestEffort();
     }
+
+    private static SemaphoreSlim IdentityGate(string root, string mount, string profileId, string slot)
+    {
+        var key = string.Join('\u001f', root, mount, profileId, slot);
+        return IdentityGates.GetOrAdd(key, static _ => new SemaphoreSlim(1, 1));
+    }
+
+    /// <summary>
+    /// Reads the current record for one identity, or null when none exists. A record that exists but
+    /// cannot be read or authenticated is reported fail-closed rather than treated as absent, so a
+    /// replacement never silently overwrites evidence it could not interpret.
+    /// </summary>
+    private MutableSlotRecord? ReadExisting(string profileId, string slot, string target)
+    {
+        byte[] envelope;
+        try
+        {
+            envelope = File.ReadAllBytes(target);
+        }
+        catch (FileNotFoundException)
+        {
+            return null;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw Failed(profileId, slot, "the record cannot be read.", ex);
+        }
+
+        return Decode(profileId, slot, envelope);
+    }
+
+    /// <summary>
+    /// True when <paramref name="incoming"/> is strictly older than <paramref name="existing"/> and
+    /// must not replace it: a lower authority epoch, or a lower runtime revision within the same
+    /// epoch. An equal revision is not older and is committed as the newest value: the revision is
+    /// derived from the declared generation, so two rotations can carry the same declared revision
+    /// before reconciliation, and the later commit is the newer credential the provider issued.
+    /// </summary>
+    private static bool IsRegressive(MutableSlotRecord incoming, MutableSlotRecord existing)
+        => incoming.AuthorityEpoch < existing.AuthorityEpoch
+            || (incoming.AuthorityEpoch == existing.AuthorityEpoch
+                && incoming.RuntimeRevision < existing.RuntimeRevision);
 
     private MutableSlotRecord? Decode(string profileId, string slot, byte[] envelope)
     {
@@ -456,7 +555,7 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
 
         if (OperatingSystem.IsWindows())
         {
-            return true;
+            return ApplyWindowsAcl(path, isDirectory: true);
         }
 
         try
@@ -495,7 +594,7 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
     {
         if (OperatingSystem.IsWindows())
         {
-            return true;
+            return ApplyWindowsAcl(path, isDirectory: false);
         }
 
         try
@@ -511,6 +610,171 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return false;
+        }
+    }
+
+    private static bool ApplyWindowsAcl(string path, bool isDirectory)
+        => WindowsAclApplierForTesting is { } applier
+            ? applier(path, isDirectory)
+            : TryApplyRestrictiveWindowsAcl(path, isDirectory);
+
+    /// <summary>
+    /// Establishes and verifies a restrictive ACL on Windows: inheritance is disabled and only the
+    /// running account, LocalSystem and the built-in Administrators may hold an allow rule. Returns
+    /// <c>false</c> when the contract cannot be established or verified, so the caller fails closed
+    /// rather than accepting an unrestricted runtime-state directory.
+    /// </summary>
+    private static bool TryApplyRestrictiveWindowsAcl(string path, bool isDirectory)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        try
+        {
+            var owner = WindowsIdentity.GetCurrent().User;
+            if (owner is null)
+            {
+                return false;
+            }
+
+            FileSystemSecurity security;
+            if (isDirectory)
+            {
+                security = new DirectorySecurity();
+            }
+            else
+            {
+                security = new FileSecurity();
+            }
+
+            security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            var inheritance = isDirectory
+                ? InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit
+                : InheritanceFlags.None;
+            foreach (var sid in AllowedSids(owner))
+            {
+                security.AddAccessRule(new FileSystemAccessRule(
+                    sid,
+                    FileSystemRights.FullControl,
+                    inheritance,
+                    PropagationFlags.None,
+                    AccessControlType.Allow));
+            }
+
+            if (isDirectory)
+            {
+                new DirectoryInfo(path).SetAccessControl((DirectorySecurity)security);
+            }
+            else
+            {
+                new FileInfo(path).SetAccessControl((FileSecurity)security);
+            }
+
+            return IsRestrictiveWindowsAcl(path, isDirectory, owner);
+        }
+        catch (Exception ex) when (ex is IOException
+            or UnauthorizedAccessException
+            or PlatformNotSupportedException
+            or SecurityException
+            or IdentityNotMappedException
+            or ArgumentException
+            or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="path"/> currently carries the restrictive Windows ACL contract for the
+    /// running account. Used by the post-apply verification and by tests.
+    /// </summary>
+    internal static bool IsRestrictiveWindowsAcl(string path, bool isDirectory)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        var owner = WindowsIdentity.GetCurrent().User;
+        return owner is not null && IsRestrictiveWindowsAcl(path, isDirectory, owner);
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static bool IsRestrictiveWindowsAcl(string path, bool isDirectory, SecurityIdentifier owner)
+    {
+        try
+        {
+            FileSystemSecurity security;
+            if (isDirectory)
+            {
+                security = new DirectoryInfo(path).GetAccessControl(AccessControlSections.Access);
+            }
+            else
+            {
+                security = new FileInfo(path).GetAccessControl(AccessControlSections.Access);
+            }
+
+            if (!security.AreAccessRulesProtected)
+            {
+                return false;
+            }
+
+            var allowed = AllowedSids(owner);
+            var ownerAllowed = false;
+            foreach (FileSystemAccessRule rule in security.GetAccessRules(true, false, typeof(SecurityIdentifier)))
+            {
+                if (rule.AccessControlType != AccessControlType.Allow
+                    || rule.IdentityReference is not SecurityIdentifier sid)
+                {
+                    continue;
+                }
+
+                if (!allowed.Contains(sid))
+                {
+                    return false;
+                }
+
+                if (sid.Equals(owner))
+                {
+                    ownerAllowed = true;
+                }
+            }
+
+            return ownerAllowed;
+        }
+        catch (Exception ex) when (ex is IOException
+            or UnauthorizedAccessException
+            or PlatformNotSupportedException
+            or SecurityException
+            or ArgumentException
+            or InvalidOperationException)
+        {
+            return false;
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static HashSet<SecurityIdentifier> AllowedSids(SecurityIdentifier owner)
+    {
+        var allowed = new HashSet<SecurityIdentifier> { owner };
+        AddWellKnownSid(allowed, WellKnownSidType.LocalSystemSid);
+        AddWellKnownSid(allowed, WellKnownSidType.BuiltinAdministratorsSid);
+        return allowed;
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static void AddWellKnownSid(HashSet<SecurityIdentifier> allowed, WellKnownSidType type)
+    {
+        try
+        {
+            allowed.Add(new SecurityIdentifier(type, null));
+        }
+        catch (IdentityNotMappedException)
+        {
+            // A host without the well-known account cannot be constrained by it; the running
+            // account alone still satisfies the contract.
         }
     }
 
