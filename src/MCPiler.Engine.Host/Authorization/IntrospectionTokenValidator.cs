@@ -33,6 +33,19 @@ namespace MCPiler.Engine.Host.Authorization;
 internal sealed class IntrospectionTokenValidator : ITokenValidator
 {
     private const int NegativeCacheSeconds = 5;
+
+    /// <summary>The most distinct token introspections one process will coalesce at once.</summary>
+    /// <remarks>
+    /// Distinct in-flight keys are bounded independently of the result cache: without this a burst
+    /// of distinct tokens would each add a permanent <c>_inFlight</c> entry and waiter, so the map
+    /// and its retained task state would grow without bound even though the result cache is capped.
+    /// A caller beyond the bound takes its own fresh fail-closed path rather than being retained.
+    /// </remarks>
+    internal const int MaximumInFlight = 512;
+
+    /// <summary>The most bytes read from an introspection response body before it is refused.</summary>
+    internal const int MaximumResponseBodyBytes = 256 * 1024;
+
     private readonly IntrospectionResultCache _cache = new();
     private readonly ConcurrentDictionary<string, TaskCompletionSource<TokenVerification>> _inFlight = new(StringComparer.Ordinal);
     private readonly HttpClient _client;
@@ -44,6 +57,9 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
     private readonly TimeProvider _clock;
 
     private string? _endpoint;
+
+    /// <summary>The number of distinct tokens currently coalesced. For bounded-growth assertions.</summary>
+    internal int InFlightCount => _inFlight.Count;
 
     internal IntrospectionTokenValidator(
         HttpClient client,
@@ -86,16 +102,29 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
             return cached!;
         }
 
-        TaskCompletionSource<TokenVerification> candidate = new(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        TaskCompletionSource<TokenVerification> shared = _inFlight.GetOrAdd(key, candidate);
-
-        if (ReferenceEquals(candidate, shared))
+        // A key already in flight always joins. A genuinely new key is admitted only while distinct
+        // in-flight work is under the bound; otherwise the caller validates on its own fresh path
+        // rather than being retained, so the map and its waiters cannot grow without bound.
+        if (!_inFlight.TryGetValue(key, out TaskCompletionSource<TokenVerification>? existing))
         {
-            _ = CompleteSingleFlightAsync(key, token, candidate);
+            if (_inFlight.Count >= MaximumInFlight)
+            {
+                return await ValidateFreshFailClosedAsync(token)
+                    .WaitAsync(cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            TaskCompletionSource<TokenVerification> candidate = new(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            existing = _inFlight.GetOrAdd(key, candidate);
+
+            if (ReferenceEquals(candidate, existing))
+            {
+                _ = CompleteSingleFlightAsync(key, token, candidate);
+            }
         }
 
-        return await shared.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        return await existing.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private async Task CompleteSingleFlightAsync(
@@ -183,9 +212,13 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
                 return TokenVerification.Inactive;
             }
 
-            using JsonDocument document = await JsonDocument.ParseAsync(
-                await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false),
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+            byte[]? body = await ReadBoundedAsync(response, cancellationToken).ConfigureAwait(false);
+            if (body is null)
+            {
+                return TokenVerification.Inactive;
+            }
+
+            using JsonDocument document = JsonDocument.Parse(body);
 
             JsonElement root = document.RootElement;
 
@@ -265,6 +298,40 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
 
     private static string Digest(string token)
         => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
+
+    /// <summary>
+    /// Reads an introspection body up to <see cref="MaximumResponseBodyBytes"/>, returning null when
+    /// the body exceeds the bound. The length is enforced while streaming so an oversized or
+    /// chunked response is never fully buffered before it is refused.
+    /// </summary>
+    private static async Task<byte[]?> ReadBoundedAsync(
+        HttpResponseMessage response,
+        CancellationToken cancellationToken)
+    {
+        if (response.Content.Headers.ContentLength is { } declared
+            && declared > MaximumResponseBodyBytes)
+        {
+            return null;
+        }
+
+        await using Stream stream = await response.Content
+            .ReadAsStreamAsync(cancellationToken)
+            .ConfigureAwait(false);
+        using MemoryStream buffer = new();
+        byte[] chunk = new byte[8192];
+        int read;
+        while ((read = await stream.ReadAsync(chunk, cancellationToken).ConfigureAwait(false)) > 0)
+        {
+            if (buffer.Length + read > MaximumResponseBodyBytes)
+            {
+                return null;
+            }
+
+            buffer.Write(chunk, 0, read);
+        }
+
+        return buffer.ToArray();
+    }
 
     /// <summary>
     /// Resolves the introspection endpoint once, then reuses the answer. Discovery that ran

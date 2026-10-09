@@ -20,7 +20,18 @@ namespace MCPiler.Engine.Host.Managed;
 /// </summary>
 internal sealed class PendingReconciliationQueue
 {
+    /// <summary>The default maximum number of distinct pending slot identities retained.</summary>
+    public const int DefaultMaximumEntries = 256;
+
     private readonly ConcurrentDictionary<Key, Entry> _pending = new();
+    private readonly int _maximumEntries;
+    private long _sequence;
+
+    /// <summary>Creates the queue with a bounded capacity.</summary>
+    public PendingReconciliationQueue(int maximumEntries = DefaultMaximumEntries)
+    {
+        _maximumEntries = maximumEntries > 0 ? maximumEntries : DefaultMaximumEntries;
+    }
 
     /// <summary>Records one committed rotation as awaiting acknowledgement.</summary>
     public void Add(
@@ -30,10 +41,37 @@ internal sealed class PendingReconciliationQueue
         long authorityEpoch,
         long previousRuntimeRevision,
         long runtimeRevision)
-        => _pending[new Key(mount, profileId, slot)] = new Entry(
+    {
+        var key = new Key(mount, profileId, slot);
+        _pending[key] = new Entry(
             authorityEpoch,
             previousRuntimeRevision,
-            runtimeRevision);
+            runtimeRevision,
+            Interlocked.Increment(ref _sequence));
+
+        Trim();
+    }
+
+    /// <summary>
+    /// Applies the bounded capacity by evicting the oldest queued identities. The record just
+    /// admitted carries the highest sequence and is therefore never the one evicted, so the newest
+    /// authoritative revision is not silently dropped.
+    /// </summary>
+    private void Trim()
+    {
+        if (_pending.Count <= _maximumEntries)
+        {
+            return;
+        }
+
+        var overflow = _pending
+            .OrderBy(pair => pair.Value.Sequence)
+            .Take(_pending.Count - _maximumEntries);
+        foreach (var pair in overflow)
+        {
+            _pending.TryRemove(pair.Key, out _);
+        }
+    }
 
     /// <summary>The reports awaiting acknowledgement, ordinally ordered for a deterministic send order.</summary>
     public IReadOnlyList<PendingReconciliation> Snapshot()
@@ -69,7 +107,11 @@ internal sealed class PendingReconciliationQueue
 
     private readonly record struct Key(string Mount, string ProfileId, string Slot);
 
-    private sealed record Entry(long AuthorityEpoch, long PreviousRuntimeRevision, long RuntimeRevision);
+    private sealed record Entry(
+        long AuthorityEpoch,
+        long PreviousRuntimeRevision,
+        long RuntimeRevision,
+        long Sequence);
 }
 
 /// <summary>One queued rotation, identified without carrying its value.</summary>

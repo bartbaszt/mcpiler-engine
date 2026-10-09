@@ -79,8 +79,10 @@ public sealed class OAuthTokenEndpointClient(IUpstreamTransport transport, TimeP
                 break;
 
             case "client_secret_basic":
+                // RFC 6749 section 2.3.1 / Appendix B: each component is form-urlencoded before
+                // joining with ":" and Base64 encoding, so a space is "+" and a literal "+" is "%2B".
                 var basic = Convert.ToBase64String(Encoding.UTF8.GetBytes(
-                    $"{configuration.ClientId}:{RequireClientSecret(clientSecret, "token")}"));
+                    $"{FormEncode(configuration.ClientId)}:{FormEncode(RequireClientSecret(clientSecret, "token"))}"));
                 headers["Authorization"] = ["Basic " + basic];
                 sensitive.Add("Authorization");
                 break;
@@ -203,7 +205,7 @@ public sealed class OAuthTokenEndpointClient(IUpstreamTransport transport, TimeP
 
             case "client_secret_basic":
                 var basic = Convert.ToBase64String(Encoding.UTF8.GetBytes(
-                    $"{configuration.ClientId}:{RequireClientSecret(clientSecret, "revocation")}"));
+                    $"{FormEncode(configuration.ClientId)}:{FormEncode(RequireClientSecret(clientSecret, "revocation"))}"));
                 headers["Authorization"] = ["Basic " + basic];
                 sensitive.Add("Authorization");
                 break;
@@ -278,6 +280,39 @@ public sealed class OAuthTokenEndpointClient(IUpstreamTransport transport, TimeP
     private static string SerializeForm(IReadOnlyDictionary<string, string> values)
         => string.Join('&', values.Select(static pair =>
             $"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(pair.Value)}"));
+
+    /// <summary>
+    /// RFC 6749 Appendix B form-urlencoding for a single HTTP Basic credential component: a space is
+    /// <c>+</c>, and <c>+</c>, <c>*</c> and <c>%</c> are percent-encoded. Mirrors the form-body
+    /// encoding the same client applies to <c>client_secret_post</c> values.
+    /// </summary>
+    private static string FormEncode(string value)
+    {
+        var builder = new System.Text.StringBuilder(value.Length);
+        foreach (var character in value)
+        {
+            switch (character)
+            {
+                case ' ':
+                    builder.Append('+');
+                    break;
+                case '+':
+                    builder.Append("%2B");
+                    break;
+                case '*':
+                    builder.Append("%2A");
+                    break;
+                case '%':
+                    builder.Append("%25");
+                    break;
+                default:
+                    builder.Append(Uri.EscapeDataString(character.ToString()));
+                    break;
+            }
+        }
+
+        return builder.ToString();
+    }
 
     private static async Task<byte[]> ReadBoundedAsync(UpstreamResponse response, CancellationToken cancellationToken)
     {

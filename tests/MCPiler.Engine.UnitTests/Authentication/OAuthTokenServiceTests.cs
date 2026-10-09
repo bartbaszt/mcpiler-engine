@@ -61,6 +61,58 @@ public sealed class OAuthTokenServiceTests
     }
 
     [Fact]
+    public async Task Client_secret_basic_form_encodes_each_component_before_base64()
+    {
+        // RFC 6749 Appendix B: a space is "+" and a literal "+" is "%2B" before the colon join and
+        // Base64, so a client id/secret containing those characters still decodes to the exact value.
+        var transport = new RecordingTransport(Responds("access-a", expiresIn: 3600));
+        var client = new OAuthTokenEndpointClient(transport, new AdvanceableClock(Now));
+        var configuration = Configuration(
+            """{"clientId":"client id+1","tokenEndpoint":"https://auth.example.com/oauth2/token","tokenAuthMethod":"client_secret_basic"}""");
+
+        await client.ExchangeAsync(
+            configuration,
+            ["https://auth.example.com:443"],
+            new Dictionary<string, string> { ["grant_type"] = "client_credentials" },
+            "sec ret+%/value",
+            CancellationToken.None);
+
+        var sent = Assert.Single(transport.Requests);
+        var basic = Assert.Single(sent.Headers["Authorization"]);
+        Assert.StartsWith("Basic ", basic, StringComparison.Ordinal);
+
+        // The decoded halves must equal the form-encoded components, not the raw values.
+        var decoded = Encoding.UTF8.GetString(Convert.FromBase64String(basic["Basic ".Length..]));
+        Assert.Equal("client+id%2B1:sec+ret%2B%25%2Fvalue", decoded);
+
+        // The raw secret must not appear anywhere on the wire, including diagnostics.
+        Assert.DoesNotContain("sec ret+%/value", decoded, StringComparison.Ordinal);
+        Assert.All(sent.Headers.Values, values =>
+            Assert.All(values, value => Assert.DoesNotContain("sec ret+%/value", value, StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task Revocation_client_secret_basic_form_encodes_each_component_before_base64()
+    {
+        var transport = new RecordingTransport(Responds("access-a", expiresIn: 3600));
+        var client = new OAuthTokenEndpointClient(transport, new AdvanceableClock(Now));
+        var configuration = Configuration(
+            """{"clientId":"id:+","tokenEndpoint":"https://auth.example.com/oauth2/token","revocationEndpoint":"https://auth.example.com/oauth2/revoke","tokenAuthMethod":"client_secret_basic"}""");
+
+        await client.RevokeRefreshTokenAsync(
+            configuration,
+            ["https://auth.example.com:443"],
+            "refresh-canary",
+            "pwd a+b%c",
+            CancellationToken.None);
+
+        var sent = Assert.Single(transport.Requests);
+        var basic = Assert.Single(sent.Headers["Authorization"]);
+        var decoded = Encoding.UTF8.GetString(Convert.FromBase64String(basic["Basic ".Length..]));
+        Assert.Equal("id%3A%2B:pwd+a%2Bb%25c", decoded);
+    }
+
+    [Fact]
     public async Task A_cached_token_is_reused_without_another_exchange()
     {
         var transport = new RecordingTransport(Responds("access-a", expiresIn: 3600));
@@ -406,6 +458,11 @@ public sealed class OAuthTokenServiceTests
             slot,
             scopeFingerprint);
 
+    private static OAuthStrategyConfiguration Configuration(string json)
+        => OAuthStrategyConfiguration.FromConfiguration(
+            CanonicalJson.Parse(Encoding.UTF8.GetBytes(json))!.AsObject(),
+            authorizationCodeRequired: false);
+
     private static AuthenticationProfile StaticProfile() =>
         Profile(AuthenticationKind.Static, """{ "strategyId": "static", "inputs": {} }""");
 
@@ -478,7 +535,7 @@ public sealed class OAuthTokenServiceTests
 
         public Task<UpstreamResponse> SendAsync(UpstreamRequest request, UpstreamSendPolicy policy, CancellationToken cancellationToken)
         {
-            Requests.Add(new RecordedRequest(request.Method, request.Uri, Form(request)));
+            Requests.Add(new RecordedRequest(request.Method, request.Uri, Form(request), request.Headers));
 
             return _handler is not null
                 ? _handler(request, policy, cancellationToken)
@@ -489,7 +546,11 @@ public sealed class OAuthTokenServiceTests
             => request.Body is { } body ? Encoding.UTF8.GetString(body) : string.Empty;
     }
 
-    private sealed record RecordedRequest(string Method, Uri Uri, string Form);
+    private sealed record RecordedRequest(
+        string Method,
+        Uri Uri,
+        string Form,
+        IReadOnlyDictionary<string, string[]> Headers);
 
     private sealed class AdvanceableClock(DateTimeOffset start) : TimeProvider
     {

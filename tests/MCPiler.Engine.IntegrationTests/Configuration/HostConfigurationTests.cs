@@ -937,6 +937,8 @@ public sealed class HostConfigurationTests
             [HostConfiguration.ResponseCacheMaxRetainedBytesKey] = "33554432",
             [HostConfiguration.ResponseCacheMaxEntriesKey] = "128",
             [HostConfiguration.ResponseCacheMaxTtlSecondsKey] = "3600",
+            [HostConfiguration.ResponseCacheMaxFlightsKey] = "64",
+            [HostConfiguration.ResponseCacheMaxWaitersKey] = "128",
         };
 
         Assert.True(HostConfiguration.TryBind(Mounts(), [.. settings], out HostBinding? binding, out IReadOnlyList<string> refusals));
@@ -945,6 +947,8 @@ public sealed class HostConfigurationTests
         Assert.Equal(33_554_432, binding.Runtime.ResponseCache.MaxRetainedBytesPerMount);
         Assert.Equal(128, binding.Runtime.ResponseCache.MaxEntriesPerMount);
         Assert.Equal(3600, binding.Runtime.ResponseCache.MaxTtlSeconds);
+        Assert.Equal(64, binding.Runtime.ResponseCache.MaxFlightsPerMount);
+        Assert.Equal(128, binding.Runtime.ResponseCache.MaxWaitersPerMount);
     }
 
     [Fact]
@@ -965,6 +969,8 @@ public sealed class HostConfigurationTests
     [InlineData(HostConfiguration.ResponseCacheMaxRetainedBytesKey, "268435457", "268435456")]
     [InlineData(HostConfiguration.ResponseCacheMaxEntriesKey, "4097", "4096")]
     [InlineData(HostConfiguration.ResponseCacheMaxTtlSecondsKey, "86401", "86400")]
+    [InlineData(HostConfiguration.ResponseCacheMaxFlightsKey, "257", "256")]
+    [InlineData(HostConfiguration.ResponseCacheMaxWaitersKey, "1025", "1024")]
     public void A_response_cache_widening_is_refused_with_the_hard_ceiling_named(
         string key,
         string attempted,

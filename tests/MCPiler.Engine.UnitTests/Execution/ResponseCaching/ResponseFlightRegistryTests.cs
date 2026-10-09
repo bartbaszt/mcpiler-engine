@@ -137,6 +137,52 @@ public sealed class ResponseFlightRegistryTests
     }
 
     [Fact]
+    public void Admitted_waiters_are_bounded_independently_and_overflow_bypasses_immediately()
+    {
+        // MTH-RUN-1: waiter admission is bounded independently of producer capacity, so a burst all
+        // targeting one in-flight key cannot retain an unbounded number of waiters. The extra caller
+        // is refused an admission immediately (bypass) and is not retained.
+        using ResponseFlightRegistry registry = new(maximumFlights: 4, maximumWaiters: 3);
+        ResponseCacheKey key = Key("bounded-waiters");
+        ResponseFlightAdmission producer = registry.JoinOrBegin(key);
+        Assert.Equal(ResponseFlightAdmissionKind.Producer, producer.Kind);
+
+        List<ResponseFlightLease> waiters = [];
+        for (int index = 0; index < 3; index++)
+        {
+            ResponseFlightAdmission joined = registry.JoinOrBegin(key);
+            Assert.Equal(ResponseFlightAdmissionKind.Joined, joined.Kind);
+            waiters.Add(joined.Lease!);
+        }
+
+        Assert.Equal(3, registry.WaiterCount);
+
+        ResponseFlightAdmission overflow = registry.JoinOrBegin(key);
+
+        Assert.Equal(ResponseFlightAdmissionKind.CapacityBypass, overflow.Kind);
+        Assert.Null(overflow.Lease);
+        Assert.Equal(3, registry.WaiterCount);
+
+        // A waiter leaving by cancellation/timeout releases only its own admission reservation,
+        // after which a new waiter can be admitted again.
+        waiters[0].Dispose();
+        Assert.Equal(2, registry.WaiterCount);
+        ResponseFlightAdmission admittedAgain = registry.JoinOrBegin(key);
+        Assert.Equal(ResponseFlightAdmissionKind.Joined, admittedAgain.Kind);
+        Assert.Equal(3, registry.WaiterCount);
+
+        producer.Lease!.Abandon();
+        producer.Lease.Dispose();
+        admittedAgain.Lease!.Dispose();
+        foreach (ResponseFlightLease waiter in waiters.Skip(1))
+        {
+            waiter.Dispose();
+        }
+
+        Assert.Equal(0, registry.WaiterCount);
+    }
+
+    [Fact]
     public void Different_opaque_keys_get_independent_producers()
     {
         using ResponseFlightRegistry registry = new(4);

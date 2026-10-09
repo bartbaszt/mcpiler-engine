@@ -194,6 +194,7 @@ internal sealed class ManagedSyncWorker : IDisposable
                         ScopeFingerprint = record.ScopeFingerprint,
                         Value = record.Value,
                     },
+                    _sessionEpoch,
                     cancellationToken)
                 .ConfigureAwait(false);
 
@@ -560,6 +561,26 @@ if (_binding.Listener.Transport is HostTransport.Http
         // requests on its own schedule, and blocking activation on that would stop new admissions
         // for as long as the oldest in-flight call took.
         Observe(retirement);
+
+        // The in-memory reconciliation queue does not survive a restart, so any rotation this
+        // process committed locally and still owes the Platform is re-derived from the durable
+        // encrypted records the active generation declares (MTH-ENG-9). Failure to replay never
+        // fails activation: the records remain durable and a later pass retries.
+        try
+        {
+            await _loader.ReplayDurableRotationsAsync(
+                generation,
+                (mount, profile, slot, epoch, previous, revision, _) =>
+                {
+                    RotationCommitted(mount, profile, slot, epoch, previous, revision);
+                    return ValueTask.CompletedTask;
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            _diagnostics?.Invoke($"managed: durable rotation replay failed: {exception.Message}");
+        }
 
         return true;
     }

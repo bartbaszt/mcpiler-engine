@@ -997,8 +997,125 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         restarted.Dispose();
     }
 
-    private async Task<ManagedInitialSync> SynchronizeInitialAsync(
-        PlatformStandIn platform,
+    [Fact]
+    public async Task A_restart_re_derives_the_rotation_it_committed_before_stopping()
+    {
+        // MTH-ENG-9: a rotation committed locally survives a restart as durable authority and a
+        // bounded reconciliation is re-derived from the durable record, without any live
+        // RotationCommitted call in the new process.
+        string stateRoot = Path.Combine(_root, "state-replay-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-replay-" + Guid.NewGuid().ToString("N"));
+
+        var reconciliations = new List<JsonObject>();
+
+        await using var platform = await PlatformAsync(_ => Response.Generation(
+            Generation(
+                "g1",
+                ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
+                prefix: "/mcp/connector",
+                secrets: new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["MANAGED_CLIENT_SECRET"] = "client-secret-canary",
+                    ["MANAGED_REFRESH_TOKEN"] = "declared-refresh",
+                })));
+        platform.OnReconcile = body =>
+        {
+            lock (reconciliations)
+            {
+                reconciliations.Add(JsonNode.Parse(body)!.AsObject());
+            }
+
+            return Response.Bytes(
+                JsonSerializer.SerializeToUtf8Bytes(new { outcome = "recorded" }),
+                isGeneration: false);
+        };
+
+        // First process commits R1 for the declared slot, then stops before reconciling.
+        (ManagedGenerationLoader first, FileMutableSlotStore firstSlots) =
+            await OpenLoaderWithStateAsync(stateRoot, keyFile);
+        await firstSlots.ReplaceAsync(
+            new MutableSlotRecord(
+                "oauth2-authorization-code-pkce-refresh",
+                "refreshToken",
+                ScopeFingerprint: null,
+                AuthorityEpoch: 1,
+                RuntimeRevision: 1,
+                "CANARY-durable-rotation-eng9"),
+            TestContext.Current.CancellationToken);
+        first.Dispose();
+
+        // Restart: a new process over the same durable state, with no in-memory queue.
+        (ManagedGenerationLoader restarted, _) = await OpenLoaderWithStateAsync(stateRoot, keyFile);
+        await using var process = await StartAsync(platform, restarted);
+
+        await WaitForAsync(
+            () =>
+            {
+                lock (reconciliations)
+                {
+                    return reconciliations.Count > 0;
+                }
+            },
+            () =>
+            {
+                lock (process.Diagnostics)
+                {
+                    return "No re-derived reconciliation arrived. Diagnostics: "
+                        + string.Join(" | ", process.Diagnostics);
+                }
+            });
+
+        JsonObject report;
+        lock (reconciliations)
+        {
+            report = reconciliations[0];
+        }
+
+        Assert.Equal("refreshToken", report["slot"]!.GetValue<string>());
+        Assert.Equal(1, report["authorityEpoch"]!.GetValue<long>());
+        Assert.Equal(1, report["runtimeRevision"]!.GetValue<long>());
+        Assert.Equal("CANARY-durable-rotation-eng9", report["value"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public async Task Reconciliation_messages_carry_the_session_epoch_the_platform_assigned()
+    {
+        // The Task 8 Platform fence validates the durable session epoch before any secret mutation,
+        // so the reconciliation must present the same epoch the poll established.
+        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+
+        await using var platform = await PlatformAsync(_ => Response.Generation(generation));
+        platform.OnReconcile = _ => Response.Bytes(
+            JsonSerializer.SerializeToUtf8Bytes(new { outcome = "recorded" }),
+            isGeneration: false);
+
+        (ManagedGenerationLoader loader, FileMutableSlotStore slots) = await OpenLoaderWithStateAsync();
+        await using var process = await StartAsync(platform, loader);
+
+        await slots.ReplaceAsync(
+            new MutableSlotRecord(
+                "oauth2-client-credentials",
+                "clientSecret",
+                ScopeFingerprint: null,
+                AuthorityEpoch: 1,
+                RuntimeRevision: 1,
+                "CANARY-epoch-header-9a21"),
+            TestContext.Current.CancellationToken);
+
+        process.Worker.RotationCommitted(
+            "/mcp/connector",
+            "oauth2-client-credentials",
+            "clientSecret",
+            authorityEpoch: 1,
+            previousRuntimeRevision: 0,
+            runtimeRevision: 1);
+
+        await WaitForAsync(() => !platform.ReconcileSessionEpochHeaders.IsEmpty);
+
+        Assert.Equal("1", platform.ReconcileSessionEpochHeaders.ToArray()[0]);
+    }
+
+    private async Task<ManagedInitialSync> SynchronizeInitialAsync(        PlatformStandIn platform,
         bool secretFileExists = true)
     {
         ManagedGenerationLoader loader = await OpenLoaderAsync();
@@ -1180,13 +1297,15 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         string manifest,
         string prefix,
         string? providerValue = null,
-        IReadOnlyDictionary<string, string>? externalResources = null)
+        IReadOnlyDictionary<string, string>? externalResources = null,
+        IReadOnlyDictionary<string, string>? secrets = null)
     {
         var bundle = Bundle(manifest);
 
-        var secrets = providerValue is null
-            ? new Dictionary<string, string>(StringComparer.Ordinal)
-            : new Dictionary<string, string>(StringComparer.Ordinal) { [ProviderKey] = providerValue };
+        var deliveredSecrets = secrets
+            ?? (providerValue is null
+                ? new Dictionary<string, string>(StringComparer.Ordinal)
+                : new Dictionary<string, string>(StringComparer.Ordinal) { [ProviderKey] = providerValue });
 
         return new Dictionary<string, object?>(StringComparer.Ordinal)
         {
@@ -1202,7 +1321,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
                         ?? new Dictionary<string, string>(StringComparer.Ordinal),
                 },
             },
-            ["secrets"] = secrets,
+            ["secrets"] = deliveredSecrets,
             ["metadata"] = new { desiredRevisionId = id, engineVersion = "fixture" },
             ["kind"] = "generation",
             ["compatibility"] = new
@@ -1395,6 +1514,9 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         public ConcurrentQueue<string?> PollSessionEpochHeaders { get; } = new();
 
+        /// <summary>Every session-epoch header presented on a reconciliation request, in order.</summary>
+        public ConcurrentQueue<string?> ReconcileSessionEpochHeaders { get; } = new();
+
         /// <summary>Handles a reconciliation report; assigned by the test before the process starts.</summary>
         public Func<string, Response> OnReconcile { get; set; } = _ => Response.Status(HttpStatusCode.ServiceUnavailable);
 
@@ -1463,6 +1585,10 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
                     context.Response.StatusCode = 401;
                     return;
                 }
+
+                var reconcileEpoch = context.Request.Headers[ManagedProtocol.SessionEpochHeader].ToString();
+                standIn.ReconcileSessionEpochHeaders.Enqueue(
+                    string.IsNullOrEmpty(reconcileEpoch) ? null : reconcileEpoch);
 
                 Response response = standIn.OnReconcile(body);
 

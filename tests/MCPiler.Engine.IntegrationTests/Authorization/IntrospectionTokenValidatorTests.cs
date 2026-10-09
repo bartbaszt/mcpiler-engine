@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Reflection;
 using System.Text;
 using System.Threading;
@@ -507,6 +508,92 @@ public sealed class IntrospectionTokenValidatorTests
         Assert.Equal($"Basic {expectedAuthorization}", target.LastAuthorization);
         Assert.DoesNotContain(bearerCanary, proxy.LastBody ?? string.Empty, StringComparison.Ordinal);
         Assert.DoesNotContain(clientSecret, proxy.LastAuthorization ?? string.Empty, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Distinct_inflight_introspections_are_bounded_and_overflow_is_never_retained()
+    {
+        // MTH-RUN-2: a flood of distinct tokens must not grow the coalescing map without bound. When
+        // admission is full, the extra caller is served on its own fresh fail-closed path and is not
+        // retained as a waiter.
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new StubHandler(async (_, cancellationToken) =>
+        {
+            await gate.Task.WaitAsync(cancellationToken);
+            return ActiveResponse(Now.AddMinutes(5));
+        });
+        using var client = new HttpClient(handler);
+        var validator = CreateValidator(client, new FakeTimeProvider(Now), ttlSeconds: 30);
+
+        List<Task> held = [];
+        for (int index = 0; index < IntrospectionTokenValidator.MaximumInFlight; index++)
+        {
+            held.Add(validator.ValidateAsync($"held-{index}", TestContext.Current.CancellationToken));
+        }
+
+        for (var attempt = 0; attempt < 200 && validator.InFlightCount < IntrospectionTokenValidator.MaximumInFlight; attempt++)
+        {
+            await Task.Delay(5, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(IntrospectionTokenValidator.MaximumInFlight, validator.InFlightCount);
+
+        // An overflow token is admitted on its own fresh path: it still completes, but the coalescing
+        // map never exceeds the bound.
+        Task<TokenVerification> overflow = validator.ValidateAsync("overflow", TestContext.Current.CancellationToken);
+
+        for (var attempt = 0; attempt < 200 && validator.InFlightCount > IntrospectionTokenValidator.MaximumInFlight; attempt++)
+        {
+            await Task.Delay(5, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(IntrospectionTokenValidator.MaximumInFlight, validator.InFlightCount);
+
+        gate.SetResult();
+        await Task.WhenAll(held);
+        Assert.True((await overflow).Active);
+        Assert.Equal(IntrospectionTokenValidator.MaximumInFlight + 1, handler.Calls);
+
+        for (var attempt = 0; attempt < 200 && validator.InFlightCount != 0; attempt++)
+        {
+            await Task.Delay(5, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(0, validator.InFlightCount);
+    }
+
+    [Fact]
+    public async Task An_oversized_introspection_body_is_refused_after_the_byte_bound()
+    {
+        // MTH-RUN-3: a response body above the finite bound is refused while streaming, so an
+        // oversized or chunked body is never fully buffered before it is rejected.
+        var oversized = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(new byte[IntrospectionTokenValidator.MaximumResponseBodyBytes + 1]),
+        };
+        oversized.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        var handler = new StubHandler((_, _) => oversized);
+        using var client = new HttpClient(handler);
+        var validator = CreateValidator(client, new FakeTimeProvider(Now), ttlSeconds: 30);
+
+        TokenVerification verification = await validator.ValidateAsync("oversized", TestContext.Current.CancellationToken);
+
+        Assert.False(verification.Active);
+    }
+
+    [Fact]
+    public async Task A_chunked_body_over_the_bound_without_a_length_is_refused()
+    {
+        var oversized = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StreamContent(new MemoryStream(new byte[IntrospectionTokenValidator.MaximumResponseBodyBytes + 16])),
+        };
+        oversized.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        var handler = new StubHandler((_, _) => oversized);
+        using var client = new HttpClient(handler);
+        var validator = CreateValidator(client, new FakeTimeProvider(Now), ttlSeconds: 30);
+
+        Assert.False((await validator.ValidateAsync("chunked", TestContext.Current.CancellationToken)).Active);
     }
 
     private static IntrospectionTokenValidator CreateValidator(

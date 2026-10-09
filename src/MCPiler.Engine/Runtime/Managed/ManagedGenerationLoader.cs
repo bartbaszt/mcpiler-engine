@@ -6,6 +6,7 @@ using MCPiler.Engine.Execution.Secrets;
 using MCPiler.Engine.Execution.Secrets.RuntimeState;
 using MCPiler.Engine.Manifest;
 using MCPiler.Engine.Manifest.Loading;
+using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Manifest.Sealing;
 using MCPiler.Engine.Manifest.Validation;
 
@@ -551,6 +552,80 @@ public sealed class ManagedGenerationLoader : IDisposable
                 record.RuntimeRevision,
                 record.ScopeFingerprint,
                 record.Value);
+    }
+
+    /// <summary>
+    /// Re-derives the reconciliation notifications a restarted process still owes for rotations it
+    /// committed locally before it stopped.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The pending-reconciliation queue is intentionally in memory, so a restart loses the list of
+    /// unsent reports. What is not lost is the durable encrypted record each report describes: the
+    /// loader reads the active generation's declared mutable slots back from the store and, when a
+    /// slot's durable revision has advanced past the revision the delivered generation declares
+    /// within the same authority epoch, reports it again. A slot whose declared epoch already
+    /// supersedes the record is not replayed, because a newer authority has replaced it.
+    /// </para>
+    /// <para>
+    /// This is a re-derivation, not a queue rebuild: it names no value and holds nothing beyond the
+    /// callback, so the same bounded-reconciliation contract the live rotation path obeys applies.
+    /// </para>
+    /// </remarks>
+    /// <param name="generation">The active generation whose declared slots are inspected.</param>
+    /// <param name="rotations">The notification sink, identical to the live rotation callback.</param>
+    /// <param name="cancellationToken">Cancellation.</param>
+    public async ValueTask ReplayDurableRotationsAsync(
+        ManagedGeneration generation,
+        RotationNotification rotations,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(generation);
+        ArgumentNullException.ThrowIfNull(rotations);
+
+        if (_runtimeState is null)
+        {
+            return;
+        }
+
+        foreach (MountedManifest mount in generation.Mounts)
+        {
+            foreach (AuthenticationProfile profile in mount.Document.EffectiveAuthentication.Profiles)
+            {
+                foreach (AuthenticationSlot slot in profile.Slots)
+                {
+                    ManagedSlotSnapshot? record;
+                    try
+                    {
+                        record = await ReadSlotAsync(mount.Prefix, profile.Id, slot.Slot, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    catch (RuntimeStateStoreException)
+                    {
+                        // An unreadable record is left for a later reconciliation attempt, exactly as
+                        // the live path does; replaying an invented value would be worse than silence.
+                        continue;
+                    }
+
+                    if (record is null
+                        || record.AuthorityEpoch != slot.AuthorityEpoch
+                        || record.RuntimeRevision <= slot.RuntimeRevision)
+                    {
+                        continue;
+                    }
+
+                    await rotations(
+                        mount.Prefix,
+                        profile.Id,
+                        slot.Slot,
+                        record.AuthorityEpoch,
+                        record.RuntimeRevision - 1,
+                        record.RuntimeRevision,
+                        cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
     }
 
     /// <summary>

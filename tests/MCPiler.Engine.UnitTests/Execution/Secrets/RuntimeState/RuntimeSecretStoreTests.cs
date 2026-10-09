@@ -309,8 +309,88 @@ public sealed class RuntimeSecretStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task A_failure_before_the_flush_leaves_the_previous_record_authoritative()
+    public async Task Stale_temporary_files_are_removed_when_the_store_is_opened()
     {
+        // MTH-SECRET-2: an abandoned temp is never authoritative, so opening the store reclaims it.
+        var root = Path.Combine(NewRoot(), "mount-a");
+        _roots.Add(root);
+        Directory.CreateDirectory(root);
+        var orphan = Path.Combine(root, "orphan" + FileMutableSlotStore.RecordExtension + ".tmp-deadbeef");
+        await File.WriteAllBytesAsync(orphan, Encoding.UTF8.GetBytes("partial"), TestContext.Current.CancellationToken);
+
+        var store = new FileMutableSlotStore(root, "mount-a", Key);
+
+        Assert.False(File.Exists(orphan));
+        Assert.Null(await store.LoadAsync("oauth", "refreshToken", TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task A_restrictive_mode_failure_refuses_to_publish_and_keeps_the_previous_record()
+    {
+        // MTH-SECRET-3: a committed secret whose file mode cannot be tightened must fail closed.
+        var store = Store();
+        await store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", 1, 0, "T0"),
+            TestContext.Current.CancellationToken);
+
+        store.PermissionSetter = _ => false;
+
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", 1, 1, "T1"),
+            TestContext.Current.CancellationToken).AsTask());
+
+        var loaded = await store.LoadAsync("oauth", "refreshToken", TestContext.Current.CancellationToken);
+        Assert.Equal("T0", loaded!.Value);
+        Assert.Single(Directory.GetFiles(store.Root));
+    }
+
+    [Fact]
+    public async Task Repeated_rotations_do_not_accumulate_obsolete_records_and_keep_the_newest()
+    {
+        // MTH-SECRET-1: repeated rotations of one slot stay within the bounded lifecycle and the
+        // newest authority is preserved (exactly one live record per slot identity).
+        var store = Store();
+
+        for (var revision = 0; revision < 6; revision++)
+        {
+            await store.ReplaceAsync(
+                new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", 1, revision, "value-" + revision),
+                TestContext.Current.CancellationToken);
+        }
+
+        Assert.Single(Directory.GetFiles(store.Root, "*" + FileMutableSlotStore.RecordExtension));
+
+        var loaded = await store.LoadAsync("oauth", "refreshToken", TestContext.Current.CancellationToken);
+        Assert.Equal("value-5", loaded!.Value);
+        Assert.Equal(5, loaded.RuntimeRevision);
+    }
+
+    [Fact]
+    public async Task The_retention_cap_bounds_distinct_slots_without_dropping_the_just_written_record()
+    {
+        // MTH-SECRET-1: the declared bound is enforced for a burst of distinct slots, and the
+        // record just committed is never the one removed.
+        var store = Store();
+        store.MaximumRecords = 3;
+
+        for (var index = 0; index < 6; index++)
+        {
+            await store.ReplaceAsync(
+                new MutableSlotRecord("oauth", "slot-" + index, "fingerprint-a", 1, 0, "value-" + index),
+                TestContext.Current.CancellationToken);
+        }
+
+        Assert.True(
+            Directory.GetFiles(store.Root, "*" + FileMutableSlotStore.RecordExtension).Length <= 3,
+            "the bounded lifecycle must cap the number of retained records");
+
+        // The most recently written record is always retained.
+        var newest = await store.LoadAsync("oauth", "slot-5", TestContext.Current.CancellationToken);
+        Assert.Equal("value-5", newest!.Value);
+    }
+
+    [Fact]
+    public async Task A_failure_before_the_flush_leaves_the_previous_record_authoritative()    {
         var store = Store();
         await store.ReplaceAsync(
             new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", 1, 0, "T0"),

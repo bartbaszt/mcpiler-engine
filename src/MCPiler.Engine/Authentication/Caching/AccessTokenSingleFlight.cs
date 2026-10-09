@@ -19,9 +19,21 @@ namespace MCPiler.Engine.Authentication.Caching;
 /// </remarks>
 public sealed class AccessTokenSingleFlight : IDisposable
 {
-    private readonly Dictionary<string, SemaphoreSlim> _gates = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, Gate> _gates = new(StringComparer.Ordinal);
     private readonly object _entries = new();
     private bool _disposed;
+
+    /// <summary>The number of per-key gates currently retained. For bounded-growth assertions.</summary>
+    public int Count
+    {
+        get
+        {
+            lock (_entries)
+            {
+                return _gates.Count;
+            }
+        }
+    }
 
     /// <summary>Runs <paramref name="acquire"/> under the gate for <paramref name="key"/>.</summary>
     public async ValueTask<T> RunAsync<T>(
@@ -32,27 +44,48 @@ public sealed class AccessTokenSingleFlight : IDisposable
         ArgumentNullException.ThrowIfNull(acquire);
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        SemaphoreSlim gate;
+        Gate gate;
         lock (_entries)
         {
             if (!_gates.TryGetValue(key, out var existing))
             {
-                existing = new SemaphoreSlim(1, 1);
+                existing = new Gate();
                 _gates[key] = existing;
             }
 
+            existing.Users++;
             gate = existing;
         }
 
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-
         try
         {
-            return await acquire(cancellationToken).ConfigureAwait(false);
+            await gate.Semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+            try
+            {
+                return await acquire(cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                gate.Semaphore.Release();
+            }
         }
         finally
         {
-            gate.Release();
+            // Deterministic idle removal: once the last caller for a key leaves, the gate stops
+            // being retained, so synchronization state cannot accumulate per profile that ever ran
+            // and then went quiet. A later caller for the same key simply recreates the gate; while
+            // any caller holds it the entry stays, so live coalescing is never weakened.
+            lock (_entries)
+            {
+                gate.Users--;
+                if (gate.Users <= 0
+                    && _gates.TryGetValue(key, out var current)
+                    && ReferenceEquals(current, gate))
+                {
+                    _gates.Remove(key);
+                }
+            }
         }
     }
 
@@ -70,10 +103,17 @@ public sealed class AccessTokenSingleFlight : IDisposable
 
             foreach (var gate in _gates.Values)
             {
-                gate.Dispose();
+                gate.Semaphore.Dispose();
             }
 
             _gates.Clear();
         }
+    }
+
+    private sealed class Gate
+    {
+        internal SemaphoreSlim Semaphore { get; } = new(1, 1);
+
+        internal int Users { get; set; }
     }
 }

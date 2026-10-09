@@ -54,6 +54,16 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
     /// <summary>File extension of a committed record.</summary>
     public const string RecordExtension = ".rstate";
 
+    /// <summary>Temporary-file suffix used while a record is being written.</summary>
+    public const string TemporarySuffix = ".tmp-";
+
+    /// <summary>
+    /// The default maximum number of committed records this store retains. A deployment's runtime
+    /// state is bounded: stale/superseded records are compacted down to this cap, always keeping the
+    /// newest record for every slot.
+    /// </summary>
+    public const int DefaultMaximumRecords = 1024;
+
     private const int HeaderLengthBytes = 2;
     private const int FixedPrefixLength = 1 + HeaderLengthBytes;
     private const int MinimumEnvelopeLength = FixedPrefixLength + NonceLength + TagLength;
@@ -91,6 +101,7 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
         _key = key.ToArray();
 
         EnsureRoot();
+        RemoveStaleTemporaries();
     }
 
     /// <summary>Test seam: runs after the ciphertext reaches the temporary file, before the flush.</summary>
@@ -98,6 +109,16 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
 
     /// <summary>Test seam: runs after the flush, before the atomic replacement.</summary>
     internal Func<CancellationToken, ValueTask>? TempFlushedBarrier { get; set; }
+
+    /// <summary>
+    /// Test seam for establishing a restrictive mode on a committed path. Returns <c>true</c> when the
+    /// mode is established (or the platform has none), <c>false</c> when it cannot be established.
+    /// The default implementation is the platform behavior; tests override it to force a failure.
+    /// </summary>
+    internal Func<string, bool>? PermissionSetter { get; set; }
+
+    /// <summary>The bounded number of committed records retained after a successful replacement.</summary>
+    internal int MaximumRecords { get; set; } = DefaultMaximumRecords;
 
     /// <summary>The directory this store reads and writes.</summary>
     public string Root => _root;
@@ -168,8 +189,17 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
                 await flushed(cancellationToken).ConfigureAwait(false);
             }
 
-            Restrict(temporary);
+            if (!TryRestrict(temporary))
+            {
+                TryRemove(temporary);
+                throw Failed(
+                    record.ProfileId,
+                    record.Slot,
+                    "the record could not be stored with a restrictive file mode.");
+            }
+
             File.Move(temporary, target, overwrite: true);
+            Compact();
         }
         catch (Exception ex) when (ex is not RuntimeStateStoreException and not OperationCanceledException)
         {
@@ -304,7 +334,6 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
         try
         {
             Directory.CreateDirectory(_root);
-            RestrictDirectory(_root);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -312,34 +341,24 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
                 "The runtime-state directory could not be created or is not writable.",
                 ex);
         }
-    }
 
-    private void Restrict(string path)
-    {
-        // A restrictive mode is part of the contract wherever the platform has one. Windows
-        // inherits the directory's ACL, which the deployment already scopes, so a no-op there
-        // is correct rather than a silent weakening.
-        if (OperatingSystem.IsWindows())
+        if (!TryRestrictDirectory(_root))
         {
-            return;
-        }
-
-        try
-        {
-            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
-        {
-            // A mode that cannot be tightened is reported by the deployment's own permissions;
-            // refusing the write here would trade a durability guarantee for a cosmetic one.
+            throw new InvalidOperationException(
+                "The runtime-state directory could not be established with a restrictive file mode.");
         }
     }
 
-    private static void RestrictDirectory(string path)
+    private bool TryRestrictDirectory(string path)
     {
+        if (PermissionSetter is { } setter)
+        {
+            return setter(path);
+        }
+
         if (OperatingSystem.IsWindows())
         {
-            return;
+            return true;
         }
 
         try
@@ -347,9 +366,183 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
             File.SetUnixFileMode(
                 path,
                 UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            return true;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        catch (PlatformNotSupportedException)
         {
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Establishes a restrictive mode on a committed path, failing closed. Returns <c>false</c> when
+    /// the platform has a mode but it cannot be established, so the caller refuses to publish a
+    /// secret whose file mode could not be tightened.
+    /// </summary>
+    private bool TryRestrict(string path)
+    {
+        if (PermissionSetter is { } setter)
+        {
+            return setter(path);
+        }
+
+        return DefaultPermissionSetter(path);
+    }
+
+    private static bool DefaultPermissionSetter(string path)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return true;
+        }
+
+        try
+        {
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            return true;
+        }
+        catch (PlatformNotSupportedException)
+        {
+            // The platform has no file-mode concept; the contract is satisfied vacuously.
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Removes abandoned temporary files left by a replacement that did not reach its rename. A
+    /// temporary file is never an authoritative record, so removing every one on construction is
+    /// safe and bounds the directory across restarts.
+    /// </summary>
+    private void RemoveStaleTemporaries()
+    {
+        try
+        {
+            foreach (var path in Directory.EnumerateFiles(_root, "*" + TemporarySuffix + "*"))
+            {
+                if (path.EndsWith(TemporarySuffix, StringComparison.Ordinal)
+                    || Path.GetFileName(path).Contains(TemporarySuffix, StringComparison.Ordinal))
+                {
+                    TryRemove(path);
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
+        {
+            // A directory that cannot be enumerated is reported by the next read/write, which
+            // already fails closed; stale-temp cleanup is best-effort.
+        }
+    }
+
+    /// <summary>
+    /// Bounds the number of committed records. Exactly one live record may exist per slot identity;
+    /// the newest record for a slot is always preserved, and only stale/superseded records (a slot
+    /// whose newest record is present elsewhere) are removed. Repeated rotations therefore do not
+    /// accumulate obsolete authority, and no slot's live newest value is ever dropped.
+    /// </summary>
+    private void Compact()
+    {
+        System.IO.FileInfo[] records;
+        try
+        {
+            records = Directory.EnumerateFiles(_root, "*" + RecordExtension)
+                .Select(path => new FileInfo(path))
+                .ToArray();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
+        {
+            return;
+        }
+
+        // The just-committed target is the newest for its slot; group by the authenticated identity
+        // recovered from each envelope so a stale duplicate is the only thing removable.
+        var newestPerSlot = new Dictionary<(string Profile, string Slot), FileInfo>();
+        var unreadable = new List<FileInfo>();
+        foreach (var info in records)
+        {
+            if (!TryReadSlotIdentity(info.FullName, out var identity))
+            {
+                unreadable.Add(info);
+                continue;
+            }
+
+            if (!newestPerSlot.TryGetValue(identity, out var current)
+                || info.LastWriteTimeUtc > current.LastWriteTimeUtc)
+            {
+                newestPerSlot[identity] = info;
+            }
+        }
+
+        var stale = new List<FileInfo>();
+        foreach (var info in records)
+        {
+            if (!TryReadSlotIdentity(info.FullName, out var identity))
+            {
+                continue;
+            }
+
+            if (!ReferenceEquals(newestPerSlot[identity], info))
+            {
+                stale.Add(info);
+            }
+        }
+
+        foreach (var info in stale)
+        {
+            TryRemove(info.FullName);
+        }
+
+        // A sanity bound on distinct slots; newest-per-slot is never among the evicted.
+        var distinct = newestPerSlot.Count;
+        if (MaximumRecords > 0 && distinct > MaximumRecords)
+        {
+            var evictable = newestPerSlot.Values
+                .OrderBy(info => info.LastWriteTimeUtc)
+                .Take(distinct - MaximumRecords);
+            foreach (var info in evictable)
+            {
+                TryRemove(info.FullName);
+            }
+        }
+    }
+
+    private bool TryReadSlotIdentity(string path, out (string Profile, string Slot) identity)
+    {
+        identity = default;
+        try
+        {
+            var envelope = File.ReadAllBytes(path);
+            if (envelope.Length < MinimumEnvelopeLength || envelope[0] != FormatVersion)
+            {
+                return false;
+            }
+
+            var headerLength = envelope[1] | (envelope[2] << 8);
+            if (headerLength <= 0 || envelope.Length < FixedPrefixLength + headerLength + NonceLength + TagLength)
+            {
+                return false;
+            }
+
+            var headerBytes = envelope.AsSpan(FixedPrefixLength, headerLength);
+            var header = JsonSerializer.Deserialize<RuntimeStateHeader>(headerBytes, HeaderOptions);
+            if (header is null)
+            {
+                return false;
+            }
+
+            identity = (header.Profile, header.Slot);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return false;
         }
     }
 

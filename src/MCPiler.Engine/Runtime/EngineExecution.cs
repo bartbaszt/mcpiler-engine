@@ -182,7 +182,10 @@ public sealed class EngineExecution : IDisposable
                         generationLabel,
                         started.ResponseCache,
                         identityKey,
-                        timeProvider)
+                        timeProvider,
+                        mount.Document.AgentSurface.Operations
+                            .Select(static op => op.Slug)
+                            .ToHashSet(StringComparer.Ordinal))
                     : null;
 
                 ExecutionService executions = new(
@@ -449,6 +452,36 @@ public sealed class EngineExecution : IDisposable
         return CacheForPrefix(mountPrefix)?.ClearScope(operationSlug);
     }
 
+    /// <summary>
+    /// Clears one mount's cache, optionally one declared operation, distinguishing a mount that is
+    /// not served, a mount whose caching is disabled, and an operation slug the mount does not declare.
+    /// </summary>
+    public ResponseCacheScopedClear ClearResponseCacheScoped(string mountPrefix, string? operationSlug)
+    {
+        if (string.IsNullOrEmpty(mountPrefix))
+        {
+            return new ResponseCacheScopedClear(ResponseCacheClearScope.MountUnknown, null);
+        }
+
+        ResponseCache? cache = CacheForPrefix(mountPrefix);
+        if (cache is null)
+        {
+            return new ResponseCacheScopedClear(ResponseCacheClearScope.CachingDisabled, null);
+        }
+
+        if (operationSlug is { Length: > 0 })
+        {
+            if (!cache.TryClearOperation(operationSlug, out ResponseCacheClearOutcome scoped))
+            {
+                return new ResponseCacheScopedClear(ResponseCacheClearScope.OperationUnknown, scoped);
+            }
+
+            return new ResponseCacheScopedClear(ResponseCacheClearScope.Cleared, scoped);
+        }
+
+        return new ResponseCacheScopedClear(ResponseCacheClearScope.Cleared, cache.ClearScope(null));
+    }
+
     /// <summary>The mounted prefixes this execution owns, in mount order.</summary>
     public IReadOnlyList<string> MountPrefixes
         => [.. _mounts.Keys.Select(static mount => mount.Prefix)];
@@ -464,6 +497,35 @@ public sealed class EngineExecution : IDisposable
         }
 
         return null;
+    }
+
+    public ResponseCacheObservation? ObserveScopedResponseCache(string mountPrefix, string? operationSlug)
+    {
+        if (string.IsNullOrEmpty(mountPrefix))
+        {
+            return null;
+        }
+
+        return CacheForPrefix(mountPrefix)?.Observe(operationSlug);
+    }
+
+    /// <summary>
+    /// Whether the served mount with this prefix declares an operation with this slug.
+    /// </summary>
+    /// <remarks>
+    /// Used by an operator channel to reject an unknown slug before any cache state is touched.
+    /// </remarks>
+    public bool MountDeclaresOperation(string mountPrefix, string operationSlug)
+    {
+        foreach ((MountedManifest mount, _) in _mounts)
+        {
+            if (string.Equals(mount.Prefix, mountPrefix, StringComparison.Ordinal))
+            {
+                return mount.Document.AgentSurface.Operation(operationSlug) is not null;
+            }
+        }
+
+        return false;
     }
 
 
@@ -499,3 +561,24 @@ public sealed class EngineExecution : IDisposable
         }
     }
 }
+
+/// <summary>The disposition of a scoped cache clear request.</summary>
+public enum ResponseCacheClearScope
+{
+    /// <summary>The operation (or whole mount) was cleared.</summary>
+    Cleared,
+
+    /// <summary>No mount with that prefix is served by this generation.</summary>
+    MountUnknown,
+
+    /// <summary>The mount is served but carries no cache (caching disabled).</summary>
+    CachingDisabled,
+
+    /// <summary>The mount declares no operation with the requested slug; nothing was cleared.</summary>
+    OperationUnknown,
+}
+
+/// <summary>A scoped clear result, or null when nothing could be cleared.</summary>
+public sealed record ResponseCacheScopedClear(
+    ResponseCacheClearScope Scope,
+    ResponseCacheClearOutcome? Outcome);

@@ -109,6 +109,18 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
                 "The worker received non-positive projection limits."));
         }
 
+        // MTH-JP-1: refuse an oversized expression in the parent, before any process is launched or
+        // any IPC frame carries it to the child. The child re-measures too, but a bound enforced
+        // only after the untrusted bytes have crossed the boundary is a bound that already shipped.
+        if (JmesPathProfile.ExpressionByteCount(expression) > limits.MaxExpressionBytes)
+        {
+            return JmesPathEvaluationResult.Failed(new JmesPathFailure(
+                JmesPathFailureClass.ExpressionTooManyBytes,
+                string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"The expression is longer than maxExpressionBytes={limits.MaxExpressionBytes} bytes.")));
+        }
+
         if (normalizedJson.Length > _options.PreparedInputFrameLimitBytes)
         {
             return JmesPathEvaluationResult.Failed(new JmesPathFailure(
@@ -560,8 +572,17 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
         }
     }
 
-    /// <summary>Reads a diagnostic stream under a hard cap, discarding anything past it.</summary>
-    private static async Task ReadBoundedAsync(Stream stream, int maxBytes, CancellationToken cancellationToken)
+    /// <summary>
+    /// Reads a diagnostic stream, retaining a bounded prefix and draining everything after it.
+    /// </summary>
+    /// <remarks>
+    /// MTH-JP-2: the read continues past the retained byte cap and discards the excess rather than
+    /// stopping. A child that logs more than the cap must not be able to fill its stderr pipe and
+    /// block, because that would turn a diagnostic into a deadlock. The retained prefix is what is
+    /// surfaced; the rest is dropped. The method is internal so a test can prove the drain reaches
+    /// the end of an over-cap stream.
+    /// </remarks>
+    internal static async Task ReadBoundedAsync(Stream stream, int maxBytes, CancellationToken cancellationToken)
     {
         byte[] buffer = new byte[4096];
         var kept = new StringBuilder();
@@ -569,7 +590,7 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
 
         try
         {
-            while (read < maxBytes)
+            while (true)
             {
                 int count = await stream.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
 
@@ -578,11 +599,14 @@ internal sealed class ProjectionWorkerHost : IProjectionWorker, IDisposable
                     break;
                 }
 
-                read += count;
-
-                if (kept.Length < 4096)
+                if (read < maxBytes)
                 {
-                    kept.Append(Encoding.UTF8.GetString(buffer, 0, count));
+                    read += count;
+
+                    if (kept.Length < 4096)
+                    {
+                        kept.Append(Encoding.UTF8.GetString(buffer, 0, count));
+                    }
                 }
             }
         }

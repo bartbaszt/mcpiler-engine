@@ -156,37 +156,58 @@ internal static class ResponseCacheOperatorEndpoints
 
             if (clear)
             {
-                ResponseCacheClearOutcome? outcome = execution.ClearResponseCache(mount!, operation);
+                ResponseCacheScopedClear scoped = execution.ClearResponseCacheScoped(mount!, operation);
 
-                if (outcome is null)
+                switch (scoped.Scope)
                 {
-                    // The mount exists but carries no cache (caching disabled for the process).
-                    // Reporting that is not a failure: nothing was there to clear.
-                    context.Response.StatusCode = StatusCodes.Status200OK;
-                    await WriteJsonAsync(context, new
-                    {
-                        mount,
-                        operation,
-                        removed = 0,
-                        caching = "disabled",
-                        manifestGenerationChanged = false,
-                    }).ConfigureAwait(false);
-                    return;
+                    case ResponseCacheClearScope.MountUnknown:
+                        context.Response.StatusCode = StatusCodes.Status404NotFound;
+                        await WriteJsonAsync(
+                                context,
+                                new { error = $"No mount '{mount}' is served by the current generation." })
+                            .ConfigureAwait(false);
+                        return;
+
+                    case ResponseCacheClearScope.OperationUnknown:
+                        // An unknown slug is refused without advancing an operation epoch, so an
+                        // arbitrary caller-supplied value cannot grow the epoch map.
+                        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                        await WriteJsonAsync(
+                                context,
+                                new { error = $"The mount '{mount}' declares no operation '{operation}'." })
+                            .ConfigureAwait(false);
+                        return;
+
+                    case ResponseCacheClearScope.CachingDisabled:
+                        // The mount exists but carries no cache (caching disabled for the process).
+                        // Reporting that is not a failure: nothing was there to clear.
+                        context.Response.StatusCode = StatusCodes.Status200OK;
+                        await WriteJsonAsync(context, new
+                        {
+                            mount,
+                            operation,
+                            removed = 0,
+                            caching = "disabled",
+                            manifestGenerationChanged = false,
+                        }).ConfigureAwait(false);
+                        return;
+
+                    default:
+                        ResponseCacheClearOutcome outcome = scoped.Outcome!;
+                        context.Response.StatusCode = StatusCodes.Status200OK;
+                        await WriteJsonAsync(context, new
+                        {
+                            mount = outcome.MountPrefix,
+                            operation = outcome.OperationSlug,
+                            removed = outcome.RemovedEntries,
+                            caching = "enabled",
+                            manifestGenerationChanged = false,
+                        }).ConfigureAwait(false);
+                        return;
                 }
-
-                context.Response.StatusCode = StatusCodes.Status200OK;
-                await WriteJsonAsync(context, new
-                {
-                    mount = outcome.MountPrefix,
-                    operation = outcome.OperationSlug,
-                    removed = outcome.RemovedEntries,
-                    caching = "enabled",
-                    manifestGenerationChanged = false,
-                }).ConfigureAwait(false);
-                return;
             }
 
-            ResponseCacheObservation? observation = execution.ObserveResponseCache(mount!);
+            ResponseCacheObservation? observation = execution.ObserveScopedResponseCache(mount!, operation);
 
             context.Response.StatusCode = StatusCodes.Status200OK;
             await WriteJsonAsync(context, observation is null

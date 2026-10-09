@@ -323,6 +323,61 @@ public sealed class ResponseCacheOperatorTests : IDisposable
         Assert.Equal(2, arrivals);
     }
 
+    [Fact]
+    public async Task An_unknown_operation_clear_is_refused_without_advancing_an_epoch()
+    {
+        // MTH-CACHE-2: an operation slug the mount does not declare is refused and adds no new
+        // operation-epoch entry, so an arbitrary caller-supplied value cannot grow epoch state.
+        int arrivals = 0;
+        await using LoopbackHost upstream = await LoopbackCachedUpstreamAsync(() => Interlocked.Increment(ref arrivals));
+        await using ServedEngine engine = await StartAsync(upstream.Address, configureOperator: true);
+
+        await WarmAsync(engine, upstream.Address);
+
+        using HttpClient client = Authorized(OperatorSecret);
+        using HttpResponseMessage refused = await client.PostAsync(
+            engine.At(ClearPath(MountPrefix, "no-such-operation")),
+            null,
+            Token);
+
+        Assert.Equal(HttpStatusCode.BadRequest, refused.StatusCode);
+
+        // The refusal changed nothing: the warmed entry is still present, so a second warm call
+        // does not reach the upstream again.
+        await WarmAsync(engine, upstream.Address);
+        Assert.Equal(1, arrivals);
+    }
+
+    [Fact]
+    public async Task A_scoped_read_returns_only_the_requested_operation()
+    {
+        // MTH-CACHE-1: an operation-scoped read contains only decisions for that operation. A read
+        // scoped to an operation with no recorded decisions returns none, and the counts describe
+        // that narrowed set rather than the whole mount.
+        int arrivals = 0;
+        await using LoopbackHost upstream = await LoopbackCachedUpstreamAsync(() => Interlocked.Increment(ref arrivals));
+        await using ServedEngine engine = await StartAsync(upstream.Address, configureOperator: true);
+
+        await WarmAsync(engine, upstream.Address);
+
+        using HttpClient client = Authorized(OperatorSecret);
+
+        using HttpResponseMessage scopedToReal = await client.GetAsync(
+            engine.At(ReadPath(MountPrefix) + "&operation=" + ExecutionManifests.Slug),
+            Token);
+        using JsonDocument realBody = JsonDocument.Parse(await scopedToReal.Content.ReadAsStringAsync(Token));
+        Assert.Equal(HttpStatusCode.OK, scopedToReal.StatusCode);
+        Assert.NotEmpty(realBody.RootElement.GetProperty("recent").EnumerateArray());
+
+        using HttpResponseMessage scopedToOther = await client.GetAsync(
+            engine.At(ReadPath(MountPrefix) + "&operation=other-operation"),
+            Token);
+        using JsonDocument otherBody = JsonDocument.Parse(await scopedToOther.Content.ReadAsStringAsync(Token));
+        Assert.Equal(HttpStatusCode.OK, scopedToOther.StatusCode);
+        Assert.Empty(otherBody.RootElement.GetProperty("recent").EnumerateArray());
+        Assert.Equal(0, otherBody.RootElement.GetProperty("invocations").GetInt64());
+    }
+
     private const string MountPrefix = "/api";
 
     private static HttpClient Authorized(string secret)

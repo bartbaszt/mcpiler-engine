@@ -426,7 +426,9 @@ internal static class WorkerResourceLimits
         applied = string.Empty;
         refusal = null;
 
-        if (!TryGetResourceLimit(ResourceAddressSpace, out long soft, out long hard))
+        int resource = AddressSpaceResourceId(OperatingSystem.IsMacOS());
+
+        if (!TryGetResourceLimit(resource, out long soft, out long hard))
         {
             refusal = "The worker could not read its own address-space limit.";
             return false;
@@ -435,7 +437,7 @@ internal static class WorkerResourceLimits
         // Never raise a limit the host set; only narrow it.
         long target = Math.Min(addressSpaceBytes, hard == Unlimited ? addressSpaceBytes : hard);
 
-        if (!TrySetResourceLimit(ResourceAddressSpace, target, hard == Unlimited ? target : hard))
+        if (!TrySetResourceLimit(resource, target, hard == Unlimited ? target : hard))
         {
             refusal = string.Create(
                 CultureInfo.InvariantCulture,
@@ -443,7 +445,7 @@ internal static class WorkerResourceLimits
             return false;
         }
 
-        if (!TryGetResourceLimit(ResourceAddressSpace, out long appliedSoft, out _) || appliedSoft != target)
+        if (!TryGetResourceLimit(resource, out long appliedSoft, out _) || appliedSoft != target)
         {
             refusal = "The applied address-space limit does not match the requested value.";
             return false;
@@ -453,7 +455,17 @@ internal static class WorkerResourceLimits
         return true;
     }
 
-    private const int ResourceAddressSpace = 9;
+    /// <summary>
+    /// The <c>getrlimit</c>/<c>setrlimit</c> resource id that names the address-space limit on the
+    /// supported POSIX host. It differs by kernel: Linux numbers it 9, while macOS/BSD numbers it 5.
+    /// Using the Linux value on macOS would silently limit an unrelated resource.
+    /// </summary>
+    internal static int AddressSpaceResourceId(bool isMacOs)
+        => isMacOs ? MacOsResourceAddressSpace : LinuxResourceAddressSpace;
+
+    private const int LinuxResourceAddressSpace = 9;
+
+    private const int MacOsResourceAddressSpace = 5;
     private const long Unlimited = -1;
     private const int JobObjectExtendedLimitInformationClass = JobObjectExtendedLimitInformation;
 

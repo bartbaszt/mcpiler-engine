@@ -452,6 +452,96 @@ public sealed class ProjectionWorkerHostTests
         Assert.True(next.Succeeded, next.Failure?.Message);
     }
 
+    [Fact]
+    public async Task An_expression_over_the_byte_bound_is_refused_before_any_worker_is_launched()
+    {
+        // MTH-JP-1: the parent refuses an oversized expression before IPC/launch. The host has no
+        // launchable worker path, so a parent that reached launch would surface an operational class
+        // instead; the refusal must be the language bound and must not launch a child.
+        using var host = CreateHost(
+            TimeSpan.FromSeconds(30),
+            launch: new WorkerLaunch("definitely-not-a-real-worker-binary", null));
+
+        string oversized = new string('@', 64);
+
+        JmesPathEvaluationResult result = await host
+            .EvaluateAsync(oversized, "{}"u8.ToArray(), Limits with { MaxExpressionBytes = 16 }, CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(JmesPathFailureClass.ExpressionTooManyBytes, result.Failure!.FailureClass);
+    }
+
+    [Fact]
+    public async Task Stderr_beyond_the_retained_cap_is_drained_rather_than_left_to_block_the_child()
+    {
+        // MTH-JP-2: the drain must read to the end of a stream longer than the retained cap.
+        const int cap = 1024;
+        int total = cap * 8;
+        var stream = new DrainProbeStream(total);
+
+        await ProjectionWorkerHost.ReadBoundedAsync(stream, cap, TestContext.Current.CancellationToken);
+
+        Assert.Equal(total, stream.BytesRead);
+    }
+
+    [Fact]
+    public void The_address_space_resource_id_is_platform_specific()
+    {
+        // MTH-JP-3: RLIMIT_AS is resource 9 on Linux but resource 5 on macOS/BSD.
+        Assert.Equal(9, WorkerResourceLimits.AddressSpaceResourceId(isMacOs: false));
+        Assert.Equal(5, WorkerResourceLimits.AddressSpaceResourceId(isMacOs: true));
+    }
+
+    /// <summary>A stream that yields a fixed number of bytes, then ends, tracking how many were read.</summary>
+    private sealed class DrainProbeStream(int total) : Stream
+    {
+        private int _remaining = total;
+
+        public int BytesRead { get; private set; }
+
+        public override bool CanRead => true;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => false;
+
+        public override long Length => throw new NotSupportedException();
+
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            int take = Math.Min(Math.Min(count, buffer.Length - offset), _remaining);
+            Array.Clear(buffer, offset, take);
+            _remaining -= take;
+            BytesRead += take;
+            return take;
+        }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            int take = Math.Min(buffer.Length, _remaining);
+            buffer.Span[..take].Clear();
+            _remaining -= take;
+            BytesRead += take;
+            return ValueTask.FromResult(take);
+        }
+
+        public override void Flush()
+        {
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
     private static ProjectionWorkerHost CreateHost(
         TimeSpan deadline,
         JmesPathLimits? limits = null,

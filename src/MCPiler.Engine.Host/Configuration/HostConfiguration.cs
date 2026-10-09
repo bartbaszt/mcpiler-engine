@@ -326,6 +326,12 @@ public static class HostConfiguration
     /// <summary>Host-only effective response-cache TTL ceiling, in seconds; zero disables caching.</summary>
     public const string ResponseCacheMaxTtlSecondsKey = "response-cache-max-ttl-seconds";
 
+    /// <summary>Host-only response-cache producer-flight ceiling per mount.</summary>
+    public const string ResponseCacheMaxFlightsKey = "response-cache-max-flights";
+
+    /// <summary>Host-only response-cache admitted-waiter ceiling per mount.</summary>
+    public const string ResponseCacheMaxWaitersKey = "response-cache-max-waiters";
+
     /// <summary>
     /// Key naming the file holding the dedicated response-cache operator secret.
     /// </summary>
@@ -451,6 +457,8 @@ public static class HostConfiguration
         ResponseCacheMaxRetainedBytesKey,
         ResponseCacheMaxEntriesKey,
         ResponseCacheMaxTtlSecondsKey,
+        ResponseCacheMaxFlightsKey,
+        ResponseCacheMaxWaitersKey,
         ResponseCacheOperatorSecretFileKey,
         RuntimeStateRootKey,
         RuntimeStateKeyFileKey,
@@ -528,6 +536,8 @@ public static class HostConfiguration
         long? responseCacheRetainedBytes = null;
         long? responseCacheEntries = null;
         long? responseCacheTtlSeconds = null;
+        long? responseCacheFlights = null;
+        long? responseCacheWaiters = null;
         string? runtimeStateRoot = null;
         string? runtimeStateKeyFile = null;
         string? responseCacheOperatorSecretFile = null;
@@ -639,6 +649,22 @@ public static class HostConfiguration
                         value,
                         ResponseCacheOptions.HardMaxTtlSeconds,
                         "seconds",
+                        rejected);
+                    break;
+                case ResponseCacheMaxFlightsKey:
+                    responseCacheFlights = NonNegativeCacheCeiling(
+                        key,
+                        value,
+                        ResponseCacheOptions.HardMaxFlightsPerMount,
+                        "producer flights per mount",
+                        rejected);
+                    break;
+                case ResponseCacheMaxWaitersKey:
+                    responseCacheWaiters = NonNegativeCacheCeiling(
+                        key,
+                        value,
+                        ResponseCacheOptions.HardMaxWaitersPerMount,
+                        "admitted waiters per mount",
                         rejected);
                     break;
                 case RuntimeStateRootKey:
@@ -776,6 +802,12 @@ public static class HostConfiguration
                 MaxTtlSeconds = responseCacheTtlSeconds is { } ttl
                     ? checked((int)ttl)
                     : ResponseCacheOptions.Default.MaxTtlSeconds,
+                MaxFlightsPerMount = responseCacheFlights is { } flights
+                    ? checked((int)flights)
+                    : ResponseCacheOptions.Default.MaxFlightsPerMount,
+                MaxWaitersPerMount = responseCacheWaiters is { } waiters
+                    ? checked((int)waiters)
+                    : ResponseCacheOptions.Default.MaxWaitersPerMount,
             },
         };
 
