@@ -311,17 +311,34 @@ public sealed class RuntimeSecretStoreTests : IDisposable
     [Fact]
     public async Task Stale_temporary_files_are_removed_when_the_store_is_opened()
     {
-        // MTH-SECRET-2: an abandoned temp is never authoritative, so opening the store reclaims it.
+        // MTH-SECRET-2: an abandoned temp is never authoritative, so opening the store reclaims it
+        // once it is older than the write grace.
         var root = Path.Combine(NewRoot(), "mount-a");
         _roots.Add(root);
         Directory.CreateDirectory(root);
         var orphan = Path.Combine(root, "orphan" + FileMutableSlotStore.RecordExtension + ".tmp-deadbeef");
         await File.WriteAllBytesAsync(orphan, Encoding.UTF8.GetBytes("partial"), TestContext.Current.CancellationToken);
+        File.SetLastWriteTimeUtc(orphan, DateTime.UtcNow - TimeSpan.FromHours(2));
 
         var store = new FileMutableSlotStore(root, "mount-a", Key);
 
         Assert.False(File.Exists(orphan));
         Assert.Null(await store.LoadAsync("oauth", "refreshToken", TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task A_fresh_abandoned_temp_is_kept_because_a_concurrent_writer_may_own_it()
+    {
+        // A temp younger than the grace threshold may be an in-flight replacement, so it is left.
+        var root = Path.Combine(NewRoot(), "mount-a");
+        _roots.Add(root);
+        Directory.CreateDirectory(root);
+        var fresh = Path.Combine(root, "inflight" + FileMutableSlotStore.RecordExtension + ".tmp-beefcafe");
+        await File.WriteAllBytesAsync(fresh, Encoding.UTF8.GetBytes("partial"), TestContext.Current.CancellationToken);
+
+        var store = new FileMutableSlotStore(root, "mount-a", Key);
+
+        Assert.True(File.Exists(fresh));
     }
 
     [Fact]
@@ -366,27 +383,109 @@ public sealed class RuntimeSecretStoreTests : IDisposable
     }
 
     [Fact]
-    public async Task The_retention_cap_bounds_distinct_slots_without_dropping_the_just_written_record()
+    public async Task The_retention_cap_refuses_a_new_identity_and_preserves_every_live_record()
     {
-        // MTH-SECRET-1: the declared bound is enforced for a burst of distinct slots, and the
-        // record just committed is never the one removed.
+        // MTH-SECRET-1: the declared bound is enforced without ever evicting a live identity. A
+        // replacement of an existing identity is always admitted; a new identity at the cap is
+        // refused fail-closed with a non-secret diagnostic.
         var store = Store();
         store.MaximumRecords = 3;
 
-        for (var index = 0; index < 6; index++)
+        for (var index = 0; index < 3; index++)
         {
             await store.ReplaceAsync(
                 new MutableSlotRecord("oauth", "slot-" + index, "fingerprint-a", 1, 0, "value-" + index),
                 TestContext.Current.CancellationToken);
         }
 
-        Assert.True(
-            Directory.GetFiles(store.Root, "*" + FileMutableSlotStore.RecordExtension).Length <= 3,
-            "the bounded lifecycle must cap the number of retained records");
+        // Replacing an existing identity succeeds and changes nothing about the other identities.
+        await store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "slot-1", "fingerprint-a", 1, 1, "value-1-rotated"),
+            TestContext.Current.CancellationToken);
 
-        // The most recently written record is always retained.
-        var newest = await store.LoadAsync("oauth", "slot-5", TestContext.Current.CancellationToken);
-        Assert.Equal("value-5", newest!.Value);
+        var failure = await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "slot-3", "fingerprint-a", 1, 0, "value-3"),
+            TestContext.Current.CancellationToken).AsTask());
+
+        Assert.Contains("bounded capacity", failure.Message, StringComparison.Ordinal);
+        Assert.Equal(3, Directory.GetFiles(store.Root, "*" + FileMutableSlotStore.RecordExtension).Length);
+        Assert.Equal(
+            "value-1-rotated",
+            (await store.LoadAsync("oauth", "slot-1", TestContext.Current.CancellationToken))!.Value);
+        Assert.Null(await store.LoadAsync("oauth", "slot-3", TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Rotations_in_one_mount_do_not_delete_another_mounts_live_record()
+    {
+        // MTH-SECRET-1: every managed auth-code mount shares one root and the same profile/slot, so
+        // maintenance keyed on anything less than (mount, profile, slot) deletes a peer's live record.
+        var root = NewRoot();
+        _roots.Add(root);
+        var mountA = new FileMutableSlotStore(root, "mount-a", Key);
+        var mountB = new FileMutableSlotStore(root, "mount-b", Key);
+
+        await mountB.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "fingerprint-b", 1, 0, "B-0"),
+            TestContext.Current.CancellationToken);
+
+        for (var revision = 1; revision <= 4; revision++)
+        {
+            await mountA.ReplaceAsync(
+                new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", 1, revision, "A-" + revision),
+                TestContext.Current.CancellationToken);
+        }
+
+        var loadedB = await mountB.LoadAsync("oauth", "refreshToken", TestContext.Current.CancellationToken);
+        Assert.NotNull(loadedB);
+        Assert.Equal("B-0", loadedB!.Value);
+        Assert.Equal(0, loadedB.RuntimeRevision);
+
+        var loadedA = await mountA.LoadAsync("oauth", "refreshToken", TestContext.Current.CancellationToken);
+        Assert.Equal("A-4", loadedA!.Value);
+    }
+
+    [Fact]
+    public async Task An_in_flight_replacement_survives_another_store_opening_the_root()
+    {
+        // MTH-SECRET-2: stores are constructed for every reconcile read and generation build. A
+        // second store opening the root between the first store's temp write and its rename must not
+        // delete the in-flight temp.
+        var root = NewRoot();
+        _roots.Add(root);
+        var mountA = new FileMutableSlotStore(root, "mount-a", Key);
+        await mountA.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", 1, 0, "T0"),
+            TestContext.Current.CancellationToken);
+
+        mountA.TempFlushedBarrier = ct =>
+        {
+            // Deterministic seam: the temp exists and has not been renamed yet.
+            var second = new FileMutableSlotStore(root, "mount-a", Key);
+            Assert.NotNull(second);
+            return ValueTask.CompletedTask;
+        };
+
+        await mountA.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", 1, 1, "T1"),
+            TestContext.Current.CancellationToken);
+
+        var loaded = await mountA.LoadAsync("oauth", "refreshToken", TestContext.Current.CancellationToken);
+        Assert.Equal("T1", loaded!.Value);
+    }
+
+    [Fact]
+    public async Task A_compaction_failure_after_a_committed_write_does_not_fail_the_write()
+    {
+        var store = Store();
+        store.CompactionBarrier = () => throw new InvalidOperationException("injected compaction failure");
+
+        await store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", 1, 0, "T0"),
+            TestContext.Current.CancellationToken);
+
+        var loaded = await store.LoadAsync("oauth", "refreshToken", TestContext.Current.CancellationToken);
+        Assert.Equal("T0", loaded!.Value);
     }
 
     [Fact]

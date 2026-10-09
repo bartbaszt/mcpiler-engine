@@ -154,6 +154,19 @@ internal static class ResponseCacheOperatorEndpoints
                 return;
             }
 
+            if (operation is { Length: > 0 } && !execution.MountDeclaresOperation(mount!, operation))
+            {
+                // Validate the slug through the mount's declared operations before either a scoped
+                // read or a scoped clear touches cache state, so an unknown slug never grows epoch
+                // state and reads and clears refuse it identically.
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                await WriteJsonAsync(
+                        context,
+                        new { error = $"The mount '{mount}' declares no operation '{operation}'." })
+                    .ConfigureAwait(false);
+                return;
+            }
+
             if (clear)
             {
                 ResponseCacheScopedClear scoped = execution.ClearResponseCacheScoped(mount!, operation);

@@ -25,12 +25,16 @@ internal sealed class PendingReconciliationQueue
 
     private readonly ConcurrentDictionary<Key, Entry> _pending = new();
     private readonly int _maximumEntries;
+    private readonly Action<string>? _diagnostics;
     private long _sequence;
 
     /// <summary>Creates the queue with a bounded capacity.</summary>
-    public PendingReconciliationQueue(int maximumEntries = DefaultMaximumEntries)
+    /// <param name="maximumEntries">The most distinct pending slot identities retained.</param>
+    /// <param name="diagnostics">Where a bounded-capacity eviction is reported, or null for none.</param>
+    public PendingReconciliationQueue(int maximumEntries = DefaultMaximumEntries, Action<string>? diagnostics = null)
     {
         _maximumEntries = maximumEntries > 0 ? maximumEntries : DefaultMaximumEntries;
+        _diagnostics = diagnostics;
     }
 
     /// <summary>Records one committed rotation as awaiting acknowledgement.</summary>
@@ -43,6 +47,15 @@ internal sealed class PendingReconciliationQueue
         long runtimeRevision)
     {
         var key = new Key(mount, profileId, slot);
+
+        // Keep the newest authoritative revision. A replay that queues an older pair after a live
+        // rotation has already queued a newer one must not overwrite it: the Platform would refuse
+        // RevisionNotSequential and the newer report would be dropped.
+        if (_pending.TryGetValue(key, out Entry? queued) && queued.RuntimeRevision >= runtimeRevision)
+        {
+            return;
+        }
+
         _pending[key] = new Entry(
             authorityEpoch,
             previousRuntimeRevision,
@@ -55,7 +68,9 @@ internal sealed class PendingReconciliationQueue
     /// <summary>
     /// Applies the bounded capacity by evicting the oldest queued identities. The record just
     /// admitted carries the highest sequence and is therefore never the one evicted, so the newest
-    /// authoritative revision is not silently dropped.
+    /// authoritative revision is not silently dropped. An eviction is reported, bounded and
+    /// non-secret, so a dropped identity can be re-derived at the next activation replay rather than
+    /// vanishing without a trace.
     /// </summary>
     private void Trim()
     {
@@ -66,11 +81,17 @@ internal sealed class PendingReconciliationQueue
 
         var overflow = _pending
             .OrderBy(pair => pair.Value.Sequence)
-            .Take(_pending.Count - _maximumEntries);
+            .Take(_pending.Count - _maximumEntries)
+            .ToArray();
         foreach (var pair in overflow)
         {
             _pending.TryRemove(pair.Key, out _);
         }
+
+        _diagnostics?.Invoke(
+            $"The pending-reconciliation queue exceeded its capacity of {_maximumEntries} identities and "
+            + $"evicted {overflow.Length} oldest entr{(overflow.Length == 1 ? "y" : "ies")}; the affected "
+            + "rotations are re-derived from their durable records at the next activation replay.");
     }
 
     /// <summary>The reports awaiting acknowledgement, ordinally ordered for a deterministic send order.</summary>

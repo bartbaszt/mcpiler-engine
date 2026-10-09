@@ -14,6 +14,13 @@ namespace MCPiler.Engine.Host.Authorization;
 /// </remarks>
 internal static class AuthorizationHttpClientFactory
 {
+    /// <summary>
+    /// The most bytes any authorization-trust response (discovery, JWKS, introspection) is
+    /// permitted to buffer. Defense in depth for the introspection body bound: even a caller that
+    /// accidentally uses the buffering path cannot allocate an unbounded response body.
+    /// </summary>
+    internal const int MaximumResponseBytes = 256 * 1024;
+
     internal static HttpClient Create(TimeSpan timeout, IWebProxy? proxy = null)
     {
         HttpClientHandler handler = new()
@@ -29,6 +36,7 @@ internal static class AuthorizationHttpClientFactory
         return new HttpClient(handler, disposeHandler: true)
         {
             Timeout = timeout,
+            MaxResponseContentBufferSize = MaximumResponseBytes,
         };
     }
 

@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+
 using MCPiler.Engine.Host.Managed;
 using Xunit;
 
@@ -57,5 +60,45 @@ public sealed class PendingReconciliationQueueTests
         queue.Acknowledge("/mcp/connector", "profile", "refreshToken", runtimeRevision: 2);
 
         Assert.Equal(0, queue.Count);
+    }
+
+    [Fact]
+    public void An_older_replay_after_a_newer_live_rotation_keeps_the_higher_revision()
+    {
+        var queue = new PendingReconciliationQueue();
+
+        // A live rotation commits revision 5 first.
+        queue.Add("/mcp/connector", "profile", "refreshToken", authorityEpoch: 1, previousRuntimeRevision: 4, runtimeRevision: 5);
+
+        // A replay then queues the earlier pair. It must not overwrite the newer queued rotation,
+        // which the Platform would refuse as RevisionNotSequential, dropping the report.
+        queue.Add("/mcp/connector", "profile", "refreshToken", authorityEpoch: 1, previousRuntimeRevision: 3, runtimeRevision: 4);
+
+        PendingReconciliation entry = Assert.Single(queue.Snapshot());
+        Assert.Equal(5, entry.RuntimeRevision);
+        Assert.Equal(4, entry.PreviousRuntimeRevision);
+    }
+
+    [Fact]
+    public void An_overflow_eviction_is_reported_by_a_bounded_non_secret_diagnostic()
+    {
+        var diagnostics = new List<string>();
+        var queue = new PendingReconciliationQueue(maximumEntries: 2, diagnostics: diagnostics.Add);
+
+        for (var index = 0; index < 5; index++)
+        {
+            queue.Add("/mcp/connector", "profile", "slot-" + index, authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
+        }
+
+        Assert.Equal(2, queue.Count);
+        Assert.NotEmpty(diagnostics);
+
+        // The diagnostic is bounded and names no identity or value.
+        Assert.DoesNotContain("slot-", string.Join('\n', diagnostics), StringComparison.Ordinal);
+
+        // The newest admitted identity is retained.
+        Assert.Contains(
+            queue.Snapshot(),
+            entry => string.Equals(entry.Slot, "slot-4", StringComparison.Ordinal));
     }
 }

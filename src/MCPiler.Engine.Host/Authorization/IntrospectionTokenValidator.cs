@@ -57,9 +57,13 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
     private readonly TimeProvider _clock;
 
     private string? _endpoint;
+    private int _admittedInFlight;
 
     /// <summary>The number of distinct tokens currently coalesced. For bounded-growth assertions.</summary>
     internal int InFlightCount => _inFlight.Count;
+
+    /// <summary>The number of admission slots currently reserved. For bounded-growth assertions.</summary>
+    internal int AdmittedInFlightCount => Volatile.Read(ref _admittedInFlight);
 
     internal IntrospectionTokenValidator(
         HttpClient client,
@@ -102,16 +106,16 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
             return cached!;
         }
 
-        // A key already in flight always joins. A genuinely new key is admitted only while distinct
-        // in-flight work is under the bound; otherwise the caller validates on its own fresh path
-        // rather than being retained, so the map and its waiters cannot grow without bound.
+        // A key already in flight always joins. A genuinely new key reserves an admission slot
+        // atomically before it publishes a coalescing entry, so a concurrent burst cannot overshoot
+        // the bound. A caller that cannot reserve is refused immediately and fail-closed: it makes
+        // no HTTP call and is not retained as a waiter, so the map and its task state stay bounded.
         if (!_inFlight.TryGetValue(key, out TaskCompletionSource<TokenVerification>? existing))
         {
-            if (_inFlight.Count >= MaximumInFlight)
+            if (Interlocked.Increment(ref _admittedInFlight) > MaximumInFlight)
             {
-                return await ValidateFreshFailClosedAsync(token)
-                    .WaitAsync(cancellationToken)
-                    .ConfigureAwait(false);
+                Interlocked.Decrement(ref _admittedInFlight);
+                return TokenVerification.Inactive;
             }
 
             TaskCompletionSource<TokenVerification> candidate = new(
@@ -121,6 +125,11 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
             if (ReferenceEquals(candidate, existing))
             {
                 _ = CompleteSingleFlightAsync(key, token, candidate);
+            }
+            else
+            {
+                // Lost a race for the same key: join the existing flight and release the slot.
+                Interlocked.Decrement(ref _admittedInFlight);
             }
         }
 
@@ -147,6 +156,7 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
         finally
         {
             _inFlight.TryRemove(new KeyValuePair<string, TaskCompletionSource<TokenVerification>>(key, completion));
+            Interlocked.Decrement(ref _admittedInFlight);
         }
     }
 
@@ -204,7 +214,7 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
         try
         {
             using HttpResponseMessage response = await _client
-                .SendAsync(request, cancellationToken)
+                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken)
                 .ConfigureAwait(false);
 
             if (response.StatusCode != HttpStatusCode.OK)

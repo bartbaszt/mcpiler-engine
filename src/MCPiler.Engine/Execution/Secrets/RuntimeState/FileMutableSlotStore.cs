@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -68,10 +69,24 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
     private const int FixedPrefixLength = 1 + HeaderLengthBytes;
     private const int MinimumEnvelopeLength = FixedPrefixLength + NonceLength + TagLength;
 
+    /// <summary>
+    /// The bounded number of unreachable files (a header that does not match its path, or a
+    /// duplicate of a live identity) one compaction pass reclaims. A bound keeps a pathological
+    /// directory from turning maintenance into an unbounded scan-and-delete.
+    /// </summary>
+    private const int MaximumUnreachableRemovalsPerPass = 64;
+
     private static readonly JsonSerializerOptions HeaderOptions = new()
     {
         WriteIndented = false,
     };
+
+    /// <summary>
+    /// Roots whose stale temporaries have already been reclaimed by this process. Cleanup runs at
+    /// most once per root: stores are constructed for every reconcile read and generation build, and
+    /// an unconditional sweep per construction could delete a temp another writer is still filling.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, byte> ReclaimedRoots = new(StringComparer.Ordinal);
 
     private readonly string _root;
     private readonly string _mountIdentity;
@@ -101,7 +116,7 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
         _key = key.ToArray();
 
         EnsureRoot();
-        RemoveStaleTemporaries();
+        ReclaimStaleTemporariesOnce();
     }
 
     /// <summary>Test seam: runs after the ciphertext reaches the temporary file, before the flush.</summary>
@@ -109,6 +124,16 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
 
     /// <summary>Test seam: runs after the flush, before the atomic replacement.</summary>
     internal Func<CancellationToken, ValueTask>? TempFlushedBarrier { get; set; }
+
+    /// <summary>Test seam: invoked at the start of a maintenance pass; returns normally in production.</summary>
+    internal Action? CompactionBarrier { get; set; }
+
+    /// <summary>
+    /// The age beyond which an abandoned temporary file is reclaimed on the first open of a root. A
+    /// temp younger than this is kept: it may belong to a concurrent replacement that has written it
+    /// but not yet renamed it.
+    /// </summary>
+    internal TimeSpan StaleTemporaryGrace { get; set; } = TimeSpan.FromMinutes(10);
 
     /// <summary>
     /// Test seam for establishing a restrictive mode on a committed path. Returns <c>true</c> when the
@@ -132,7 +157,7 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
         ArgumentException.ThrowIfNullOrWhiteSpace(profileId);
         ArgumentException.ThrowIfNullOrWhiteSpace(slot);
 
-        var path = RecordPath(profileId, slot);
+        var path = RecordPath(_mountIdentity, profileId, slot);
 
         byte[] envelope;
         try
@@ -160,9 +185,13 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
     {
         ArgumentNullException.ThrowIfNull(record);
 
+        // Refuse a new identity at the cap before anything is written, so a bounded store never
+        // has to evict a live identity to make room.
+        EnsureCapacityFor(record);
+
         var envelope = Encode(record);
-        var target = RecordPath(record.ProfileId, record.Slot);
-        var temporary = target + ".tmp-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(8));
+        var target = RecordPath(_mountIdentity, record.ProfileId, record.Slot);
+        var temporary = target + TemporarySuffix + Convert.ToHexString(RandomNumberGenerator.GetBytes(8));
 
         try
         {
@@ -199,7 +228,6 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
             }
 
             File.Move(temporary, target, overwrite: true);
-            Compact();
         }
         catch (Exception ex) when (ex is not RuntimeStateStoreException and not OperationCanceledException)
         {
@@ -210,6 +238,10 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
                 "the replacement could not be committed.",
                 ex);
         }
+
+        // Maintenance is best-effort and runs after the commit: a committed write must never be
+        // reported as failed because the directory could not be compacted.
+        TryCompactBestEffort();
     }
 
     private MutableSlotRecord? Decode(string profileId, string slot, byte[] envelope)
@@ -322,12 +354,78 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
         return associated;
     }
 
-    private string RecordPath(string profileId, string slot)
+    private string RecordPath(string mount, string profileId, string slot)
     {
-        var identity = string.Join('\u001f', _mountIdentity, profileId, slot);
+        var identity = string.Join('\u001f', mount, profileId, slot);
         var name = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(identity)));
         return Path.Combine(_root, name + RecordExtension);
     }
+
+    /// <summary>
+    /// Refuses a write for a slot identity this mount does not already own once the store holds its
+    /// bounded number of live identities. Replacing an existing identity is always allowed; the cap
+    /// only limits how many distinct identities one mount's section may hold, and it never evicts a
+    /// live identity to make room.
+    /// </summary>
+    private void EnsureCapacityFor(MutableSlotRecord record)
+    {
+        if (MaximumRecords <= 0)
+        {
+            return;
+        }
+
+        // Replacing an existing identity adds no new identity, so it is always admitted.
+        if (File.Exists(RecordPath(_mountIdentity, record.ProfileId, record.Slot)))
+        {
+            return;
+        }
+
+        FileInfo[] records;
+        try
+        {
+            records = EnumerateRecords();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
+        {
+            // A directory that cannot be enumerated is reported by the write itself, which fails
+            // closed; capacity admission is best-effort and does not block a legitimate write.
+            return;
+        }
+
+        // Fast path: fewer total files than the cap means this mount cannot be at its cap.
+        if (records.Length < MaximumRecords)
+        {
+            return;
+        }
+
+        var owned = 0;
+        foreach (var info in records)
+        {
+            if (!TryReadIdentity(info.FullName, out var identity))
+            {
+                continue;
+            }
+
+            if (!string.Equals(identity.Mount, _mountIdentity, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            owned++;
+            if (owned >= MaximumRecords)
+            {
+                throw Failed(
+                    record.ProfileId,
+                    record.Slot,
+                    "the runtime-state store has reached its bounded capacity and refuses a new slot identity.");
+            }
+        }
+    }
+
+    private FileInfo[] EnumerateRecords()
+        => Directory.EnumerateFiles(_root, "*" + RecordExtension)
+            .Select(path => new FileInfo(path))
+            .ToArray();
 
     private void EnsureRoot()
     {
@@ -417,18 +515,28 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
     }
 
     /// <summary>
-    /// Removes abandoned temporary files left by a replacement that did not reach its rename. A
-    /// temporary file is never an authoritative record, so removing every one on construction is
-    /// safe and bounds the directory across restarts.
+    /// Reclaims abandoned temporary files once per root per process. A temporary file is never an
+    /// authoritative record, but it may belong to a concurrent replacement that has written it and
+    /// not yet renamed it, so only temps older than <see cref="StaleTemporaryGrace"/> are removed.
     /// </summary>
-    private void RemoveStaleTemporaries()
+    private void ReclaimStaleTemporariesOnce()
     {
+        if (!ReclaimedRoots.TryAdd(_root, 0))
+        {
+            return;
+        }
+
         try
         {
+            var cutoff = DateTime.UtcNow - StaleTemporaryGrace;
             foreach (var path in Directory.EnumerateFiles(_root, "*" + TemporarySuffix + "*"))
             {
-                if (path.EndsWith(TemporarySuffix, StringComparison.Ordinal)
-                    || Path.GetFileName(path).Contains(TemporarySuffix, StringComparison.Ordinal))
+                if (!Path.GetFileName(path).Contains(TemporarySuffix, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (File.GetLastWriteTimeUtc(path) < cutoff)
                 {
                     TryRemove(path);
                 }
@@ -442,78 +550,89 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
     }
 
     /// <summary>
-    /// Bounds the number of committed records. Exactly one live record may exist per slot identity;
-    /// the newest record for a slot is always preserved, and only stale/superseded records (a slot
-    /// whose newest record is present elsewhere) are removed. Repeated rotations therefore do not
-    /// accumulate obsolete authority, and no slot's live newest value is ever dropped.
+    /// Reclaims only files that are unreachable by any read, under a bound: a file whose header
+    /// identity does not match its own path (corrupt, or copied to a foreign name), or a duplicate of
+    /// a live identity. A live record for any identity — including another mount sharing this root —
+    /// is never removed. Capacity is enforced by refusing new identities, not by eviction.
     /// </summary>
     private void Compact()
     {
-        System.IO.FileInfo[] records;
+        // Test seam: lets a test prove that a maintenance failure after a committed write is
+        // best-effort. In production this is null.
+        CompactionBarrier?.Invoke();
+
+        FileInfo[] records;
         try
         {
-            records = Directory.EnumerateFiles(_root, "*" + RecordExtension)
-                .Select(path => new FileInfo(path))
-                .ToArray();
+            records = EnumerateRecords();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
         {
             return;
         }
 
-        // The just-committed target is the newest for its slot; group by the authenticated identity
-        // recovered from each envelope so a stale duplicate is the only thing removable.
-        var newestPerSlot = new Dictionary<(string Profile, string Slot), FileInfo>();
-        var unreadable = new List<FileInfo>();
+        var newest = new Dictionary<RecordIdentity, FileInfo>();
+        var unreachable = new List<FileInfo>();
         foreach (var info in records)
         {
-            if (!TryReadSlotIdentity(info.FullName, out var identity))
+            if (!TryReadIdentity(info.FullName, out var identity))
             {
-                unreadable.Add(info);
+                // Unreadable: leave it. A read of the matching identity fails closed and reports it;
+                // a blind delete could remove a record a concurrent writer is still establishing.
                 continue;
             }
 
-            if (!newestPerSlot.TryGetValue(identity, out var current)
-                || info.LastWriteTimeUtc > current.LastWriteTimeUtc)
+            if (!PathMatchesIdentity(info, identity))
             {
-                newestPerSlot[identity] = info;
-            }
-        }
-
-        var stale = new List<FileInfo>();
-        foreach (var info in records)
-        {
-            if (!TryReadSlotIdentity(info.FullName, out var identity))
-            {
+                unreachable.Add(info);
                 continue;
             }
 
-            if (!ReferenceEquals(newestPerSlot[identity], info))
+            if (newest.TryGetValue(identity, out var current))
             {
-                stale.Add(info);
+                if (info.LastWriteTimeUtc > current.LastWriteTimeUtc)
+                {
+                    unreachable.Add(current);
+                    newest[identity] = info;
+                }
+                else
+                {
+                    unreachable.Add(info);
+                }
+            }
+            else
+            {
+                newest[identity] = info;
             }
         }
 
-        foreach (var info in stale)
+        var removals = 0;
+        foreach (var info in unreachable)
         {
+            if (removals >= MaximumUnreachableRemovalsPerPass)
+            {
+                break;
+            }
+
             TryRemove(info.FullName);
-        }
-
-        // A sanity bound on distinct slots; newest-per-slot is never among the evicted.
-        var distinct = newestPerSlot.Count;
-        if (MaximumRecords > 0 && distinct > MaximumRecords)
-        {
-            var evictable = newestPerSlot.Values
-                .OrderBy(info => info.LastWriteTimeUtc)
-                .Take(distinct - MaximumRecords);
-            foreach (var info in evictable)
-            {
-                TryRemove(info.FullName);
-            }
+            removals++;
         }
     }
 
-    private bool TryReadSlotIdentity(string path, out (string Profile, string Slot) identity)
+    private void TryCompactBestEffort()
+    {
+        try
+        {
+            Compact();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Best-effort maintenance runs after the commit and must not turn a committed write
+            // into a reported failure.
+        }
+    }
+
+    private bool TryReadIdentity(string path, out RecordIdentity identity)
     {
         identity = default;
         try
@@ -537,7 +656,7 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
                 return false;
             }
 
-            identity = (header.Profile, header.Slot);
+            identity = new RecordIdentity(header.Mount, header.Profile, header.Slot);
             return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
@@ -545,6 +664,19 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
             return false;
         }
     }
+
+    /// <summary>
+    /// True when a record file's name is the one its own header identity resolves to. A file whose
+    /// name and header disagree cannot be reached by any <see cref="LoadAsync"/> call.
+    /// </summary>
+    private bool PathMatchesIdentity(FileInfo info, RecordIdentity identity)
+    {
+        var expected = Path.GetFileName(RecordPath(identity.Mount, identity.Profile, identity.Slot));
+        return string.Equals(info.Name, expected, StringComparison.Ordinal);
+    }
+
+    /// <summary>The authenticated, non-secret identity of one record: mount, profile and slot.</summary>
+    private readonly record struct RecordIdentity(string Mount, string Profile, string Slot);
 
     private static void TryRemove(string path)
     {

@@ -511,11 +511,11 @@ public sealed class IntrospectionTokenValidatorTests
     }
 
     [Fact]
-    public async Task Distinct_inflight_introspections_are_bounded_and_overflow_is_never_retained()
+    public async Task Distinct_inflight_introspections_are_bounded_and_overflow_is_refused_without_a_call()
     {
-        // MTH-RUN-2: a flood of distinct tokens must not grow the coalescing map without bound. When
-        // admission is full, the extra caller is served on its own fresh fail-closed path and is not
-        // retained as a waiter.
+        // MTH-RUN-2: a flood of distinct tokens must not grow the coalescing map or its waiters
+        // without bound. At the bound the extra caller is refused immediately, fail-closed, with no
+        // HTTP call, and is never retained.
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var handler = new StubHandler(async (_, cancellationToken) =>
         {
@@ -525,7 +525,7 @@ public sealed class IntrospectionTokenValidatorTests
         using var client = new HttpClient(handler);
         var validator = CreateValidator(client, new FakeTimeProvider(Now), ttlSeconds: 30);
 
-        List<Task> held = [];
+        List<Task<TokenVerification>> held = [];
         for (int index = 0; index < IntrospectionTokenValidator.MaximumInFlight; index++)
         {
             held.Add(validator.ValidateAsync($"held-{index}", TestContext.Current.CancellationToken));
@@ -537,29 +537,27 @@ public sealed class IntrospectionTokenValidatorTests
         }
 
         Assert.Equal(IntrospectionTokenValidator.MaximumInFlight, validator.InFlightCount);
+        int callsAtBound = handler.Calls;
 
-        // An overflow token is admitted on its own fresh path: it still completes, but the coalescing
-        // map never exceeds the bound.
-        Task<TokenVerification> overflow = validator.ValidateAsync("overflow", TestContext.Current.CancellationToken);
-
-        for (var attempt = 0; attempt < 200 && validator.InFlightCount > IntrospectionTokenValidator.MaximumInFlight; attempt++)
-        {
-            await Task.Delay(5, TestContext.Current.CancellationToken);
-        }
-
+        // An overflow token is refused immediately with no HTTP call and is not retained.
+        TokenVerification overflow = await validator.ValidateAsync("overflow", TestContext.Current.CancellationToken);
+        Assert.False(overflow.Active);
+        Assert.Equal(callsAtBound, handler.Calls);
         Assert.Equal(IntrospectionTokenValidator.MaximumInFlight, validator.InFlightCount);
 
         gate.SetResult();
         await Task.WhenAll(held);
-        Assert.True((await overflow).Active);
-        Assert.Equal(IntrospectionTokenValidator.MaximumInFlight + 1, handler.Calls);
+        Assert.Equal(IntrospectionTokenValidator.MaximumInFlight, handler.Calls);
 
-        for (var attempt = 0; attempt < 200 && validator.InFlightCount != 0; attempt++)
+        for (var attempt = 0; attempt < 200 && validator.AdmittedInFlightCount != 0; attempt++)
         {
             await Task.Delay(5, TestContext.Current.CancellationToken);
         }
 
         Assert.Equal(0, validator.InFlightCount);
+
+        // After the issuer is released, a healthy follow-up validation succeeds.
+        Assert.True((await validator.ValidateAsync("healthy-after-release", TestContext.Current.CancellationToken)).Active);
     }
 
     [Fact]
@@ -582,18 +580,24 @@ public sealed class IntrospectionTokenValidatorTests
     }
 
     [Fact]
-    public async Task A_chunked_body_over_the_bound_without_a_length_is_refused()
+    public async Task A_truly_streamed_body_over_the_bound_is_refused_without_buffering_it_all()
     {
-        var oversized = new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            Content = new StreamContent(new MemoryStream(new byte[IntrospectionTokenValidator.MaximumResponseBodyBytes + 16])),
-        };
-        oversized.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
-        var handler = new StubHandler((_, _) => oversized);
+        // MTH-RUN-3: a non-seekable producer with no Content-Length proves the streaming read path
+        // stops after the byte bound instead of buffering the whole body.
+        const long total = 4L * IntrospectionTokenValidator.MaximumResponseBodyBytes;
+        var content = new CountingNonSeekableContent(total);
+        var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+        var handler = new StubHandler((_, _) => response);
         using var client = new HttpClient(handler);
         var validator = CreateValidator(client, new FakeTimeProvider(Now), ttlSeconds: 30);
 
-        Assert.False((await validator.ValidateAsync("chunked", TestContext.Current.CancellationToken)).Active);
+        TokenVerification verification = await validator.ValidateAsync("streamed", TestContext.Current.CancellationToken);
+
+        Assert.False(verification.Active);
+        Assert.True(
+            content.BytesPulled <= IntrospectionTokenValidator.MaximumResponseBodyBytes + 8192,
+            $"the reader pulled {content.BytesPulled} bytes, more than the bound plus one buffer");
+        Assert.True(content.BytesPulled < total, "the producer must not have been fully drained");
     }
 
     private static IntrospectionTokenValidator CreateValidator(
@@ -667,6 +671,83 @@ public sealed class IntrospectionTokenValidatorTests
         {
             int number = Interlocked.Increment(ref _calls);
             return _responder(number, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// A non-seekable response body with no computed length that yields bytes lazily and records how
+    /// many were actually pulled, so a test can prove the reader stopped at its bound.
+    /// </summary>
+    private sealed class CountingNonSeekableContent : HttpContent
+    {
+        private const int ChunkSize = 8192;
+
+        private readonly long _total;
+
+        public CountingNonSeekableContent(long total)
+        {
+            _total = total;
+            Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        }
+
+        public long BytesPulled { get; private set; }
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+            => throw new NotSupportedException();
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+
+        protected override Task<Stream> CreateContentReadStreamAsync()
+            => Task.FromResult<Stream>(new PullStream(this));
+
+        private sealed class PullStream(CountingNonSeekableContent owner) : Stream
+        {
+            private long _emitted;
+
+            public override bool CanRead => true;
+
+            public override bool CanSeek => false;
+
+            public override bool CanWrite => false;
+
+            public override long Length => throw new NotSupportedException();
+
+            public override long Position
+            {
+                get => throw new NotSupportedException();
+                set => throw new NotSupportedException();
+            }
+
+            public override void Flush()
+            {
+            }
+
+            public override int Read(byte[] buffer, int offset, int count)
+                => Read(buffer.AsSpan(offset, count));
+
+            public override int Read(Span<byte> buffer)
+            {
+                if (_emitted >= owner._total)
+                {
+                    return 0;
+                }
+
+                int toRead = (int)Math.Min(Math.Min(buffer.Length, ChunkSize), owner._total - _emitted);
+                buffer[..toRead].Fill((byte)'x');
+                _emitted += toRead;
+                owner.BytesPulled += toRead;
+                return toRead;
+            }
+
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+            public override void SetLength(long value) => throw new NotSupportedException();
+
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
         }
     }
 }

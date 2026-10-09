@@ -449,7 +449,21 @@ public sealed class EngineExecution : IDisposable
             return null;
         }
 
-        return CacheForPrefix(mountPrefix)?.ClearScope(operationSlug);
+        ResponseCache? cache = CacheForPrefix(mountPrefix);
+        if (cache is null)
+        {
+            return null;
+        }
+
+        if (operationSlug is { Length: > 0 })
+        {
+            // Only a declared slug advances an operation epoch; an unknown slug is refused without
+            // growing the epoch map, so a caller-supplied value cannot allocate state.
+            cache.TryClearOperation(operationSlug, out ResponseCacheClearOutcome outcome);
+            return outcome;
+        }
+
+        return cache.ClearScope(null);
     }
 
     /// <summary>
@@ -466,7 +480,11 @@ public sealed class EngineExecution : IDisposable
         ResponseCache? cache = CacheForPrefix(mountPrefix);
         if (cache is null)
         {
-            return new ResponseCacheScopedClear(ResponseCacheClearScope.CachingDisabled, null);
+            // Distinguish a prefix that names no mount (unknown) from a served mount that carries no
+            // cache (caching disabled). An unknown mount is a refusal, not a successful no-op.
+            return MountPrefixes.Contains(mountPrefix, StringComparer.Ordinal)
+                ? new ResponseCacheScopedClear(ResponseCacheClearScope.CachingDisabled, null)
+                : new ResponseCacheScopedClear(ResponseCacheClearScope.MountUnknown, null);
         }
 
         if (operationSlug is { Length: > 0 })

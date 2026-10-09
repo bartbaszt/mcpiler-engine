@@ -37,7 +37,7 @@ internal sealed class ManagedSyncWorker : IDisposable
     private readonly ManagedSyncBackoff _backoff;
     private readonly Action<string>? _diagnostics;
     private readonly string _engineVersion;
-    private readonly PendingReconciliationQueue _reconciliations = new();
+    private readonly PendingReconciliationQueue _reconciliations;
 
     /// <summary>
     /// Minted once per process. The Platform stores it with every report so it can order the
@@ -92,6 +92,7 @@ internal sealed class ManagedSyncWorker : IDisposable
         _binding = binding;
         _engineVersion = engineVersion;
         _diagnostics = diagnostics;
+        _reconciliations = new PendingReconciliationQueue(diagnostics: diagnostics);
         _client = client ?? new ManagedSyncClient(options);
 
         // One second doubling to thirty seconds: the first retry is quick enough that a

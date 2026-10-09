@@ -485,11 +485,35 @@ public sealed class ProjectionWorkerHostTests
     }
 
     [Fact]
-    public void The_address_space_resource_id_is_platform_specific()
+    public void The_address_space_resource_id_is_the_linux_value()
     {
-        // MTH-JP-3: RLIMIT_AS is resource 9 on Linux but resource 5 on macOS/BSD.
-        Assert.Equal(9, WorkerResourceLimits.AddressSpaceResourceId(isMacOs: false));
-        Assert.Equal(5, WorkerResourceLimits.AddressSpaceResourceId(isMacOs: true));
+        // MTH-JP-3: Linux numbers RLIMIT_AS 9. No other POSIX host is supported, so there is no
+        // platform-specific alternative to select.
+        Assert.Equal(9, WorkerResourceLimits.AddressSpaceResourceId());
+    }
+
+    [Fact]
+    public void An_unsupported_host_reports_confinement_unavailable_and_refuses_evaluation()
+    {
+        // MTH-JP-3: a host that is neither Windows nor Linux (for example macOS) has no confinement
+        // mechanism, so the worker refuses rather than evaluating unconfined. The platform seam
+        // proves this without requiring a macOS host.
+        using (WorkerResourceLimits.OverridePlatformForTesting(WorkerHostPlatform.Other))
+        {
+            Assert.False(WorkerResourceLimits.TryApply(
+                WorkerResourceLimits.DefaultCommittedBytes,
+                WorkerResourceLimits.DefaultAddressSpaceBytes,
+                out string applied,
+                out string? refusal));
+
+            Assert.Empty(applied);
+            Assert.NotNull(refusal);
+            Assert.Contains("No memory confinement", refusal, StringComparison.Ordinal);
+        }
+
+        // A refusal is the entry point's confinement-refused exit, which the parent classifies
+        // fail-closed; the evaluation never runs.
+        Assert.NotEqual(0, ProjectionWorkerEntry.ConfinementRefusedExitCode);
     }
 
     /// <summary>A stream that yields a fixed number of bytes, then ends, tracking how many were read.</summary>
