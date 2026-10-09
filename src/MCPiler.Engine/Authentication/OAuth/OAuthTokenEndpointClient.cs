@@ -286,33 +286,16 @@ public sealed class OAuthTokenEndpointClient(IUpstreamTransport transport, TimeP
     /// <c>+</c>, and <c>+</c>, <c>*</c> and <c>%</c> are percent-encoded. Mirrors the form-body
     /// encoding the same client applies to <c>client_secret_post</c> values.
     /// </summary>
+    /// <remarks>
+    /// The whole string is percent-encoded in one call so UTF-16 surrogate pairs are handled as
+    /// characters, not code units: iterating <c>char</c>-by-<c>char</c> would split a non-BMP
+    /// character (for example an emoji) into two lone surrogates and encode each as the replacement
+    /// character, corrupting the credential. <see cref="Uri.EscapeDataString(string)"/> already
+    /// emits <c>%20</c> for a space, <c>%2B</c> for <c>+</c>, <c>%2A</c> for <c>*</c> and
+    /// <c>%25</c> for <c>%</c>; only the space-to-<c>+</c> form rule needs an extra replacement.
+    /// </remarks>
     private static string FormEncode(string value)
-    {
-        var builder = new System.Text.StringBuilder(value.Length);
-        foreach (var character in value)
-        {
-            switch (character)
-            {
-                case ' ':
-                    builder.Append('+');
-                    break;
-                case '+':
-                    builder.Append("%2B");
-                    break;
-                case '*':
-                    builder.Append("%2A");
-                    break;
-                case '%':
-                    builder.Append("%25");
-                    break;
-                default:
-                    builder.Append(Uri.EscapeDataString(character.ToString()));
-                    break;
-            }
-        }
-
-        return builder.ToString();
-    }
+        => Uri.EscapeDataString(value).Replace("%20", "+", StringComparison.Ordinal);
 
     private static async Task<byte[]> ReadBoundedAsync(UpstreamResponse response, CancellationToken cancellationToken)
     {

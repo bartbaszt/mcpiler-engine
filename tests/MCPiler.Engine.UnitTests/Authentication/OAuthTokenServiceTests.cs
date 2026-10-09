@@ -113,6 +113,35 @@ public sealed class OAuthTokenServiceTests
     }
 
     [Fact]
+    public async Task Client_secret_basic_preserves_non_BMP_characters_as_utf8_bytes()
+    {
+        // R1.3 / MTH-SECRET-4: a char-by-char encoder splits a UTF-16 surrogate pair into two lone
+        // surrogates and encodes each as the replacement character (%EF%BF%BD%EF%BF%BD). The RFC 6749
+        // form encoding must instead emit the UTF-8 bytes of the code point (U+1F600 -> %F0%9F%98%80).
+        var transport = new RecordingTransport(Responds("access-a", expiresIn: 3600));
+        var client = new OAuthTokenEndpointClient(transport, new AdvanceableClock(Now));
+        var configuration = Configuration(
+            """{"clientId":"emoji-client","tokenEndpoint":"https://auth.example.com/oauth2/token","tokenAuthMethod":"client_secret_basic"}""");
+
+        await client.ExchangeAsync(
+            configuration,
+            ["https://auth.example.com:443"],
+            new Dictionary<string, string> { ["grant_type"] = "client_credentials" },
+            "p\u00e4ss\U0001F600word",
+            CancellationToken.None);
+
+        var sent = Assert.Single(transport.Requests);
+        var basic = Assert.Single(sent.Headers["Authorization"]);
+        var decoded = Encoding.UTF8.GetString(Convert.FromBase64String(basic["Basic ".Length..]));
+
+        Assert.Equal("emoji-client:p%C3%A4ss%F0%9F%98%80word", decoded);
+        Assert.DoesNotContain("%EF%BF%BD", decoded, StringComparison.Ordinal);
+
+        // The raw secret must never appear on the wire or in diagnostics.
+        Assert.DoesNotContain("p\u00e4ss\U0001F600word", decoded, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task A_cached_token_is_reused_without_another_exchange()
     {
         var transport = new RecordingTransport(Responds("access-a", expiresIn: 3600));
