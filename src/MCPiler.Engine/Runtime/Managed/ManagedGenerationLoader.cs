@@ -203,6 +203,7 @@ public sealed class ManagedGenerationLoader : IDisposable
     private readonly OutboundConnectionPolicy _connections;
     private readonly FileHandleStore _files;
     private readonly RuntimeStateLocation? _runtimeState;
+    private readonly ConfirmedRevisionStore? _confirmed;
     private bool _disposed;
 
     private ManagedGenerationLoader(
@@ -215,6 +216,7 @@ public sealed class ManagedGenerationLoader : IDisposable
         _connections = connections;
         _files = files;
         _runtimeState = runtimeState;
+        _confirmed = runtimeState is null ? null : new ConfirmedRevisionStore(runtimeState.Root);
     }
 
     /// <summary>Whether rotated authentication state survives a restart.</summary>
@@ -555,6 +557,33 @@ public sealed class ManagedGenerationLoader : IDisposable
     }
 
     /// <summary>
+    /// The revision the Platform last confirmed for a mutable slot identity, or null when none has
+    /// been confirmed.
+    /// </summary>
+    /// <param name="mount">The mount the slot belongs to.</param>
+    /// <param name="profileId">The manifest-local profile identity.</param>
+    /// <param name="slot">The slot identity.</param>
+    public ConfirmedSlotRevision? ReadConfirmedRevision(string mount, string profileId, string slot)
+        => _confirmed is null
+            ? null
+            : _confirmed.Read(mount, profileId, slot) is { } entry
+                ? new ConfirmedSlotRevision(entry.Epoch, entry.Revision)
+                : null;
+
+    /// <summary>
+    /// Durably records the revision the Platform confirmed for a mutable slot identity, so a recovery
+    /// report after a restart bases on what the peer holds rather than on the served generation's
+    /// declared revision (R10.6).
+    /// </summary>
+    /// <param name="mount">The mount the slot belongs to.</param>
+    /// <param name="profileId">The manifest-local profile identity.</param>
+    /// <param name="slot">The slot identity.</param>
+    /// <param name="authorityEpoch">The authority epoch the confirmation was made under.</param>
+    /// <param name="runtimeRevision">The revision the Platform confirmed.</param>
+    public void RecordConfirmedRevision(string mount, string profileId, string slot, long authorityEpoch, long runtimeRevision)
+        => _confirmed?.Record(mount, profileId, slot, authorityEpoch, runtimeRevision);
+
+    /// <summary>
     /// Re-derives the reconciliation notifications a restarted process still owes for rotations it
     /// committed locally before it stopped.
     /// </summary>
@@ -596,8 +625,10 @@ public sealed class ManagedGenerationLoader : IDisposable
         IReadOnlyList<MountedManifest> mounts,
         RotationNotification rotations,
         CancellationToken cancellationToken)
-        => await ReplayDurableRotationsBatchAsync(mounts, rotations, startIndex: 0, maxSlots: int.MaxValue, cancellationToken)
+    {
+        await ReplayDurableRotationsBatchAsync(mounts, rotations, startIndex: 0, maxSlots: int.MaxValue, cancellationToken)
             .ConfigureAwait(false);
+    }
 
     /// <summary>
     /// Re-derives at most <paramref name="maxSlots"/> declared slots starting at <paramref name="startIndex"/>,
@@ -612,8 +643,12 @@ public sealed class ManagedGenerationLoader : IDisposable
     /// </param>
     /// <param name="maxSlots">The maximum number of declared slots inspected in this call.</param>
     /// <param name="cancellationToken">Cancellation.</param>
-    /// <returns>The resume index for the next call, or null when every candidate was inspected.</returns>
-    public async ValueTask<int?> ReplayDurableRotationsBatchAsync(
+    /// <returns>
+    /// The batch outcome: the resume index for the next call (or null when every candidate was
+    /// inspected) and whether any candidate's durable record could not be read. A caller must not
+    /// treat a batch as a completed recovery while a resume index remains or the batch is incomplete.
+    /// </returns>
+    public async ValueTask<DurableReplayBatch> ReplayDurableRotationsBatchAsync(
         IReadOnlyList<MountedManifest> mounts,
         RotationNotification rotations,
         int startIndex,
@@ -627,7 +662,7 @@ public sealed class ManagedGenerationLoader : IDisposable
 
         if (_runtimeState is null)
         {
-            return null;
+            return new DurableReplayBatch(null, Incomplete: false);
         }
 
         // Flatten the declared slots into one deterministic list. The list is bounded by the generation's
@@ -646,11 +681,12 @@ public sealed class ManagedGenerationLoader : IDisposable
 
         if (candidates.Count == 0)
         {
-            return null;
+            return new DurableReplayBatch(null, Incomplete: false);
         }
 
         var start = ((startIndex % candidates.Count) + candidates.Count) % candidates.Count;
         var processed = 0;
+        var incomplete = false;
 
         for (var offset = 0; offset < candidates.Count && processed < maxSlots; offset++)
         {
@@ -666,7 +702,10 @@ public sealed class ManagedGenerationLoader : IDisposable
             catch (RuntimeStateStoreException)
             {
                 // An unreadable record is left for a later reconciliation attempt, exactly as the live path
-                // does; replaying an invented value would be worse than silence.
+                // does; replaying an invented value would be worse than silence. The batch is marked
+                // incomplete so the caller does not treat this pass as a completed recovery while a locally
+                // held credential was never reconciled (R10.2).
+                incomplete = true;
                 continue;
             }
 
@@ -677,22 +716,39 @@ public sealed class ManagedGenerationLoader : IDisposable
                 continue;
             }
 
-            // The base the Platform must advance from is the revision the delivered generation declared
-            // for this slot, not record - 1: when several rotations coalesced before the report was sent,
-            // the Platform is still at the declared revision and a record - 1 base is refused as a revision
-            // mismatch, stranding the newer credential (R9.1).
+            // The base the Platform must advance from is the revision it currently holds for this slot.
+            // When a confirmation is durably known for this epoch the declared revision can lag it: the
+            // Platform accepted an earlier rotation and advanced its stored revision while the served
+            // generation still declared the older one, so a declared-revision base is refused as a mismatch
+            // and the newer credential is stranded (R10.6). With no confirmation (several rotations
+            // coalesced before the first report) the declared revision is correct (R9.1).
+            var baseRevision = candidate.DeclaredRevision;
+            if (_confirmed?.Read(candidate.Mount, candidate.ProfileId, candidate.Slot) is { } confirmed
+                && confirmed.Epoch == record.AuthorityEpoch)
+            {
+                if (confirmed.Revision >= record.RuntimeRevision)
+                {
+                    // The durable record is already reconciled at or below the confirmed revision; there is
+                    // nothing left to report. This is the durable counterpart of the in-memory
+                    // acknowledged-version memory.
+                    continue;
+                }
+
+                baseRevision = confirmed.Revision;
+            }
+
             await rotations(
                 candidate.Mount,
                 candidate.ProfileId,
                 candidate.Slot,
                 record.AuthorityEpoch,
-                candidate.DeclaredRevision,
+                baseRevision,
                 record.RuntimeRevision,
                 cancellationToken).ConfigureAwait(false);
         }
 
         var next = start + processed;
-        return next >= candidates.Count ? null : next;
+        return new DurableReplayBatch(next >= candidates.Count ? null : next, incomplete);
     }
 
     /// <summary>
@@ -769,3 +825,24 @@ public sealed class ManagedGenerationLoader : IDisposable
     /// </remarks>
     public void Dispose() => _disposed = true;
 }
+
+/// <summary>
+/// The outcome of one bounded durable-rotation replay batch.
+/// </summary>
+/// <param name="NextCursor">
+/// The resume index for the next batch, or null when every candidate has been inspected. A non-null
+/// value means unreconciled candidates remain, so the caller must not treat recovery as complete.
+/// </param>
+/// <param name="Incomplete">
+/// True when at least one candidate slot could not be read because its durable record raised a store
+/// failure. The caller must retry rather than treat the batch as a completed recovery.
+/// </param>
+public readonly record struct DurableReplayBatch(int? NextCursor, bool Incomplete);
+
+/// <summary>
+/// The revision the Platform last confirmed for a mutable slot identity, tied to the authority epoch it
+/// was confirmed under.
+/// </summary>
+/// <param name="AuthorityEpoch">The authority epoch the confirmation was made under.</param>
+/// <param name="RuntimeRevision">The confirmed runtime revision.</param>
+public readonly record struct ConfirmedSlotRevision(long AuthorityEpoch, long RuntimeRevision);

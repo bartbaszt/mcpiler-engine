@@ -221,6 +221,15 @@ internal sealed class ManagedSyncWorker : IDisposable
             switch (outcome)
             {
                 case ReconciliationOutcome.Recorded:
+                    // Durably remember what the Platform now holds for this slot, so a recovery report
+                    // after a restart bases on it rather than on the served generation's declared
+                    // revision (R10.6).
+                    _loader.RecordConfirmedRevision(
+                        pending.Mount,
+                        pending.ProfileId,
+                        pending.Slot,
+                        record.AuthorityEpoch,
+                        record.RuntimeRevision);
                     _reconciliations.Acknowledge(
                         pending.Mount,
                         pending.ProfileId,
@@ -386,7 +395,7 @@ internal sealed class ManagedSyncWorker : IDisposable
                     var recoveryVersion = _reconciliations.RecoveryVersion;
                     try
                     {
-                        int? resume = await _loader.ReplayDurableRotationsBatchAsync(
+                        DurableReplayBatch batch = await _loader.ReplayDurableRotationsBatchAsync(
                             activeMounts,
                             (mount, profile, slot, epoch, previous, revision, _) =>
                             {
@@ -396,8 +405,26 @@ internal sealed class ManagedSyncWorker : IDisposable
                             _recoveryReplayCursor,
                             _reconciliations.Capacity,
                             cancellationToken).ConfigureAwait(false);
-                        _recoveryReplayCursor = resume ?? 0;
-                        _reconciliations.AcknowledgeRecovery(recoveryVersion);
+
+                        // Advance the resume position. It restarts only once the whole candidate list has
+                        // been traversed (NextCursor is null).
+                        _recoveryReplayCursor = batch.NextCursor ?? 0;
+
+                        // Only a pass that traversed the whole candidate list and read every durable record
+                        // completes recovery. While a resume cursor remains, the bounded batch left
+                        // unreconciled candidates unvisited, and while a record could not be read a locally
+                        // held credential was skipped; recovery stays requested so a later pass continues or
+                        // retries instead of silently declaring convergence (R10.1, R10.2).
+                        if (batch.NextCursor is null && !batch.Incomplete)
+                        {
+                            _reconciliations.AcknowledgeRecovery(recoveryVersion);
+                        }
+                        else if (batch.Incomplete)
+                        {
+                            _diagnostics?.Invoke(
+                                "managed: recovery replay could not read one or more durable records; "
+                                + "recovery remains pending.");
+                        }
                     }
                     catch (Exception exception) when (exception is not OperationCanceledException)
                     {

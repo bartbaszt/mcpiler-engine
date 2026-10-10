@@ -1377,6 +1377,214 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         Assert.Equal("1", platform.ReconcileSessionEpochHeaders.ToArray()[0]);
     }
 
+    [Fact]
+    public async Task A_bounded_durable_replay_reports_a_resume_cursor_until_every_candidate_is_inspected()
+    {
+        (ManagedGenerationLoader loader, FileMutableSlotStore slots) = await OpenLoaderWithStateAsync();
+
+        ManagedGenerationDelivery delivery = DirectDelivery(
+            "g1",
+            TwoSlotRotatableRefreshSurface(new Uri("https://api.example.com/")),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["MANAGED_CLIENT_SECRET"] = "client-secret-canary",
+                ["MANAGED_REFRESH_TOKEN"] = "declared-refresh",
+            });
+
+        ManagedGenerationLoad loaded = loader.Load(delivery);
+        Assert.True(loaded.Succeeded, string.Join("; ", loaded.Refusals.Select(refusal => refusal.Message)));
+        IReadOnlyList<MountedManifest> mounts = loaded.Generation!.Mounts;
+
+        await slots.ReplaceAsync(
+            new MutableSlotRecord("oauth2-authorization-code-pkce-refresh", "refreshToken", null, 1, 1, "v-refresh"),
+            TestContext.Current.CancellationToken);
+        await slots.ReplaceAsync(
+            new MutableSlotRecord("oauth2-authorization-code-pkce-refresh", "clientSecret", null, 1, 1, "v-secret"),
+            TestContext.Current.CancellationToken);
+
+        var reported = new List<string>();
+        RotationNotification callback = (mount, profile, slot, epoch, previous, revision, _) =>
+        {
+            reported.Add(slot);
+            return ValueTask.CompletedTask;
+        };
+
+        // One candidate per bounded batch: the first batch leaves a resume cursor, so a worker reading only
+        // this result must not treat the replay as complete (R10.1).
+        DurableReplayBatch first = await loader.ReplayDurableRotationsBatchAsync(
+            mounts, callback, startIndex: 0, maxSlots: 1, TestContext.Current.CancellationToken);
+
+        Assert.Single(reported);
+        Assert.NotNull(first.NextCursor);
+        Assert.False(first.Incomplete);
+
+        DurableReplayBatch second = await loader.ReplayDurableRotationsBatchAsync(
+            mounts, callback, startIndex: first.NextCursor!.Value, maxSlots: 1, TestContext.Current.CancellationToken);
+
+        Assert.Equal(2, reported.Count);
+        Assert.Null(second.NextCursor);
+        Assert.False(second.Incomplete);
+    }
+
+    [Fact]
+    public async Task An_unreadable_durable_record_marks_the_replay_batch_incomplete()
+    {
+        (ManagedGenerationLoader loader, FileMutableSlotStore slots) = await OpenLoaderWithStateAsync();
+
+        ManagedGenerationDelivery delivery = DirectDelivery(
+            "g1",
+            ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["MANAGED_CLIENT_SECRET"] = "client-secret-canary",
+                ["MANAGED_REFRESH_TOKEN"] = "declared-refresh",
+            });
+
+        ManagedGenerationLoad loaded = loader.Load(delivery);
+        Assert.True(loaded.Succeeded, string.Join("; ", loaded.Refusals.Select(refusal => refusal.Message)));
+        IReadOnlyList<MountedManifest> mounts = loaded.Generation!.Mounts;
+
+        await slots.ReplaceAsync(
+            new MutableSlotRecord("oauth2-authorization-code-pkce-refresh", "refreshToken", null, 1, 1, "v-refresh"),
+            TestContext.Current.CancellationToken);
+
+        // Corrupt the committed record so the replay cannot read it. A pass that skipped it must report the
+        // batch incomplete rather than letting the worker acknowledge recovery (R10.2).
+        string record = Directory.GetFiles(slots.Root, "*" + FileMutableSlotStore.RecordExtension).Single();
+        byte[] bytes = await File.ReadAllBytesAsync(record, TestContext.Current.CancellationToken);
+        bytes[0] ^= 0xFF;
+        await File.WriteAllBytesAsync(record, bytes, TestContext.Current.CancellationToken);
+
+        var reported = new List<string>();
+        RotationNotification callback = (mount, profile, slot, epoch, previous, revision, _) =>
+        {
+            reported.Add(slot);
+            return ValueTask.CompletedTask;
+        };
+
+        DurableReplayBatch batch = await loader.ReplayDurableRotationsBatchAsync(
+            mounts, callback, startIndex: 0, maxSlots: 8, TestContext.Current.CancellationToken);
+
+        Assert.Empty(reported);
+        Assert.Null(batch.NextCursor);
+        Assert.True(batch.Incomplete);
+    }
+
+    [Fact]
+    public async Task A_recovery_report_bases_on_the_platform_confirmed_revision()
+    {
+        (ManagedGenerationLoader loader, FileMutableSlotStore slots) = await OpenLoaderWithStateAsync();
+
+        ManagedGenerationLoad loaded = loader.Load(DirectDelivery(
+            "g1",
+            ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["MANAGED_CLIENT_SECRET"] = "client-secret-canary",
+                ["MANAGED_REFRESH_TOKEN"] = "declared-refresh",
+            }));
+        Assert.True(loaded.Succeeded, string.Join("; ", loaded.Refusals.Select(refusal => refusal.Message)));
+        IReadOnlyList<MountedManifest> mounts = loaded.Generation!.Mounts;
+
+        // The durable record advanced 0 -> 1 -> 2, but the served generation still declares 0. The Platform
+        // accepted the 0 -> 1 rotation, so it holds revision 1 for this slot and expects a base of 1: a
+        // declared-revision base of 0 would be refused as a mismatch and the newer credential stranded
+        // (R10.6).
+        await slots.ReplaceAsync(
+            new MutableSlotRecord("oauth2-authorization-code-pkce-refresh", "refreshToken", null, 1, 2, "v2"),
+            TestContext.Current.CancellationToken);
+        loader.RecordConfirmedRevision(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken", authorityEpoch: 1, runtimeRevision: 1);
+
+        var reports = new List<(long Previous, long Revision)>();
+        RotationNotification callback = (mount, profile, slot, epoch, previous, revision, _) =>
+        {
+            reports.Add((previous, revision));
+            return ValueTask.CompletedTask;
+        };
+
+        await loader.ReplayDurableRotationsBatchAsync(
+            mounts, callback, startIndex: 0, maxSlots: 8, TestContext.Current.CancellationToken);
+
+        var report = Assert.Single(reports);
+        Assert.Equal(1, report.Previous);
+        Assert.Equal(2, report.Revision);
+    }
+
+    [Fact]
+    public async Task A_replay_does_not_re_report_a_slot_the_platform_already_confirmed()
+    {
+        (ManagedGenerationLoader loader, FileMutableSlotStore slots) = await OpenLoaderWithStateAsync();
+
+        ManagedGenerationLoad loaded = loader.Load(DirectDelivery(
+            "g1",
+            ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["MANAGED_CLIENT_SECRET"] = "client-secret-canary",
+                ["MANAGED_REFRESH_TOKEN"] = "declared-refresh",
+            }));
+        IReadOnlyList<MountedManifest> mounts = loaded.Generation!.Mounts;
+
+        await slots.ReplaceAsync(
+            new MutableSlotRecord("oauth2-authorization-code-pkce-refresh", "refreshToken", null, 1, 2, "v2"),
+            TestContext.Current.CancellationToken);
+        loader.RecordConfirmedRevision(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken", authorityEpoch: 1, runtimeRevision: 2);
+
+        var reports = new List<string>();
+        RotationNotification callback = (mount, profile, slot, epoch, previous, revision, _) =>
+        {
+            reports.Add(slot);
+            return ValueTask.CompletedTask;
+        };
+
+        await loader.ReplayDurableRotationsBatchAsync(
+            mounts, callback, startIndex: 0, maxSlots: 8, TestContext.Current.CancellationToken);
+
+        Assert.Empty(reports);
+    }
+
+    [Fact]
+    public async Task A_confirmed_revision_survives_a_restart()
+    {
+        string stateRoot = Path.Combine(_root, "state-confirm-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-confirm-" + Guid.NewGuid().ToString("N"));
+
+        (ManagedGenerationLoader first, _) = await OpenLoaderWithStateAsync(stateRoot, keyFile);
+        first.RecordConfirmedRevision(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken", authorityEpoch: 3, runtimeRevision: 7);
+        first.Dispose();
+
+        (ManagedGenerationLoader restarted, _) = await OpenLoaderWithStateAsync(stateRoot, keyFile);
+        ConfirmedSlotRevision? confirmed = restarted.ReadConfirmedRevision(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken");
+
+        Assert.NotNull(confirmed);
+        Assert.Equal(3, confirmed!.Value.AuthorityEpoch);
+        Assert.Equal(7, confirmed.Value.RuntimeRevision);
+    }
+
+    private static ManagedGenerationDelivery DirectDelivery(
+        string id,
+        string manifest,
+        IReadOnlyDictionary<string, string> secrets)
+        => new(
+            id,
+            "fixture",
+            [new ManagedMountDelivery(
+                "/mcp/connector",
+                Convert.FromBase64String(Bundle(manifest)),
+                new Dictionary<string, string>(StringComparer.Ordinal))],
+            secrets);
+
+    private static string TwoSlotRotatableRefreshSurface(Uri upstream)
+        => ServedManifests.RotatableRefreshSurface(upstream).Replace(
+            "{ \"slot\": \"refreshToken\", \"authorityEpoch\": 1, \"runtimeRevision\": 0 }",
+            "{ \"slot\": \"refreshToken\", \"authorityEpoch\": 1, \"runtimeRevision\": 0 },\n"
+            + "                      { \"slot\": \"clientSecret\", \"authorityEpoch\": 1, \"runtimeRevision\": 0 }",
+            StringComparison.Ordinal);
+
     private async Task<ManagedInitialSync> SynchronizeInitialAsync(        PlatformStandIn platform,
         bool secretFileExists = true)
     {

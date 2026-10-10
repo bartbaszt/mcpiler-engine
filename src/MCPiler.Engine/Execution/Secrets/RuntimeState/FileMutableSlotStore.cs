@@ -93,13 +93,14 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
     private static readonly ConcurrentDictionary<string, byte> ReclaimedRoots = new(StringComparer.Ordinal);
 
     /// <summary>
-    /// Per-(root, mount, profile, slot) write gates shared by every store instance in this process,
-    /// so a replacement's read-compare-write is atomic against concurrent replacements of the same
-    /// identity. The map is bounded by the identities a process writes (the store itself is bounded
-    /// by <see cref="DefaultMaximumRecords"/>); it is never pruned, matching the store's process
-    /// lifetime.
+    /// Process-wide, reference-counted keyed gates shared by every store instance. A replacement holds
+    /// a mount-scope gate (so the mount's capacity reservation is atomic across distinct slot
+    /// identities) and a slot-scope gate (so its read-compare-write is atomic against another
+    /// replacement of the same identity). An entry is removed once its last holder releases, so churn
+    /// through distinct identities - including identities refused at the cap - does not grow process
+    /// state without bound.
     /// </summary>
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> IdentityGates = new(StringComparer.Ordinal);
+    private static readonly KeyedGatePool IdentityGates = new();
 
     private readonly string _root;
     private readonly string _mountIdentity;
@@ -204,23 +205,28 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
     {
         ArgumentNullException.ThrowIfNull(record);
 
-        // Serialize every write to one (mount, profile, slot) identity in this process: the
-        // read-compare-replace below must be atomic, or an older writer that read the record before
-        // a concurrent writer advanced it could overwrite the newer revision afterwards. The gate is
-        // keyed by root and identity and is static, so every store instance over the same directory
-        // shares it. Cross-process serialization is not provided here; the Platform runs a single
-        // Engine process against the store (a second process writing the same root is undefined).
-        var gate = IdentityGate(_root, _mountIdentity, record.ProfileId, record.Slot);
-        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
+        // A capacity cap is a count over the mount, so two writers creating two *different* new slots
+        // must not both pass the count-then-insert decision: that is a mount-scope decision taken under
+        // a mount-scope gate (R10.3). The per-slot gate still serializes the read-compare-write of one
+        // identity, so an older writer cannot regress a newer revision (R4.3). The gates are
+        // reference-counted and removed once idle, so distinct-identity churn cannot grow process state
+        // without bound (R10.7). Cross-process serialization is not provided here; the Platform runs a
+        // single Engine process against the store (a second process writing the same root is undefined).
+        using (await IdentityGates.AcquireAsync(MountGateKey(_root, _mountIdentity), cancellationToken).ConfigureAwait(false))
+        using (await IdentityGates.AcquireAsync(SlotGateKey(_root, _mountIdentity, record.ProfileId, record.Slot), cancellationToken).ConfigureAwait(false))
         {
             await ReplaceLockedAsync(record, cancellationToken).ConfigureAwait(false);
         }
-        finally
-        {
-            gate.Release();
-        }
     }
+
+    private static string MountGateKey(string root, string mount)
+        => string.Concat("mount\u001f", root, "\u001f", mount);
+
+    private static string SlotGateKey(string root, string mount, string profileId, string slot)
+        => string.Concat("slot\u001f", root, "\u001f", mount, "\u001f", profileId, "\u001f", slot);
+
+    /// <summary>Diagnostic/test view: how many identity gates are retained for a root right now.</summary>
+    internal static int TrackedIdentityGateCountForRoot(string root) => IdentityGates.CountForRoot(root);
 
     private async ValueTask ReplaceLockedAsync(MutableSlotRecord record, CancellationToken cancellationToken)
     {
@@ -297,10 +303,96 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
         TryCompactBestEffort();
     }
 
-    private static SemaphoreSlim IdentityGate(string root, string mount, string profileId, string slot)
+    /// <summary>
+    /// A process-wide keyed async gate whose entries exist only while a caller holds or waits for them.
+    /// </summary>
+    private sealed class KeyedGatePool
     {
-        var key = string.Join('\u001f', root, mount, profileId, slot);
-        return IdentityGates.GetOrAdd(key, static _ => new SemaphoreSlim(1, 1));
+        private readonly object _sync = new();
+        private readonly Dictionary<string, Gate> _gates = new(StringComparer.Ordinal);
+
+        public int CountForRoot(string root)
+        {
+            lock (_sync)
+            {
+                var count = 0;
+                foreach (var key in _gates.Keys)
+                {
+                    if (key.Contains("\u001f" + root + "\u001f", StringComparison.Ordinal))
+                    {
+                        count++;
+                    }
+                }
+
+                return count;
+            }
+        }
+
+        public async ValueTask<IDisposable> AcquireAsync(string key, CancellationToken cancellationToken)
+        {
+            Gate gate;
+            lock (_sync)
+            {
+                if (!_gates.TryGetValue(key, out gate!))
+                {
+                    gate = new Gate();
+                    _gates.Add(key, gate);
+                }
+
+                gate.References++;
+            }
+
+            try
+            {
+                await gate.Semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // A cancelled or failed wait never produces a lease, so the reference reserved above must
+                // be released here; otherwise the entry (and its count) leaks.
+                ReleaseReference(key, gate);
+                throw;
+            }
+
+            return new Lease(this, key, gate);
+        }
+
+        private void ReleaseReference(string key, Gate gate)
+        {
+            lock (_sync)
+            {
+                gate.References--;
+                if (gate.References == 0 && _gates.Remove(key))
+                {
+                    gate.Dispose();
+                }
+            }
+        }
+
+        private sealed class Gate : IDisposable
+        {
+            public SemaphoreSlim Semaphore { get; } = new(1, 1);
+
+            public int References;
+
+            public void Dispose() => Semaphore.Dispose();
+        }
+
+        private sealed class Lease(KeyedGatePool pool, string key, Gate gate) : IDisposable
+        {
+            private int _released;
+
+            public void Dispose()
+            {
+                if (Interlocked.Exchange(ref _released, 1) != 0)
+                {
+                    return;
+                }
+
+                gate.Semaphore.Release();
+                pool.ReleaseReference(key, gate);
+            }
+        }
     }
 
     /// <summary>

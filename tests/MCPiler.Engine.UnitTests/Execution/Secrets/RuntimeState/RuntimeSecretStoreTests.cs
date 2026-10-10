@@ -416,6 +416,92 @@ public sealed class RuntimeSecretStoreTests : IDisposable
     }
 
     [Fact]
+    public async Task Concurrent_new_slot_creations_cannot_exceed_the_mount_capacity()
+    {
+        // R10.3: the capacity cap is a count over the mount, so two writers creating two different new
+        // slots must not both pass the one-free-slot check. The per-slot write lock alone let both
+        // observe the pre-write count, and the mount ended one record over its cap.
+        var ct = TestContext.Current.CancellationToken;
+        var root = NewRoot();
+        _roots.Add(root);
+        var store = new FileMutableSlotStore(root, "mount-a", Key);
+        store.MaximumRecords = 2;
+
+        await store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "slot-0", null, 1, 0, "v0"), ct);
+
+        // Writer A pauses after its temp bytes are written and before the rename, while holding the mount
+        // gate. Writer B then attempts to take the last free slot.
+#pragma warning disable VSTHRD003 // Deliberate test barrier: the writer waits for the test's signal.
+        var paused = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        store.TempWrittenBarrier = async _ =>
+        {
+            paused.TrySetResult();
+            await release.Task.ConfigureAwait(false);
+        };
+#pragma warning restore VSTHRD003
+
+        Task writerA = Task.Run(
+            () => store.ReplaceAsync(new MutableSlotRecord("oauth", "slot-A", null, 1, 0, "vA"), ct).AsTask(),
+            ct);
+
+        await paused.Task.WaitAsync(TimeSpan.FromSeconds(10), ct);
+
+        Task writerB = Task.Run(
+            () => store.ReplaceAsync(new MutableSlotRecord("oauth", "slot-B", null, 1, 0, "vB"), ct).AsTask(),
+            ct);
+
+        // B is serialized behind A's mount gate; releasing A lets B reach the now-full capacity check.
+        await Task.Delay(TimeSpan.FromMilliseconds(100), ct);
+        release.SetResult();
+
+        RuntimeStateStoreException? refusal = null;
+        try
+        {
+            await Task.WhenAll(writerA, writerB);
+        }
+        catch (RuntimeStateStoreException exception)
+        {
+            // A commits the last free slot; B is refused at the cap.
+            refusal = exception;
+        }
+
+        Assert.NotNull(refusal);
+        Assert.Contains("bounded capacity", refusal!.Message, StringComparison.Ordinal);
+        Assert.Equal(2, Directory.GetFiles(store.Root, "*" + FileMutableSlotStore.RecordExtension).Length);
+        Assert.NotNull(await store.LoadAsync("oauth", "slot-A", ct));
+        Assert.Null(await store.LoadAsync("oauth", "slot-B", ct));
+    }
+
+    [Fact]
+    public async Task Identity_gates_do_not_accumulate_for_distinct_or_refused_identities()
+    {
+        // R10.7: the gate map must not grow for the process lifetime. A gate created before capacity
+        // admission - including for an identity refused at the cap - must be removed once it is idle.
+        var ct = TestContext.Current.CancellationToken;
+        var root = NewRoot();
+        _roots.Add(root);
+        var store = new FileMutableSlotStore(root, "mount-a", Key);
+        store.MaximumRecords = 3;
+
+        for (var index = 0; index < 3; index++)
+        {
+            await store.ReplaceAsync(
+                new MutableSlotRecord("oauth", "slot-" + index, null, 1, 0, "v" + index), ct);
+        }
+
+        // Distinct identities refused at the cap must not leave a gate behind.
+        for (var index = 10; index < 60; index++)
+        {
+            await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.ReplaceAsync(
+                new MutableSlotRecord("oauth", "slot-" + index, null, 1, 0, "v"), ct).AsTask());
+        }
+
+        Assert.Equal(0, FileMutableSlotStore.TrackedIdentityGateCountForRoot(root));
+    }
+
+    [Fact]
     public async Task Rotations_in_one_mount_do_not_delete_another_mounts_live_record()
     {
         // MTH-SECRET-1: every managed auth-code mount shares one root and the same profile/slot, so
