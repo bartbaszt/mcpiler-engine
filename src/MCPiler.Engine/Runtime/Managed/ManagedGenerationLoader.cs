@@ -571,6 +571,12 @@ public sealed class ManagedGenerationLoader : IDisposable
                 : null;
 
     /// <summary>
+    /// Test seam: the durable confirmation journal, when durable runtime state is configured. Production
+    /// code never reads it; a test can inject a transient read or integrity failure deterministically.
+    /// </summary>
+    internal ConfirmedRevisionStore? ConfirmedJournal => _confirmed;
+
+    /// <summary>
     /// Durably records the revision the Platform confirmed for a mutable slot identity, so a recovery
     /// report after a restart bases on what the peer holds rather than on the served generation's
     /// declared revision (R10.6).
@@ -642,7 +648,12 @@ public sealed class ManagedGenerationLoader : IDisposable
     /// <param name="generation">The active generation whose declared slots are inspected.</param>
     /// <param name="rotations">The notification sink, identical to the live rotation callback.</param>
     /// <param name="cancellationToken">Cancellation.</param>
-    public async ValueTask ReplayDurableRotationsAsync(
+    /// <returns>
+    /// The batch outcome. A caller must not treat the replay as a completed recovery while a resume index
+    /// remains or the batch is incomplete; the initial activation replay propagates incompleteness so the
+    /// worker keeps recovery requested (R13.2).
+    /// </returns>
+    public async ValueTask<DurableReplayBatch> ReplayDurableRotationsAsync(
         ManagedGeneration generation,
         RotationNotification rotations,
         CancellationToken cancellationToken)
@@ -654,18 +665,19 @@ public sealed class ManagedGenerationLoader : IDisposable
         // re-derive pending rotations on its regular reconciliation cadence instead of only at a
         // generation activation, so an evicted rotation is not stranded until the next activation
         // (R8.5). The wrapper is only a convenience for the activation path.
-        await ReplayDurableRotationsAsync(generation.Mounts, rotations, cancellationToken).ConfigureAwait(false);
+        return await ReplayDurableRotationsAsync(generation.Mounts, rotations, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <inheritdoc cref="ReplayDurableRotationsAsync(ManagedGeneration, RotationNotification, CancellationToken)"/>
     /// <param name="mounts">The active generation's mounts whose declared slots are inspected.</param>
-    public async ValueTask ReplayDurableRotationsAsync(
+    public async ValueTask<DurableReplayBatch> ReplayDurableRotationsAsync(
         IReadOnlyList<MountedManifest> mounts,
         RotationNotification rotations,
         CancellationToken cancellationToken)
     {
-        await ReplayDurableRotationsBatchAsync(mounts, rotations, startIndex: 0, maxSlots: int.MaxValue, cancellationToken)
-            .ConfigureAwait(false);
+        return await ReplayDurableRotationsBatchAsync(
+            mounts, rotations, startIndex: 0, maxSlots: int.MaxValue, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -762,18 +774,34 @@ public sealed class ManagedGenerationLoader : IDisposable
             // and the newer credential is stranded (R10.6). With no confirmation (several rotations
             // coalesced before the first report) the declared revision is correct (R9.1).
             var baseRevision = candidate.DeclaredRevision;
-            if (_confirmed?.Read(candidate.Mount, candidate.ProfileId, candidate.Slot) is { } confirmed
-                && confirmed.Epoch == record.AuthorityEpoch)
+            if (_confirmed is not null)
             {
-                if (confirmed.Revision >= record.RuntimeRevision)
+                ConfirmationLookup confirmation = _confirmed.Lookup(
+                    candidate.Mount, candidate.ProfileId, candidate.Slot);
+
+                if (confirmation.State == ConfirmationState.Unavailable)
                 {
-                    // The durable record is already reconciled at or below the confirmed revision; there is
-                    // nothing left to report. This is the durable counterpart of the in-memory
-                    // acknowledged-version memory.
+                    // The confirmation journal could not be read or failed its integrity check. Treating
+                    // that as "no confirmation" would base the report on the declared revision and could
+                    // have the Platform refuse it as a mismatch and the worker drop it terminally. Defer
+                    // this slot and keep the batch incomplete so a later attempt retries it (R13.1).
+                    incomplete = true;
                     continue;
                 }
 
-                baseRevision = confirmed.Revision;
+                if (confirmation.State == ConfirmationState.Confirmed
+                    && confirmation.Epoch == record.AuthorityEpoch)
+                {
+                    if (confirmation.Revision >= record.RuntimeRevision)
+                    {
+                        // The durable record is already reconciled at or below the confirmed revision; there is
+                        // nothing left to report. This is the durable counterpart of the in-memory
+                        // acknowledged-version memory.
+                        continue;
+                    }
+
+                    baseRevision = confirmation.Revision;
+                }
             }
 
             await rotations(

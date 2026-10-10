@@ -78,4 +78,77 @@ public sealed class ConfirmedRevisionStoreTests : IDisposable
         Assert.Equal(2, a.Value.Epoch);
         Assert.Equal(9, a.Value.Revision);
     }
+
+    // R13.1: an unreadable journal must not be reported as an absent confirmation.
+    [Fact]
+    public void Lookup_reports_absent_confirmed_and_unavailable_distinctly()
+    {
+        var root = NewRoot();
+        var store = new ConfirmedRevisionStore(root);
+
+        Assert.Equal(ConfirmationState.NotConfirmed, store.Lookup("m", "p", "a").State);
+
+        Assert.True(store.Record("m", "p", "a", epoch: 1, revision: 4));
+        ConfirmationLookup confirmed = store.Lookup("m", "p", "a");
+        Assert.Equal(ConfirmationState.Confirmed, confirmed.State);
+        Assert.Equal(1, confirmed.Epoch);
+        Assert.Equal(4, confirmed.Revision);
+
+        var failing = new ConfirmedRevisionStore(root);
+        failing.ReadAllLines = _ => throw new IOException("transient read failure");
+        Assert.Equal(ConfirmationState.Unavailable, failing.Lookup("m", "p", "a").State);
+    }
+
+    // R13.6: a corrupt record must fail the whole journal, never be skipped into a partial load.
+    [Fact]
+    public void A_corrupt_versioned_record_fails_the_whole_journal()
+    {
+        var root = NewRoot();
+        var store = new ConfirmedRevisionStore(root);
+        Assert.True(store.Record("m", "p", "a", epoch: 1, revision: 1));
+        Assert.True(store.Record("m", "p", "b", epoch: 1, revision: 2));
+        Assert.True(store.Record("m", "p", "c", epoch: 1, revision: 3));
+
+        string path = Path.Combine(root, "confirmed-revisions.txt");
+        string[] lines = File.ReadAllLines(path);
+
+        // Corrupt one record's bytes, preserving LF endings so the checksum is the reason it fails.
+        lines[2] += "CORRUPT";
+        File.WriteAllText(path, string.Join('\n', lines) + "\n");
+
+        var reopened = new ConfirmedRevisionStore(root);
+        Assert.Equal(ConfirmationState.Unavailable, reopened.Lookup("m", "p", "a").State);
+        Assert.Equal(ConfirmationState.Unavailable, reopened.Lookup("m", "p", "c").State);
+        Assert.False(reopened.Record("m", "p", "d", epoch: 1, revision: 4));
+    }
+
+    // R13.6: a headerless journal is accepted as legacy v1 all-or-nothing and rewritten versioned.
+    [Fact]
+    public void A_legacy_headerless_journal_loads_all_or_nothing_and_is_rewritten_versioned()
+    {
+        var root = NewRoot();
+        string path = Path.Combine(root, "confirmed-revisions.txt");
+        string keyA = ConfirmedRevisionStore.KeyFor("m", "p", "a");
+        string keyC = ConfirmedRevisionStore.KeyFor("m", "p", "c");
+
+        File.WriteAllText(path, keyA + "\t1\t5\n");
+
+        var store = new ConfirmedRevisionStore(root);
+        ConfirmationLookup entry = store.Lookup("m", "p", "a");
+        Assert.Equal(ConfirmationState.Confirmed, entry.State);
+        Assert.Equal(5, entry.Revision);
+
+        // A write by the current version upgrades the file to the checksummed format.
+        Assert.True(store.Record("m", "p", "b", epoch: 1, revision: 6));
+        Assert.StartsWith("#MCPilerConfirmedRevisions", File.ReadAllLines(path)[0], StringComparison.Ordinal);
+
+        var reopened = new ConfirmedRevisionStore(root);
+        Assert.Equal(ConfirmationState.Confirmed, reopened.Lookup("m", "p", "a").State);
+        Assert.Equal(ConfirmationState.Confirmed, reopened.Lookup("m", "p", "b").State);
+
+        // A legacy journal with one unparseable record fails closed as a whole.
+        File.WriteAllText(path, keyA + "\t1\t5\n" + keyC + "\tgarbage\t9\n");
+        var legacyCorrupt = new ConfirmedRevisionStore(root);
+        Assert.Equal(ConfirmationState.Unavailable, legacyCorrupt.Lookup("m", "p", "a").State);
+    }
 }

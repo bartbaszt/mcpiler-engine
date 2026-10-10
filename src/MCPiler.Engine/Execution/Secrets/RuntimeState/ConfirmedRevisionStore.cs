@@ -1,7 +1,44 @@
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace MCPiler.Engine.Execution.Secrets.RuntimeState;
+
+/// <summary>
+/// The outcome of reading the confirmation journal for one slot identity.
+/// </summary>
+internal enum ConfirmationState
+{
+    /// <summary>A durable confirmation exists for the slot's epoch.</summary>
+    Confirmed,
+
+    /// <summary>The journal was read and holds no confirmation for the slot.</summary>
+    NotConfirmed,
+
+    /// <summary>The journal could not be read, or failed its integrity check.</summary>
+    Unavailable,
+}
+
+/// <summary>
+/// The three-state result of a confirmation lookup. A caller must never treat
+/// <see cref="ConfirmationState.Unavailable"/> as negative evidence: it means the journal could not be
+/// verified, not that no confirmation exists (R13.1).
+/// </summary>
+/// <param name="State">Which of the three outcomes was observed.</param>
+/// <param name="Epoch">The confirmed authority epoch; meaningful only when <paramref name="State"/> is <see cref="ConfirmationState.Confirmed"/>.</param>
+/// <param name="Revision">The confirmed runtime revision; meaningful only when <paramref name="State"/> is <see cref="ConfirmationState.Confirmed"/>.</param>
+internal readonly record struct ConfirmationLookup(ConfirmationState State, long Epoch, long Revision)
+{
+    /// <summary>The journal could not be read or verified.</summary>
+    public static ConfirmationLookup Unavailable => new(ConfirmationState.Unavailable, 0, 0);
+
+    /// <summary>The journal was read and holds no confirmation for the slot.</summary>
+    public static ConfirmationLookup NotConfirmed => new(ConfirmationState.NotConfirmed, 0, 0);
+
+    /// <summary>The journal was read and holds a confirmation for the slot.</summary>
+    public static ConfirmationLookup Confirmed(long epoch, long revision)
+        => new(ConfirmationState.Confirmed, epoch, revision);
+}
 
 /// <summary>
 /// Durably remembers, per mount/profile/slot, the highest runtime revision the Platform has
@@ -31,6 +68,12 @@ internal sealed class ConfirmedRevisionStore
     private const string FileName = "confirmed-revisions.txt";
     private const char FieldSeparator = '\t';
 
+    /// <summary>Marks a versioned (v2) journal whose body is protected by a checksum.</summary>
+    private const string Magic = "#MCPilerConfirmedRevisions";
+
+    /// <summary>The current on-disk format version.</summary>
+    private const string CurrentFormatVersion = "2";
+
     private readonly string _path;
     private readonly object _sync = new();
     private Dictionary<string, (long Epoch, long Revision)>? _entries;
@@ -57,6 +100,31 @@ internal sealed class ConfirmedRevisionStore
                 && entries.TryGetValue(KeyFor(mount, profileId, slot), out var entry)
                 ? entry
                 : null;
+        }
+    }
+
+    /// <summary>
+    /// Looks up the confirmation for one slot identity with an explicit availability state, so a caller can
+    /// tell "verified absent" from "journal unavailable". Only <see cref="ConfirmationState.NotConfirmed"/>
+    /// may trigger a fallback default; <see cref="ConfirmationState.Unavailable"/> must defer the decision
+    /// and force a retry (R13.1).
+    /// </summary>
+    /// <param name="mount">The mount the slot belongs to.</param>
+    /// <param name="profileId">The manifest-local profile identity.</param>
+    /// <param name="slot">The slot identity.</param>
+    public ConfirmationLookup Lookup(string mount, string profileId, string slot)
+    {
+        lock (_sync)
+        {
+            var entries = TryLoad();
+            if (entries is null)
+            {
+                return ConfirmationLookup.Unavailable;
+            }
+
+            return entries.TryGetValue(KeyFor(mount, profileId, slot), out var entry)
+                ? ConfirmationLookup.Confirmed(entry.Epoch, entry.Revision)
+                : ConfirmationLookup.NotConfirmed;
         }
     }
 
@@ -158,9 +226,15 @@ internal sealed class ConfirmedRevisionStore
 
     /// <summary>
     /// Loads the journal, caching it once it has been read. Returns null when the journal file exists but
-    /// could not be read, so callers never treat an unverified read as a valid empty journal. A missing
-    /// file is a legitimate empty journal and is cached as empty (R12.4).
+    /// could not be read or failed its integrity check, so callers never treat an unverified read as a
+    /// valid empty journal. A missing file is a legitimate empty journal and is cached as empty (R12.4).
     /// </summary>
+    /// <remarks>
+    /// The current format is versioned and checksummed; a headerless journal is accepted as legacy v1 and
+    /// parsed all-or-nothing. A record that cannot be parsed, in either format, is an integrity failure for
+    /// the whole journal rather than a line to skip: skipping it and rewriting the file later would silently
+    /// drop the confirmation it still held (R13.6).
+    /// </remarks>
     private Dictionary<string, (long Epoch, long Revision)>? TryLoad()
     {
         if (_entries is not null)
@@ -174,16 +248,10 @@ internal sealed class ConfirmedRevisionStore
             return _entries;
         }
 
-        var entries = new Dictionary<string, (long, long)>(StringComparer.Ordinal);
+        string[] lines;
         try
         {
-            foreach (var line in ReadAllLines(_path))
-            {
-                if (TryParseLine(line, out var key, out var epoch, out var revision))
-                {
-                    entries[key] = (epoch, revision);
-                }
-            }
+            lines = ReadAllLines(_path);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -193,27 +261,87 @@ internal sealed class ConfirmedRevisionStore
             return null;
         }
 
+        var bodyLines = lines;
+
+        // A versioned journal opens with a magic header carrying the format version and a checksum of the
+        // body. An unrecognised header is an integrity failure, never an empty journal.
+        if (lines.Length > 0 && lines[0].StartsWith(Magic + FieldSeparator, StringComparison.Ordinal))
+        {
+            var header = lines[0].Split(FieldSeparator);
+            if (header.Length != 3 || !string.Equals(header[1], CurrentFormatVersion, StringComparison.Ordinal))
+            {
+                return null;
+            }
+
+            bodyLines = lines[1..];
+            var actual = Checksum(ReconstructBody(bodyLines));
+            if (!string.Equals(header[2], actual, StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+        }
+
+        var entries = new Dictionary<string, (long, long)>(StringComparer.Ordinal);
+        foreach (var line in bodyLines)
+        {
+            if (!TryParseLine(line, out var key, out var epoch, out var revision))
+            {
+                // A corrupt record is an integrity failure for the whole journal (R13.6).
+                return null;
+            }
+
+            entries[key] = (epoch, revision);
+        }
+
         _entries = entries;
         return entries;
     }
 
     /// <summary>
-    /// Writes the journal atomically. Throws on a write failure so the caller can refuse to treat the
-    /// confirmation as durable; <see cref="Record"/> translates that into a false result and a
+    /// Rebuilds the exact body text from the lines the reader returned, so the checksum is computed over the
+    /// same bytes that were written. A trailing newline per record is what <see cref="Persist"/> emitted.
+    /// </summary>
+    private static string ReconstructBody(IReadOnlyList<string> bodyLines)
+    {
+        if (bodyLines.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var builder = new StringBuilder();
+        foreach (var line in bodyLines)
+        {
+            builder.Append(line).Append('\n');
+        }
+
+        return builder.ToString();
+    }
+
+    private static string Checksum(string body)
+        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(body)));
+
+    /// <summary>
+    /// Writes the journal atomically in the versioned format: a magic header carrying the format version and
+    /// a checksum of the body, followed by the records. Throws on a write failure so the caller can refuse to
+    /// treat the confirmation as durable; <see cref="Record"/> translates that into a false result and a
     /// rollback (R11.2).
     /// </summary>
     private void Persist(Dictionary<string, (long Epoch, long Revision)> entries)
     {
-        var builder = new StringBuilder();
+        var body = new StringBuilder();
         foreach (var pair in entries.OrderBy(pair => pair.Key, StringComparer.Ordinal))
         {
-            builder.Append(pair.Key).Append(FieldSeparator)
+            body.Append(pair.Key).Append(FieldSeparator)
                 .Append(pair.Value.Epoch.ToString(CultureInfo.InvariantCulture)).Append(FieldSeparator)
                 .Append(pair.Value.Revision.ToString(CultureInfo.InvariantCulture)).Append('\n');
         }
 
+        var bodyText = body.ToString();
+
+        var header = $"{Magic}{FieldSeparator}{CurrentFormatVersion}{FieldSeparator}{Checksum(bodyText)}\n";
+
         var temporary = _path + ".tmp";
-        File.WriteAllText(temporary, builder.ToString());
+        File.WriteAllText(temporary, header + bodyText);
         File.Move(temporary, _path, overwrite: true);
     }
 

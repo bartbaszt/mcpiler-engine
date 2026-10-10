@@ -159,6 +159,9 @@ internal sealed class ManagedSyncWorker : IDisposable
     /// <summary>The number of rotations still awaiting Platform acknowledgement.</summary>
     public int PendingReconciliations => _reconciliations.Count;
 
+    /// <summary>Test seam: whether a recovery replay is still owed.</summary>
+    internal bool RecoveryRequested => _reconciliations.RecoveryRequested;
+
     /// <summary>
     /// Sends every queued rotation, regenerating each report from the authoritative record.
     /// </summary>
@@ -683,7 +686,7 @@ if (_binding.Listener.Transport is HostTransport.Http
         // fails activation: the records remain durable and a later pass retries.
         try
         {
-            await _loader.ReplayDurableRotationsAsync(
+            DurableReplayBatch replay = await _loader.ReplayDurableRotationsAsync(
                 generation,
                 (mount, profile, slot, epoch, previous, revision, _) =>
                 {
@@ -691,6 +694,18 @@ if (_binding.Listener.Transport is HostTransport.Http
                     return ValueTask.CompletedTask;
                 },
                 cancellationToken).ConfigureAwait(false);
+
+            // A pass that could not read a durable record or confirmation has not recovered everything this
+            // process still owes. Keep recovery requested so the cyclic replay retries the unread slot;
+            // activation itself still succeeds, because the records are durable and a later pass reconciles
+            // them (R13.2).
+            if (replay.Incomplete)
+            {
+                _reconciliations.RequestRecovery();
+                _diagnostics?.Invoke(
+                    "managed: initial durable rotation replay could not read one or more records; "
+                    + "recovery remains pending.");
+            }
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {

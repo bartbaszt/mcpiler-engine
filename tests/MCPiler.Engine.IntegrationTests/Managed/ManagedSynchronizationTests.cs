@@ -1770,6 +1770,162 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         Assert.Contains("refreshToken", reported);
     }
 
+    // R13.1: an unreadable confirmation journal must defer the slot, not base a report on the declared
+    // revision (which the Platform would refuse as a mismatch).
+    [Fact]
+    public async Task A_replay_defers_a_slot_while_the_confirmation_journal_is_unreadable()
+    {
+        string stateRoot = Path.Combine(_root, "state-confirmread-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-confirmread-" + Guid.NewGuid().ToString("N"));
+
+        (ManagedGenerationLoader loader, FileMutableSlotStore slots) =
+            await OpenLoaderWithStateAsync(stateRoot, keyFile);
+
+        ManagedGenerationLoad loaded = loader.Load(DirectDelivery(
+            "g1",
+            ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["MANAGED_CLIENT_SECRET"] = "client-secret-canary",
+                ["MANAGED_REFRESH_TOKEN"] = "declared-refresh",
+            }));
+        Assert.True(loaded.Succeeded, string.Join("; ", loaded.Refusals.Select(refusal => refusal.Message)));
+        IReadOnlyList<MountedManifest> mounts = loaded.Generation!.Mounts;
+
+        // The durable record advanced 0 -> 1 -> 2 and the Platform confirmed revision 1. Write the
+        // confirmation durably but never read it through this loader, so the store holds no cached snapshot.
+        await slots.ReplaceAsync(
+            new MutableSlotRecord("oauth2-authorization-code-pkce-refresh", "refreshToken", null, 1, 2, "v2"),
+            TestContext.Current.CancellationToken);
+        File.WriteAllText(
+            Path.Combine(stateRoot, "confirmed-revisions.txt"),
+            ConfirmedRevisionStore.KeyFor("/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken")
+            + "\t1\t1\n");
+
+        // The journal becomes temporarily unreadable. A declared-revision base of 0 would be refused.
+        Assert.NotNull(loader.ConfirmedJournal);
+        Func<string, string[]> original = loader.ConfirmedJournal!.ReadAllLines;
+        loader.ConfirmedJournal!.ReadAllLines = _ => throw new IOException("transient confirmation read failure");
+
+        var reports = new List<(long Previous, long Revision)>();
+        DurableReplayBatch unreadable = await loader.ReplayDurableRotationsBatchAsync(
+            mounts,
+            (_, _, _, _, previous, revision, _) =>
+            {
+                reports.Add((previous, revision));
+                return ValueTask.CompletedTask;
+            },
+            0,
+            8,
+            TestContext.Current.CancellationToken);
+
+        Assert.True(unreadable.Incomplete);
+        Assert.Empty(reports);
+
+        // Once readable, the report bases on the confirmed revision (1), never the declared 0.
+        loader.ConfirmedJournal!.ReadAllLines = original;
+        DurableReplayBatch recovered = await loader.ReplayDurableRotationsBatchAsync(
+            mounts,
+            (_, _, _, _, previous, revision, _) =>
+            {
+                reports.Add((previous, revision));
+                return ValueTask.CompletedTask;
+            },
+            0,
+            8,
+            TestContext.Current.CancellationToken);
+
+        Assert.False(recovered.Incomplete);
+        var report = Assert.Single(reports);
+        Assert.Equal(1, report.Previous);
+        Assert.Equal(2, report.Revision);
+    }
+
+    // R13.2: an unreadable record at the initial activation must not silently finish recovery; the rotation
+    // must be reconciled once the record is readable again, without a new generation.
+    [Fact]
+    public async Task An_unreadable_record_during_initial_activation_is_reconciled_after_it_recovers()
+    {
+        var generation = Generation(
+            "g1",
+            ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
+            prefix: "/mcp/connector",
+            secrets: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["MANAGED_CLIENT_SECRET"] = "client-secret-canary",
+                ["MANAGED_REFRESH_TOKEN"] = "declared-refresh",
+            });
+
+        var reconciledSlots = new System.Collections.Concurrent.ConcurrentQueue<string>();
+
+        await using var platform = await PlatformAsync(_ => Response.Generation(generation));
+        platform.OnReconcile = body =>
+        {
+            JsonObject report = JsonNode.Parse(body)!.AsObject();
+            reconciledSlots.Enqueue(report["slot"]!.GetValue<string>());
+            return Response.Bytes(
+                JsonSerializer.SerializeToUtf8Bytes(new { outcome = "recorded" }),
+                isGeneration: false);
+        };
+
+        string stateRoot = Path.Combine(_root, "state-initfail-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-initfail-" + Guid.NewGuid().ToString("N"));
+
+        (ManagedGenerationLoader loader, FileMutableSlotStore slots) =
+            await OpenLoaderWithStateAsync(stateRoot, keyFile);
+
+        // A locally committed rotation exists, but its record is unreadable at the moment of activation.
+        await slots.ReplaceAsync(
+            new MutableSlotRecord("oauth2-authorization-code-pkce-refresh", "refreshToken", null, 1, 1, "v-refresh"),
+            TestContext.Current.CancellationToken);
+        string recordPath = SlotRecordPath(stateRoot, "oauth2-authorization-code-pkce-refresh", "refreshToken");
+        byte[] bytes = await File.ReadAllBytesAsync(recordPath, TestContext.Current.CancellationToken);
+        bytes[0] ^= 0xFF;
+        await File.WriteAllBytesAsync(recordPath, bytes, TestContext.Current.CancellationToken);
+
+        await using ManagedProcess process = await StartAsync(platform, loader);
+
+        // The initial replay marked itself incomplete and requested recovery rather than finishing.
+        await WaitForAsync(
+            () =>
+            {
+                lock (process.Diagnostics)
+                {
+                    return process.Diagnostics.Any(message =>
+                        message.Contains("recovery remains pending", StringComparison.Ordinal));
+                }
+            },
+            () =>
+            {
+                lock (process.Diagnostics)
+                {
+                    return "The initial replay did not keep recovery pending. Diagnostics: "
+                        + string.Join(" | ", process.Diagnostics);
+                }
+            });
+
+        // Restore the record with no new generation delivered; the cyclic recovery must pick it up. The
+        // valid record is built under a fresh store and moved atomically over the corrupt file, so a fast
+        // worker cycle never observes the slot as legitimately absent (which would acknowledge recovery).
+        byte[] key = File.ReadAllBytes(keyFile);
+        string restoreRoot = Path.Combine(_root, "restore-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(restoreRoot);
+        var restoreStore = new FileMutableSlotStore(restoreRoot, "/mcp/connector", key);
+        await restoreStore.ReplaceAsync(
+            new MutableSlotRecord("oauth2-authorization-code-pkce-refresh", "refreshToken", null, 1, 1, "v-refresh"),
+            TestContext.Current.CancellationToken);
+        File.Move(
+            SlotRecordPath(restoreRoot, "oauth2-authorization-code-pkce-refresh", "refreshToken"),
+            recordPath,
+            overwrite: true);
+
+        await WaitForAsync(
+            () => reconciledSlots.Contains("refreshToken"),
+            () => "The recovered rotation was not reconciled without a new generation. Pending="
+                + process.Worker.PendingReconciliations + " RecoveryRequested=" + process.Worker.RecoveryRequested
+                + " Diagnostics: " + string.Join(" | ", process.Diagnostics));
+    }
+
     [Fact]
     public async Task Loading_a_generation_does_not_prune_the_confirmation_journal()
     {

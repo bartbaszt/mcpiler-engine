@@ -305,6 +305,13 @@ internal sealed class PendingReconciliationQueue
     public void AcknowledgeRecovery(long version) => Volatile.Write(ref _completedRecoveryVersion, version);
 
     /// <summary>
+    /// Requests a recovery replay even without an overflow eviction. A caller that discovered it could not
+    /// read a durable record (for example the initial activation replay) uses this so the cyclic replay
+    /// retries the unread slot instead of waiting for the next generation activation (R13.2).
+    /// </summary>
+    public void RequestRecovery() => Interlocked.Increment(ref _recoveryVersion);
+
+    /// <summary>
     /// Remembers the highest decided version for one identity so a recovery replay does not resend a
     /// report the Platform already accepted or terminally refused.
     /// </summary>
