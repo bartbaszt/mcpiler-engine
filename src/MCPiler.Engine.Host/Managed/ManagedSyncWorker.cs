@@ -51,6 +51,14 @@ internal sealed class ManagedSyncWorker : IDisposable
 
     private string? _activeGenerationId;
     private string? _deliveredGenerationId;
+
+    /// <summary>
+    /// The active generation's mounts, retained so a recovery replay can re-derive an evicted pending
+    /// rotation from its durable record on the regular reconciliation cadence rather than only at a
+    /// generation activation (R8.5). The mounts are immutable manifest data; the generation wrapper is
+    /// never disposed after a successful activation.
+    /// </summary>
+    private IReadOnlyList<MountedManifest>? _activeMounts;
     private string? _lastCandidateOutcome;
     private string? _lastCandidateCode;
     private string? _lastCandidateMessage;
@@ -78,7 +86,8 @@ internal sealed class ManagedSyncWorker : IDisposable
         string engineVersion,
         Action<string>? diagnostics = null,
         ManagedSyncClient? client = null,
-        ManagedSyncBackoff? backoff = null)
+        ManagedSyncBackoff? backoff = null,
+        int reconciliationQueueCapacity = PendingReconciliationQueue.DefaultMaximumEntries)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(loader);
@@ -92,7 +101,7 @@ internal sealed class ManagedSyncWorker : IDisposable
         _binding = binding;
         _engineVersion = engineVersion;
         _diagnostics = diagnostics;
-        _reconciliations = new PendingReconciliationQueue(diagnostics: diagnostics);
+        _reconciliations = new PendingReconciliationQueue(reconciliationQueueCapacity, diagnostics);
         _client = client ?? new ManagedSyncClient(options);
 
         // One second doubling to thirty seconds: the first retry is quick enough that a
@@ -361,6 +370,31 @@ internal sealed class ManagedSyncWorker : IDisposable
                     await ReconcilePendingAsync(cancellationToken).ConfigureAwait(false);
                 }
 
+                // An overflow eviction drops a committed, unreconciled rotation from the in-memory
+                // queue. Re-derive it from the durable record on this pass rather than waiting for a
+                // generation activation that may never arrive; the acknowledged-version memory keeps an
+                // already-decided rotation from being resent (R8.5).
+                if (_activeMounts is { } activeMounts && _reconciliations.RecoveryRequested)
+                {
+                    try
+                    {
+                        await _loader.ReplayDurableRotationsAsync(
+                            activeMounts,
+                            (mount, profile, slot, epoch, previous, revision, _) =>
+                            {
+                                RotationCommitted(mount, profile, slot, epoch, previous, revision);
+                                return ValueTask.CompletedTask;
+                            },
+                            cancellationToken).ConfigureAwait(false);
+                        _reconciliations.ClearRecoveryRequest();
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        // Leave the request in place so a later pass retries the recovery.
+                        _diagnostics?.Invoke($"managed: recovery replay failed: {exception.Message}");
+                    }
+                }
+
                 ManagedPollResult result = await _client
                     .PollAsync(BuildRequest(), _sessionEpoch, cancellationToken)
                     .ConfigureAwait(false);
@@ -556,6 +590,7 @@ if (_binding.Listener.Transport is HostTransport.Http
         Task retirement = _generations.Activate(candidate);
 
         _activeGenerationId = delivery.GenerationId;
+        _activeMounts = generation.Mounts;
         _lastCandidateOutcome = ManagedProtocol.Active;
         _lastCandidateCode = null;
         _lastCandidateMessage = null;

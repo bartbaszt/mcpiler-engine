@@ -124,6 +124,60 @@ public sealed class PendingReconciliationQueueTests
     }
 
     [Fact]
+    public void An_overflow_eviction_requests_recovery_and_the_evicted_identity_can_be_re_derived()
+    {
+        var queue = new PendingReconciliationQueue(maximumEntries: 2);
+
+        queue.Add("/mcp/connector", "profile", "slot-0", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
+        queue.Add("/mcp/connector", "profile", "slot-1", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
+        queue.Add("/mcp/connector", "profile", "slot-2", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
+
+        // slot-0 was evicted, so the worker must be told to re-derive it from its durable record rather
+        // than waiting for a generation activation that may never arrive (R8.5).
+        Assert.True(queue.RecoveryRequested);
+        Assert.DoesNotContain(
+            queue.Snapshot(),
+            entry => string.Equals(entry.Slot, "slot-0", StringComparison.Ordinal));
+
+        // A recovery replay re-admits the evicted identity (as ReplayDurableRotationsAsync would), so it
+        // is not stranded.
+        queue.Add("/mcp/connector", "profile", "slot-0", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
+        Assert.Contains(
+            queue.Snapshot(),
+            entry => string.Equals(entry.Slot, "slot-0", StringComparison.Ordinal));
+
+        queue.ClearRecoveryRequest();
+        Assert.False(queue.RecoveryRequested);
+    }
+
+    [Fact]
+    public void A_recovery_replay_does_not_re_admit_an_acknowledged_version()
+    {
+        var queue = new PendingReconciliationQueue();
+
+        queue.Add("/mcp/connector", "profile", "refreshToken", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
+        queue.Acknowledge("/mcp/connector", "profile", "refreshToken", authorityEpoch: 1, runtimeRevision: 1);
+        Assert.Equal(0, queue.Count);
+
+        // Until the next generation is delivered, the manifest still declares the older revision, so a
+        // recovery replay would see the durable record ahead of the declaration. It must not resend a
+        // version the Platform already decided (R8.5).
+        queue.Add("/mcp/connector", "profile", "refreshToken", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
+        Assert.Equal(0, queue.Count);
+
+        // A genuinely newer revision is still admitted.
+        queue.Add("/mcp/connector", "profile", "refreshToken", authorityEpoch: 1, previousRuntimeRevision: 1, runtimeRevision: 2);
+        Assert.Equal(1, queue.Count);
+
+        // A newer authority epoch with a lower revision supersedes the same slot's queued entry
+        // (epoch is the outer ordering).
+        queue.Add("/mcp/connector", "profile", "refreshToken", authorityEpoch: 2, previousRuntimeRevision: 1, runtimeRevision: 1);
+        PendingReconciliation newest = Assert.Single(queue.Snapshot());
+        Assert.Equal(2, newest.AuthorityEpoch);
+        Assert.Equal(1, newest.RuntimeRevision);
+    }
+
+    [Fact]
     public void An_overflow_eviction_is_reported_by_a_bounded_non_secret_diagnostic()
     {
         var diagnostics = new List<string>();

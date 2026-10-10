@@ -876,6 +876,113 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task An_evicted_pending_rotation_is_recovered_without_a_new_generation_activation()
+    {
+        var generation = Generation(
+            "g1",
+            ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
+            prefix: "/mcp/connector",
+            secrets: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["MANAGED_CLIENT_SECRET"] = "client-secret-canary",
+                ["MANAGED_REFRESH_TOKEN"] = "declared-refresh",
+            });
+
+        var reconciliations = new List<JsonObject>();
+
+        await using var platform = await PlatformAsync(_ => Response.Generation(generation));
+        // Reconciliation is gated so the worker cannot drain the durable rotation before the overflow
+        // evicts it; the test releases the gate once the overflow is in place.
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        platform.OnReconcile = body =>
+        {
+            lock (reconciliations)
+            {
+                reconciliations.Add(JsonNode.Parse(body)!.AsObject());
+            }
+
+            entered.TrySetResult();
+            release.Task.GetAwaiter().GetResult();
+
+            return Response.Bytes(
+                JsonSerializer.SerializeToUtf8Bytes(new { outcome = "recorded" }),
+                isGeneration: false);
+        };
+
+        (ManagedGenerationLoader loader, FileMutableSlotStore slots) = await OpenLoaderWithStateAsync();
+
+        // Give the blocker a durable record so its report reaches the reconciliation endpoint (and the
+        // gate). An identity with no durable record is dropped without an HTTP call.
+        await slots.ReplaceAsync(
+            new MutableSlotRecord(
+                "oauth2-client-credentials",
+                "blocker",
+                ScopeFingerprint: null,
+                AuthorityEpoch: 1,
+                RuntimeRevision: 1,
+                "CANARY-blocker-value-0001"),
+            TestContext.Current.CancellationToken);
+
+        // Capacity two: one further distinct identity evicts the oldest queued rotation.
+        await using var process = await StartAsync(platform, loader, reconciliationQueueCapacity: 2);
+
+        Assert.Equal("g1", process.Worker.ActiveGenerationId);
+
+        // The durable record is ahead of the delivered generation's declared slot, so a recovery replay
+        // re-derives it. The declared identity is the manifest's refreshToken slot; the delivered
+        // generation never changes, so only the recovery path - never a new activation - can carry it.
+        await slots.ReplaceAsync(
+            new MutableSlotRecord(
+                "oauth2-authorization-code-pkce-refresh",
+                "refreshToken",
+                ScopeFingerprint: null,
+                AuthorityEpoch: 1,
+                RuntimeRevision: 1,
+                "CANARY-recovered-rotation-9c31"),
+            TestContext.Current.CancellationToken);
+
+        // A blocker identity keeps the reconciliation loop busy, holding its snapshot, so the durable
+        // rotation cannot be drained before the overflow evicts it. It has a record so its report reaches
+        // the endpoint, but it is not a declared slot, so a recovery replay never re-derives it.
+        process.Worker.RotationCommitted("/mcp/connector", "oauth2-client-credentials", "blocker", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+        // Overflow: refreshToken is the oldest queued rotation once unused-a is admitted, so it is
+        // evicted and a recovery is requested.
+        process.Worker.RotationCommitted("/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
+        process.Worker.RotationCommitted("/mcp/connector", "oauth2-client-credentials", "unused-a", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
+        process.Worker.RotationCommitted("/mcp/connector", "oauth2-client-credentials", "unused-b", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
+
+        release.SetResult();
+
+        await WaitForAsync(
+            () =>
+            {
+                lock (reconciliations)
+                {
+                    return reconciliations.Any(report =>
+                        report.TryGetPropertyValue("slot", out var slot)
+                        && slot!.GetValue<string>() == "refreshToken"
+                        && report.TryGetPropertyValue("value", out var value)
+                        && value!.GetValue<string>() == "CANARY-recovered-rotation-9c31");
+                }
+            },
+            () =>
+            {
+                lock (process.Diagnostics)
+                {
+                    return "No recovered reconciliation arrived. Diagnostics: "
+                        + string.Join(" | ", process.Diagnostics);
+                }
+            });
+
+        // No new generation was delivered or activated; the recovery replay used the active one.
+        Assert.Equal("g1", process.Worker.ActiveGenerationId);
+        await WaitForAsync(() => process.Worker.PendingReconciliations == 0);
+    }
+
+    [Fact]
     public async Task Multiple_rotations_before_the_first_reconciliation_converge_in_one_report()
     {
         var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
@@ -1221,7 +1328,8 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         PlatformStandIn platform,
         ManagedGenerationLoader? providedLoader = null,
         HostAuthorizationOptions? authorization = null,
-        IReadOnlyList<string>? allowedHosts = null)
+        IReadOnlyList<string>? allowedHosts = null,
+        int reconciliationQueueCapacity = PendingReconciliationQueue.DefaultMaximumEntries)
     {
         ManagedGenerationLoader loader = providedLoader ?? await OpenLoaderAsync();
         var manager = new EngineGenerationManager(HostMode.Managed);
@@ -1241,7 +1349,8 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
                     diagnostics.Add(message);
                 }
             },
-            backoff: new ManagedSyncBackoff(TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(50)));
+            backoff: new ManagedSyncBackoff(TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(50)),
+            reconciliationQueueCapacity: reconciliationQueueCapacity);
 
         ManagedInitialSync initial = await worker.SynchronizeInitialAsync(TestContext.Current.CancellationToken);
 

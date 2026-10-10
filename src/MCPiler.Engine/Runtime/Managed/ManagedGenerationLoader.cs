@@ -582,6 +582,23 @@ public sealed class ManagedGenerationLoader : IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(generation);
+
+        // The mounts alone carry everything a replay needs; retaining the list lets the worker
+        // re-derive pending rotations on its regular reconciliation cadence instead of only at a
+        // generation activation, so an evicted rotation is not stranded until the next activation
+        // (R8.5). The wrapper is only a convenience for the activation path.
+        await ReplayDurableRotationsAsync(generation.Mounts, rotations, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc cref="ReplayDurableRotationsAsync(ManagedGeneration, RotationNotification, CancellationToken)"/>
+    /// <param name="mounts">The active generation's mounts whose declared slots are inspected.</param>
+    public async ValueTask ReplayDurableRotationsAsync(
+        IReadOnlyList<MountedManifest> mounts,
+        RotationNotification rotations,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(mounts);
         ArgumentNullException.ThrowIfNull(rotations);
 
         if (_runtimeState is null)
@@ -589,7 +606,7 @@ public sealed class ManagedGenerationLoader : IDisposable
             return;
         }
 
-        foreach (MountedManifest mount in generation.Mounts)
+        foreach (MountedManifest mount in mounts)
         {
             foreach (AuthenticationProfile profile in mount.Document.EffectiveAuthentication.Profiles)
             {

@@ -29,6 +29,19 @@ internal sealed class PendingReconciliationQueue
     private readonly Action<string>? _diagnostics;
     private long _sequence;
 
+    /// <summary>
+    /// Versions the Platform has already decided: accepted, or refused as no longer matching. A
+    /// recovery replay must not re-admit one, or the same report would be resent on every pass. The map
+    /// is bounded by pruning the oldest acknowledgements.
+    /// </summary>
+    private readonly ConcurrentDictionary<Key, Entry> _acknowledged = new();
+
+    /// <summary>
+    /// Set when an overflow eviction drops an identity, so the worker re-derives it from the durable
+    /// record instead of waiting for the next generation activation (R8.5).
+    /// </summary>
+    private volatile bool _recoveryRequested;
+
     /// <summary>Creates the queue with a bounded capacity.</summary>
     /// <param name="maximumEntries">The most distinct pending slot identities retained.</param>
     /// <param name="diagnostics">Where a bounded-capacity eviction is reported, or null for none.</param>
@@ -69,6 +82,16 @@ internal sealed class PendingReconciliationQueue
         long runtimeRevision)
     {
         var key = new Key(mount, profileId, slot);
+
+        // A version the Platform already decided must not be re-admitted by a recovery replay, or the
+        // same report would be resent on every recovery pass. A live rotation always carries a higher
+        // version and is therefore never suppressed (R8.5).
+        if (_acknowledged.TryGetValue(key, out var acknowledged)
+            && IsNotNewer(acknowledged, authorityEpoch, runtimeRevision))
+        {
+            return;
+        }
+
         var sequence = Interlocked.Increment(ref _sequence);
 
         // A compare-and-swap loop: read-decide-write must be one atomic unit. A plain
@@ -163,10 +186,15 @@ internal sealed class PendingReconciliationQueue
             return;
         }
 
+        // An eviction means a committed, unreconciled rotation is no longer in this in-memory queue.
+        // Its identity must be re-derived from the durable record rather than waiting for a future
+        // generation activation that may never arrive (R8.5).
+        _recoveryRequested = true;
+
         _diagnostics?.Invoke(
             $"The pending-reconciliation queue exceeded its capacity of {_maximumEntries} identities and "
             + $"evicted {removed} oldest entr{(removed == 1 ? "y" : "ies")}; the affected "
-            + "rotations are re-derived from their durable records at the next activation replay.");
+            + "rotations are re-derived from their durable records on the next reconciliation pass.");
     }
 
     /// <summary>The reports awaiting acknowledgement, ordinally ordered for a deterministic send order.</summary>
@@ -194,6 +222,8 @@ internal sealed class PendingReconciliationQueue
     {
         var key = new Key(mount, profileId, slot);
 
+        RememberAcknowledged(key, authorityEpoch, runtimeRevision);
+
         if (!_pending.TryGetValue(key, out var entry))
         {
             return;
@@ -213,6 +243,64 @@ internal sealed class PendingReconciliationQueue
         // admitted after the read - a concurrent Add(N+1) racing Acknowledge(N) - which would drop the
         // newer rotation report even though it was never acknowledged.
         _pending.TryRemove(new KeyValuePair<Key, Entry>(key, entry));
+    }
+
+    /// <summary>True when an overflow eviction dropped an identity a recovery replay must re-derive.</summary>
+    public bool RecoveryRequested => _recoveryRequested;
+
+    /// <summary>Clears the recovery request after a successful recovery replay.</summary>
+    public void ClearRecoveryRequest() => _recoveryRequested = false;
+
+    /// <summary>
+    /// Remembers the highest decided version for one identity so a recovery replay does not resend a
+    /// report the Platform already accepted or terminally refused.
+    /// </summary>
+    private void RememberAcknowledged(Key key, long authorityEpoch, long runtimeRevision)
+    {
+        var sequence = Interlocked.Increment(ref _sequence);
+        var candidate = new Entry(authorityEpoch, runtimeRevision, runtimeRevision, sequence);
+        while (true)
+        {
+            if (!_acknowledged.TryGetValue(key, out var current))
+            {
+                if (_acknowledged.TryAdd(key, candidate))
+                {
+                    break;
+                }
+            }
+            else if (!IsNotNewer(current, authorityEpoch, runtimeRevision))
+            {
+                if (_acknowledged.TryUpdate(key, candidate, current))
+                {
+                    break;
+                }
+            }
+            else
+            {
+                // The remembered version is already at least as new.
+                break;
+            }
+        }
+
+        PruneAcknowledged();
+    }
+
+    private void PruneAcknowledged()
+    {
+        var cap = _maximumEntries * 4;
+        if (_acknowledged.Count <= cap)
+        {
+            return;
+        }
+
+        var overflow = _acknowledged
+            .OrderBy(pair => pair.Value.Sequence)
+            .Take(_acknowledged.Count - cap)
+            .ToArray();
+        foreach (var pair in overflow)
+        {
+            _acknowledged.TryRemove(new KeyValuePair<Key, Entry>(pair.Key, pair.Value));
+        }
     }
 
     /// <summary>How many reports are still awaiting acknowledgement.</summary>
