@@ -224,31 +224,67 @@ internal sealed class PendingReconciliationQueue
     /// acknowledgement for an older epoch, so a delayed acknowledgement cannot silently drop a newer
     /// credential change (R7.1).
     /// </summary>
+    /// <remarks>
+    /// An acknowledgement also advances the Platform's committed revision for the identity, so a newer
+    /// same-epoch entry that survives the call must be rebased onto the acknowledged revision. Otherwise
+    /// its base stays at the pre-rotation revision and the next report claims to advance from a base the
+    /// Platform no longer holds, is refused as a revision mismatch, and strands the newer credential
+    /// (R12.1).
+    /// </remarks>
     public void Acknowledge(string mount, string profileId, string slot, long authorityEpoch, long runtimeRevision)
     {
         var key = new Key(mount, profileId, slot);
 
         RememberAcknowledged(key, authorityEpoch, runtimeRevision);
 
-        if (!_pending.TryGetValue(key, out var entry))
+        // A read-decide-CAS loop keeps the decision atomic against a concurrent Add that can replace
+        // the entry between the read and the write.
+        while (true)
         {
-            return;
+            if (!_pending.TryGetValue(key, out var entry))
+            {
+                return;
+            }
+
+            OnAcknowledgeRead?.Invoke();
+
+            // A different authority epoch is a different authority generation and must be acknowledged
+            // on its own; this call must not touch it (R7.1).
+            if (entry.AuthorityEpoch != authorityEpoch)
+            {
+                return;
+            }
+
+            // Only the processed version (revision at or below what was reconciled) is removed. Remove
+            // only the exact pair that was read, so a concurrent Add(N+1) racing Acknowledge(N) is never
+            // dropped.
+            if (entry.RuntimeRevision <= runtimeRevision)
+            {
+                if (_pending.TryRemove(new KeyValuePair<Key, Entry>(key, entry)))
+                {
+                    return;
+                }
+
+                // The entry changed under us; re-read and re-decide against the current value.
+                continue;
+            }
+
+            // A newer revision in the same epoch still needs reconciliation. Its base must advance to
+            // the revision the Platform now holds, or the next report would be refused as a revision
+            // mismatch (R12.1). A base already at or above the acknowledged revision is left as is.
+            if (entry.PreviousRuntimeRevision >= runtimeRevision)
+            {
+                return;
+            }
+
+            var rebased = entry with { PreviousRuntimeRevision = runtimeRevision };
+            if (_pending.TryUpdate(key, rebased, entry))
+            {
+                return;
+            }
+
+            // The entry changed under us; re-read and re-decide against the current value.
         }
-
-        OnAcknowledgeRead?.Invoke();
-
-        // Only the processed version (same authority epoch, revision at or below what was reconciled)
-        // is removed. A newer epoch is a different authority generation and must be acknowledged on its
-        // own; a higher revision in the same epoch is a newer rotation that still needs reconciliation.
-        if (entry.AuthorityEpoch != authorityEpoch || entry.RuntimeRevision > runtimeRevision)
-        {
-            return;
-        }
-
-        // Remove only the exact pair that was read. A plain TryRemove(key) could delete a newer entry
-        // admitted after the read - a concurrent Add(N+1) racing Acknowledge(N) - which would drop the
-        // newer rotation report even though it was never acknowledged.
-        _pending.TryRemove(new KeyValuePair<Key, Entry>(key, entry));
     }
 
     /// <summary>The current recovery version. An eviction bumps it.</summary>

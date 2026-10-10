@@ -1771,7 +1771,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task A_confirmation_for_a_slot_the_generation_no_longer_declares_is_pruned()
+    public async Task Loading_a_generation_does_not_prune_the_confirmation_journal()
     {
         (ManagedGenerationLoader loader, _) = await OpenLoaderWithStateAsync();
 
@@ -1790,9 +1790,78 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             }));
         Assert.True(loaded.Succeeded, string.Join("; ", loaded.Refusals.Select(refusal => refusal.Message)));
 
-        // The loaded generation declares only /mcp/connector, so the stale identity is pruned (R11.7).
+        // Preparing a candidate must not mutate the running generation's durable state: the worker can
+        // still refuse it in host validation, and the confirmation must survive (R12.2).
+        Assert.NotNull(loader.ReadConfirmedRevision(
+            "/mcp/other", "oauth2-authorization-code-pkce-refresh", "refreshToken"));
+
+        // Pruning is an activation-time side effect. Applied with the active mounts it drops the stale
+        // identity (R11.7/R12.2).
+        loader.PruneConfirmedRevisions(loaded.Generation!.Mounts);
         Assert.Null(loader.ReadConfirmedRevision(
             "/mcp/other", "oauth2-authorization-code-pkce-refresh", "refreshToken"));
+    }
+
+    [Fact]
+    public async Task A_refused_candidate_does_not_prune_the_confirmation_journal_but_an_activation_does()
+    {
+        (ManagedGenerationLoader loader, _) = await OpenLoaderWithStateAsync();
+
+        var secrets = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["MANAGED_CLIENT_SECRET"] = "client-secret-canary",
+            ["MANAGED_REFRESH_TOKEN"] = "declared-refresh",
+        };
+
+        var current = Generation(
+            "g1",
+            TwoSlotRotatableRefreshSurface(new Uri("https://api.example.com/")),
+            prefix: "/mcp/connector",
+            secrets: secrets);
+        await using var platform = await PlatformAsync(_ => Response.Generation(current));
+        await using ManagedProcess engine = await StartAsync(
+            platform,
+            providedLoader: loader,
+            allowedHosts: ["mcp.example.test"]);
+
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+
+        // One confirmation the active generation declares and one it does not.
+        Assert.True(engine.Loader.RecordConfirmedRevision(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken", authorityEpoch: 1, runtimeRevision: 1));
+        Assert.True(engine.Loader.RecordConfirmedRevision(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "clientSecret", authorityEpoch: 1, runtimeRevision: 5));
+
+        // A candidate the host refuses (protected, no issuer) must leave the running generation's
+        // confirmation journal untouched (R12.2).
+        current = Generation("g2", ServedManifests.ProtectedOneSurface, prefix: "/mcp/connector");
+        await WaitForAsync(
+            () =>
+            {
+                lock (engine.Diagnostics)
+                {
+                    return engine.Diagnostics.Any(message =>
+                        message.Contains("auth/issuer-missing", StringComparison.Ordinal));
+                }
+            });
+
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.NotNull(engine.Loader.ReadConfirmedRevision(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "clientSecret"));
+
+        // A candidate that activates and no longer declares the clientSecret slot prunes only that
+        // identity; the slot it still declares keeps its confirmation (R12.2/R11.7).
+        current = Generation(
+            "g3",
+            ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
+            prefix: "/mcp/connector",
+            secrets: secrets);
+        await WaitForAsync(() => engine.Worker.ActiveGenerationId == "g3");
+
+        Assert.NotNull(engine.Loader.ReadConfirmedRevision(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken"));
+        Assert.Null(engine.Loader.ReadConfirmedRevision(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "clientSecret"));
     }
 
     private static ManagedGenerationDelivery DirectDelivery(

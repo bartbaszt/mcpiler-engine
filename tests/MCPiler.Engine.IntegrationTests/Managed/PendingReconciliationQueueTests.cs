@@ -94,16 +94,48 @@ public sealed class PendingReconciliationQueueTests
     {
         var queue = new PendingReconciliationQueue();
 
-        queue.Add("/mcp/connector", "profile", "refreshToken", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 2);
+        // A coalesced chain: the Platform still holds revision 0, so the queued report is 0 -> 2.
+        queue.Add("/mcp/connector", "profile", "refreshToken", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
+        queue.Add("/mcp/connector", "profile", "refreshToken", authorityEpoch: 1, previousRuntimeRevision: 1, runtimeRevision: 2);
 
-        // A delayed acknowledgement for an older revision must not remove the newer queued one.
+        // A delayed acknowledgement for revision 1 (the Platform accepted the first half) must not remove
+        // the newer queued one. It must also advance the survivor's base to revision 1, so the next report
+        // is 1 -> 2 rather than the stale 0 -> 2 the Platform would refuse as a revision mismatch (R12.1).
         queue.Acknowledge("/mcp/connector", "profile", "refreshToken", authorityEpoch: 1, runtimeRevision: 1);
 
         Assert.Equal(1, queue.Count);
+        PendingReconciliation survivor = Assert.Single(queue.Snapshot());
+        Assert.Equal(1, survivor.PreviousRuntimeRevision);
+        Assert.Equal(2, survivor.RuntimeRevision);
 
         queue.Acknowledge("/mcp/connector", "profile", "refreshToken", authorityEpoch: 1, runtimeRevision: 2);
 
         Assert.Equal(0, queue.Count);
+    }
+
+    [Fact]
+    public void A_surviving_entry_keeps_the_acknowledged_revision_as_its_base_across_a_longer_chain()
+    {
+        var queue = new PendingReconciliationQueue();
+
+        for (var revision = 1; revision <= 4; revision++)
+        {
+            queue.Add(
+                "/mcp/connector",
+                "profile",
+                "refreshToken",
+                authorityEpoch: 2,
+                previousRuntimeRevision: revision - 1,
+                runtimeRevision: revision);
+        }
+
+        // The Platform accepts 1..2 (it held 0), so the survivor must now advance from 2, not from the
+        // earliest coalesced base 0 (R12.1).
+        queue.Acknowledge("/mcp/connector", "profile", "refreshToken", authorityEpoch: 2, runtimeRevision: 2);
+
+        PendingReconciliation survivor = Assert.Single(queue.Snapshot());
+        Assert.Equal(2, survivor.PreviousRuntimeRevision);
+        Assert.Equal(4, survivor.RuntimeRevision);
     }
 
     [Fact]

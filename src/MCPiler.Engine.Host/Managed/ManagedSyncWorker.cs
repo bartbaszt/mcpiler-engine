@@ -659,6 +659,12 @@ if (_binding.Listener.Transport is HostTransport.Http
 
         _activeGenerationId = delivery.GenerationId;
         _activeMounts = generation.Mounts;
+
+        // Only now that the candidate is the active generation may the durable confirmation journal be
+        // bounded to its mounts. A candidate that host validation refused above returned before this
+        // point, so it never mutated the running generation's durable state (R12.2).
+        _loader.PruneConfirmedRevisions(generation.Mounts);
+
         _lastCandidateOutcome = ManagedProtocol.Active;
         _lastCandidateCode = null;
         _lastCandidateMessage = null;

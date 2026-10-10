@@ -35,18 +35,28 @@ internal sealed class ConfirmedRevisionStore
     private readonly object _sync = new();
     private Dictionary<string, (long Epoch, long Revision)>? _entries;
 
+    /// <summary>
+    /// Test seam: how the journal file is read. Overridable so a test can inject a transient read
+    /// failure deterministically without depending on platform-specific file-locking behavior.
+    /// </summary>
+    internal Func<string, string[]> ReadAllLines { get; set; } = path => File.ReadAllLines(path);
+
     public ConfirmedRevisionStore(string root) => _path = Path.Combine(root, FileName);
 
     /// <summary>
     /// The revision the Platform last confirmed for one slot identity, or null when none has been
-    /// confirmed yet.
+    /// confirmed yet. A journal that exists but cannot be read also returns null, so a caller degrades to
+    /// the declared revision rather than to an unverified value.
     /// </summary>
     public (long Epoch, long Revision)? Read(string mount, string profileId, string slot)
     {
         lock (_sync)
         {
-            var entries = Load();
-            return entries.TryGetValue(KeyFor(mount, profileId, slot), out var entry) ? entry : null;
+            var entries = TryLoad();
+            return entries is not null
+                && entries.TryGetValue(KeyFor(mount, profileId, slot), out var entry)
+                ? entry
+                : null;
         }
     }
 
@@ -59,7 +69,15 @@ internal sealed class ConfirmedRevisionStore
     {
         lock (_sync)
         {
-            var entries = Load();
+            var entries = TryLoad();
+            if (entries is null)
+            {
+                // The journal exists but its current contents could not be read. Writing now would
+                // overwrite confirmations that were never verified, so the write is refused and the caller
+                // retries once the journal is readable (R12.4).
+                return false;
+            }
+
             var key = KeyFor(mount, profileId, slot);
             var had = entries.TryGetValue(key, out var existing);
             if (had && IsNotOlder(existing, epoch, revision))
@@ -101,7 +119,14 @@ internal sealed class ConfirmedRevisionStore
     {
         lock (_sync)
         {
-            var entries = Load();
+            var entries = TryLoad();
+            if (entries is null)
+            {
+                // A journal that could not be read is left untouched rather than overwritten from an
+                // unverified empty state (R12.4).
+                return;
+            }
+
             var stale = entries.Keys.Where(key => !activeKeys.Contains(key)).ToArray();
             if (stale.Length == 0)
             {
@@ -131,32 +156,41 @@ internal sealed class ConfirmedRevisionStore
     private static bool IsNotOlder((long Epoch, long Revision) existing, long epoch, long revision)
         => existing.Epoch > epoch || (existing.Epoch == epoch && existing.Revision >= revision);
 
-    private Dictionary<string, (long Epoch, long Revision)> Load()
+    /// <summary>
+    /// Loads the journal, caching it once it has been read. Returns null when the journal file exists but
+    /// could not be read, so callers never treat an unverified read as a valid empty journal. A missing
+    /// file is a legitimate empty journal and is cached as empty (R12.4).
+    /// </summary>
+    private Dictionary<string, (long Epoch, long Revision)>? TryLoad()
     {
         if (_entries is not null)
         {
             return _entries;
         }
 
+        if (!File.Exists(_path))
+        {
+            _entries = new Dictionary<string, (long, long)>(StringComparer.Ordinal);
+            return _entries;
+        }
+
         var entries = new Dictionary<string, (long, long)>(StringComparer.Ordinal);
         try
         {
-            if (File.Exists(_path))
+            foreach (var line in ReadAllLines(_path))
             {
-                foreach (var line in File.ReadAllLines(_path))
+                if (TryParseLine(line, out var key, out var epoch, out var revision))
                 {
-                    if (TryParseLine(line, out var key, out var epoch, out var revision))
-                    {
-                        entries[key] = (epoch, revision);
-                    }
+                    entries[key] = (epoch, revision);
                 }
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // An unreadable confirmation journal degrades to "nothing confirmed": recovery then falls
-            // back to the declared revision, never to a fabricated one.
-            entries.Clear();
+            // The file exists but its contents could not be verified. Do not cache an empty snapshot: a
+            // later write must not overwrite a journal whose current contents are unknown (R12.4). The
+            // state stays unset so the next call retries the read.
+            return null;
         }
 
         _entries = entries;

@@ -468,10 +468,6 @@ public sealed class ManagedGenerationLoader : IDisposable
             return new ManagedGenerationLoad(null, refusals, warnings);
         }
 
-        // Bound the confirmation journal to the slots this generation actually declares; an identity
-        // that is no longer served keeps no durable confirmation (R11.7).
-        PruneConfirmedRevisions(mounts);
-
         RuntimeStartResult started = RuntimeStartResult.Ready(
             mounts,
             warnings,
@@ -596,7 +592,14 @@ public sealed class ManagedGenerationLoader : IDisposable
     /// Drops confirmation-journal entries for identities the active generation no longer declares, so
     /// the journal is bounded by the live slot set rather than by every identity ever confirmed (R11.7).
     /// </summary>
-    private void PruneConfirmedRevisions(IReadOnlyList<MountedManifest> mounts)
+    /// <remarks>
+    /// This is a side effect on durable state and must run only after a candidate has actually become the
+    /// active generation. Loading a candidate (which host validation can still refuse) must not mutate the
+    /// running generation's journal, or a refused candidate would strand the confirmations of the
+    /// generation that is still serving (R12.2).
+    /// </remarks>
+    /// <param name="mounts">The active generation's mounts.</param>
+    public void PruneConfirmedRevisions(IReadOnlyList<MountedManifest> mounts)
     {
         if (_confirmed is null)
         {
