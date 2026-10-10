@@ -52,6 +52,13 @@ internal sealed class PendingReconciliationQueue
     /// </summary>
     internal Action? OnAcknowledgeRead { get; set; }
 
+    /// <summary>
+    /// Test seam: invoked after <see cref="Trim"/> has computed its eviction candidates and before it
+    /// removes any, so a test can interleave a concurrent replacement deterministically. Production
+    /// code never sets it.
+    /// </summary>
+    internal Action? OnTrimSnapshot { get; set; }
+
     /// <summary>Records one committed rotation as awaiting acknowledgement.</summary>
     public void Add(
         string mount,
@@ -73,9 +80,11 @@ internal sealed class PendingReconciliationQueue
             _pending.TryGetValue(key, out var queued);
             OnAddRead?.Invoke();
 
-            // Keep the newest authoritative revision. A replay that queues an older pair after a live
-            // rotation has already queued a newer one must not overwrite it.
-            if (queued is not null && queued.RuntimeRevision >= runtimeRevision)
+            // Keep the newest authoritative rotation. Authority epoch is the outer ordering: a rotation
+            // under a newer epoch supersedes an older-epoch entry regardless of its revision, so an
+            // epoch-11/revision-1 rotation must not be dropped because an epoch-10/revision-15 entry is
+            // queued (R6.4). Within one epoch the higher revision wins.
+            if (queued is not null && IsNotNewer(queued, authorityEpoch, runtimeRevision))
             {
                 return;
             }
@@ -108,6 +117,14 @@ internal sealed class PendingReconciliationQueue
     }
 
     /// <summary>
+    /// Whether an already-queued entry is at least as new as an incoming rotation, ordered by authority
+    /// epoch first and then by runtime revision within the same epoch.
+    /// </summary>
+    private static bool IsNotNewer(Entry queued, long authorityEpoch, long runtimeRevision)
+        => queued.AuthorityEpoch > authorityEpoch
+        || (queued.AuthorityEpoch == authorityEpoch && queued.RuntimeRevision >= runtimeRevision);
+
+    /// <summary>
     /// Applies the bounded capacity by evicting the oldest queued identities. The record just
     /// admitted carries the highest sequence and is therefore never the one evicted, so the newest
     /// authoritative revision is not silently dropped. An eviction is reported, bounded and
@@ -125,14 +142,30 @@ internal sealed class PendingReconciliationQueue
             .OrderBy(pair => pair.Value.Sequence)
             .Take(_pending.Count - _maximumEntries)
             .ToArray();
+
+        OnTrimSnapshot?.Invoke();
+
+        // Remove only the exact pair that was observed. A plain TryRemove(key) could delete a newer
+        // entry admitted after the overflow snapshot - a concurrent Add(N+1) replacing the observed
+        // entry - which would drop the newer rotation report even though the capacity decision was made
+        // against the older one (R6.6). An entry that changed under us is left in place; Add re-trims.
+        var removed = 0;
         foreach (var pair in overflow)
         {
-            _pending.TryRemove(pair.Key, out _);
+            if (_pending.TryRemove(new KeyValuePair<Key, Entry>(pair.Key, pair.Value)))
+            {
+                removed++;
+            }
+        }
+
+        if (removed == 0)
+        {
+            return;
         }
 
         _diagnostics?.Invoke(
             $"The pending-reconciliation queue exceeded its capacity of {_maximumEntries} identities and "
-            + $"evicted {overflow.Length} oldest entr{(overflow.Length == 1 ? "y" : "ies")}; the affected "
+            + $"evicted {removed} oldest entr{(removed == 1 ? "y" : "ies")}; the affected "
             + "rotations are re-derived from their durable records at the next activation replay.");
     }
 

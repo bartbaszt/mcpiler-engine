@@ -210,4 +210,49 @@ public sealed class PendingReconciliationQueueTests
         PendingReconciliation entry = Assert.Single(queue.Snapshot());
         Assert.Equal(500, entry.RuntimeRevision);
     }
+
+    [Fact]
+    public void A_rotation_under_a_newer_epoch_with_a_lower_revision_supersedes_the_older_entry()
+    {
+        var queue = new PendingReconciliationQueue();
+
+        // An older-epoch entry with a high revision is queued first.
+        queue.Add("/mcp/connector", "profile", "refreshToken", authorityEpoch: 10, previousRuntimeRevision: 14, runtimeRevision: 15);
+
+        // A newer authority epoch carries a lower revision. Epoch is the outer ordering, so the newer
+        // rotation must supersede the older entry rather than being dropped by a revision-only
+        // comparison (epoch 11 revision 1 vs epoch 10 revision 15) and losing the newer credential.
+        queue.Add("/mcp/connector", "profile", "refreshToken", authorityEpoch: 11, previousRuntimeRevision: 0, runtimeRevision: 1);
+
+        PendingReconciliation entry = Assert.Single(queue.Snapshot());
+        Assert.Equal(11, entry.AuthorityEpoch);
+        Assert.Equal(1, entry.RuntimeRevision);
+        Assert.Equal(0, entry.PreviousRuntimeRevision);
+    }
+
+    [Fact]
+    public void An_overflow_trim_raced_by_a_newer_replacement_keeps_the_newer_entry()
+    {
+        var queue = new PendingReconciliationQueue(maximumEntries: 2);
+
+        queue.Add("/mcp/connector", "profile", "slot-0", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
+        queue.Add("/mcp/connector", "profile", "slot-1", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
+
+        // When the third identity overflows and Trim snapshots slot-0 as the oldest candidate, a
+        // concurrent rotation replaces slot-0 with a newer revision before Trim removes anything. The
+        // conditional removal must not delete the newer replacement (R6.6).
+        queue.OnTrimSnapshot = () =>
+        {
+            queue.OnTrimSnapshot = null;
+            queue.Add("/mcp/connector", "profile", "slot-0", authorityEpoch: 1, previousRuntimeRevision: 1, runtimeRevision: 2);
+        };
+
+        queue.Add("/mcp/connector", "profile", "slot-2", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
+
+        Assert.Equal(2, queue.Count);
+        PendingReconciliation replaced = Assert.Single(
+            queue.Snapshot(),
+            entry => string.Equals(entry.Slot, "slot-0", StringComparison.Ordinal));
+        Assert.Equal(2, replaced.RuntimeRevision);
+    }
 }
