@@ -173,12 +173,15 @@ internal sealed class ManagedSyncWorker : IDisposable
             {
                 // Nothing durable backs the rotation: either the slot is not stored here or the
                 // store is not configured. Reporting a value this process does not hold would be
-                // inventing state, and the record cannot come back, so the entry is dropped.
+                // inventing state, and the record cannot come back, so the entry is dropped. The
+                // acknowledgement names the snapshot's full version, so a newer rotation admitted
+                // during the read is never removed (R7.1).
                 _reconciliations.Acknowledge(
                     pending.Mount,
                     pending.ProfileId,
                     pending.Slot,
-                    long.MaxValue);
+                    pending.AuthorityEpoch,
+                    pending.RuntimeRevision);
                 continue;
             }
 
@@ -206,6 +209,7 @@ internal sealed class ManagedSyncWorker : IDisposable
                         pending.Mount,
                         pending.ProfileId,
                         pending.Slot,
+                        record.AuthorityEpoch,
                         record.RuntimeRevision);
                     break;
 
@@ -220,7 +224,8 @@ internal sealed class ManagedSyncWorker : IDisposable
                         pending.Mount,
                         pending.ProfileId,
                         pending.Slot,
-                        long.MaxValue);
+                        pending.AuthorityEpoch,
+                        pending.RuntimeRevision);
                     break;
 
                 default:

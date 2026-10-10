@@ -97,11 +97,11 @@ public sealed class PendingReconciliationQueueTests
         queue.Add("/mcp/connector", "profile", "refreshToken", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 2);
 
         // A delayed acknowledgement for an older revision must not remove the newer queued one.
-        queue.Acknowledge("/mcp/connector", "profile", "refreshToken", runtimeRevision: 1);
+        queue.Acknowledge("/mcp/connector", "profile", "refreshToken", authorityEpoch: 1, runtimeRevision: 1);
 
         Assert.Equal(1, queue.Count);
 
-        queue.Acknowledge("/mcp/connector", "profile", "refreshToken", runtimeRevision: 2);
+        queue.Acknowledge("/mcp/connector", "profile", "refreshToken", authorityEpoch: 1, runtimeRevision: 2);
 
         Assert.Equal(0, queue.Count);
     }
@@ -161,7 +161,7 @@ public sealed class PendingReconciliationQueueTests
             queue.Add("/mcp/connector", "profile", "refreshToken", authorityEpoch: 1, previousRuntimeRevision: 2, runtimeRevision: 3);
         };
 
-        queue.Acknowledge("/mcp/connector", "profile", "refreshToken", runtimeRevision: 2);
+        queue.Acknowledge("/mcp/connector", "profile", "refreshToken", authorityEpoch: 1, runtimeRevision: 2);
 
         Assert.Equal(1, queue.Count);
         Assert.Equal(3, Assert.Single(queue.Snapshot()).RuntimeRevision);
@@ -203,7 +203,7 @@ public sealed class PendingReconciliationQueueTests
                 runtimeRevision: index + 1);
 
             // An acknowledgement for an older revision must never remove a newer queued entry.
-            queue.Acknowledge("/mcp/connector", "profile", "refreshToken", runtimeRevision: index);
+            queue.Acknowledge("/mcp/connector", "profile", "refreshToken", authorityEpoch: 1, runtimeRevision: index);
         });
 
         // No acknowledgement names revision 500, so the highest rotation must remain queued.
@@ -230,6 +230,30 @@ public sealed class PendingReconciliationQueueTests
         Assert.Equal(0, entry.PreviousRuntimeRevision);
     }
 
+    [Fact]
+    public void An_acknowledgement_for_an_older_epoch_does_not_remove_a_newer_epoch_entry()
+    {
+        var queue = new PendingReconciliationQueue();
+
+        // An older-epoch entry with a high revision is queued and reconciled.
+        queue.Add("/mcp/connector", "profile", "refreshToken", authorityEpoch: 10, previousRuntimeRevision: 14, runtimeRevision: 15);
+
+        // Before the acknowledgement arrives, a newer authority epoch replaces it with a lower revision.
+        queue.Add("/mcp/connector", "profile", "refreshToken", authorityEpoch: 11, previousRuntimeRevision: 0, runtimeRevision: 1);
+
+        // The stale acknowledgement names epoch 10 revision 15. It must not remove the epoch-11 entry
+        // merely because 1 <= 15; the full version identifies which report was processed (R7.1).
+        queue.Acknowledge("/mcp/connector", "profile", "refreshToken", authorityEpoch: 10, runtimeRevision: 15);
+
+        PendingReconciliation entry = Assert.Single(queue.Snapshot());
+        Assert.Equal(11, entry.AuthorityEpoch);
+        Assert.Equal(1, entry.RuntimeRevision);
+
+        // The newer epoch is acknowledged on its own version and then removed.
+        queue.Acknowledge("/mcp/connector", "profile", "refreshToken", authorityEpoch: 11, runtimeRevision: 1);
+        Assert.Equal(0, queue.Count);
+    }
+    
     [Fact]
     public void An_overflow_trim_raced_by_a_newer_replacement_keeps_the_newer_entry()
     {

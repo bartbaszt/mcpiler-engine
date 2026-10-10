@@ -184,11 +184,13 @@ internal sealed class PendingReconciliationQueue
                 pair.Value.RuntimeRevision))];
 
     /// <summary>
-    /// Removes a pending report, but only when the acknowledged revision is the one still queued.
-    /// A rotation that advanced past the acknowledged revision stays pending, so a delayed
-    /// acknowledgement cannot silently drop a newer credential change.
+    /// Removes a pending report, but only when the acknowledged full version is the one still queued.
+    /// A rotation that advanced past the acknowledged revision stays pending, and - because the
+    /// authority epoch is part of the identity - a rotation under a newer epoch is never removed by an
+    /// acknowledgement for an older epoch, so a delayed acknowledgement cannot silently drop a newer
+    /// credential change (R7.1).
     /// </summary>
-    public void Acknowledge(string mount, string profileId, string slot, long runtimeRevision)
+    public void Acknowledge(string mount, string profileId, string slot, long authorityEpoch, long runtimeRevision)
     {
         var key = new Key(mount, profileId, slot);
 
@@ -199,7 +201,10 @@ internal sealed class PendingReconciliationQueue
 
         OnAcknowledgeRead?.Invoke();
 
-        if (entry.RuntimeRevision > runtimeRevision)
+        // Only the processed version (same authority epoch, revision at or below what was reconciled)
+        // is removed. A newer epoch is a different authority generation and must be acknowledged on its
+        // own; a higher revision in the same epoch is a newer rotation that still needs reconciliation.
+        if (entry.AuthorityEpoch != authorityEpoch || entry.RuntimeRevision > runtimeRevision)
         {
             return;
         }
