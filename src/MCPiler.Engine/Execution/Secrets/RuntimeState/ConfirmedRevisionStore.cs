@@ -19,6 +19,12 @@ namespace MCPiler.Engine.Execution.Secrets.RuntimeState;
 /// declared revision, which is the case where several rotations coalesced before the first report
 /// and the Platform is still at the declared revision.
 /// </para>
+/// <para>
+/// A confirmation is only as good as its durability: when the journal cannot be written the change is
+/// rolled back in memory and the caller is told, so an unwritten confirmation is never treated as
+/// durable (R11.2). The journal is pruned to the active generation's declared slots so it is bounded
+/// by the live slot set rather than by every identity ever confirmed (R11.7).
+/// </para>
 /// </remarks>
 internal sealed class ConfirmedRevisionStore
 {
@@ -40,32 +46,90 @@ internal sealed class ConfirmedRevisionStore
         lock (_sync)
         {
             var entries = Load();
-            return entries.TryGetValue(Key(mount, profileId, slot), out var entry) ? entry : null;
+            return entries.TryGetValue(KeyFor(mount, profileId, slot), out var entry) ? entry : null;
         }
     }
 
-    /// <summary>Records a confirmation, keeping the highest epoch/revision seen.</summary>
-    public void Record(string mount, string profileId, string slot, long epoch, long revision)
+    /// <summary>
+    /// Records a confirmation, keeping the highest epoch/revision seen. Returns false when the
+    /// confirmation could not be durably written; the in-memory state is rolled back so an unwritten
+    /// confirmation is never mistaken for a durable one (R11.2).
+    /// </summary>
+    public bool Record(string mount, string profileId, string slot, long epoch, long revision)
     {
         lock (_sync)
         {
             var entries = Load();
-            var key = Key(mount, profileId, slot);
-            if (entries.TryGetValue(key, out var existing) && IsNotOlder(existing, epoch, revision))
+            var key = KeyFor(mount, profileId, slot);
+            var had = entries.TryGetValue(key, out var existing);
+            if (had && IsNotOlder(existing, epoch, revision))
+            {
+                return true;
+            }
+
+            entries[key] = (epoch, revision);
+            try
+            {
+                Persist(entries);
+                return true;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // A "durable" confirmation whose write failed is not durable. Restore the previous
+                // in-memory value (or drop the new key) and report the failure to the caller.
+                if (had)
+                {
+                    entries[key] = existing;
+                }
+                else
+                {
+                    entries.Remove(key);
+                }
+
+                return false;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Removes confirmations for identities the active generation no longer declares, so the journal
+    /// tracks the live slot set instead of every identity ever confirmed (R11.7). A failed prune is
+    /// best-effort and leaves the in-memory confirmations intact.
+    /// </summary>
+    /// <param name="activeKeys">The identity keys (<see cref="KeyFor"/>) of the active slots.</param>
+    public void Prune(IReadOnlyCollection<string> activeKeys)
+    {
+        lock (_sync)
+        {
+            var entries = Load();
+            var stale = entries.Keys.Where(key => !activeKeys.Contains(key)).ToArray();
+            if (stale.Length == 0)
             {
                 return;
             }
 
-            entries[key] = (epoch, revision);
-            Persist(entries);
+            foreach (var key in stale)
+            {
+                entries.Remove(key);
+            }
+
+            try
+            {
+                Persist(entries);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Best-effort: a failed prune leaves a larger journal but must not drop a live
+                // confirmation from memory.
+            }
         }
     }
 
+    internal static string KeyFor(string mount, string profileId, string slot)
+        => string.Concat(mount, '\u001f', profileId, '\u001f', slot);
+
     private static bool IsNotOlder((long Epoch, long Revision) existing, long epoch, long revision)
         => existing.Epoch > epoch || (existing.Epoch == epoch && existing.Revision >= revision);
-
-    private static string Key(string mount, string profileId, string slot)
-        => string.Concat(mount, '\u001f', profileId, '\u001f', slot);
 
     private Dictionary<string, (long Epoch, long Revision)> Load()
     {
@@ -99,27 +163,24 @@ internal sealed class ConfirmedRevisionStore
         return entries;
     }
 
+    /// <summary>
+    /// Writes the journal atomically. Throws on a write failure so the caller can refuse to treat the
+    /// confirmation as durable; <see cref="Record"/> translates that into a false result and a
+    /// rollback (R11.2).
+    /// </summary>
     private void Persist(Dictionary<string, (long Epoch, long Revision)> entries)
     {
-        try
+        var builder = new StringBuilder();
+        foreach (var pair in entries.OrderBy(pair => pair.Key, StringComparer.Ordinal))
         {
-            var builder = new StringBuilder();
-            foreach (var pair in entries.OrderBy(pair => pair.Key, StringComparer.Ordinal))
-            {
-                builder.Append(pair.Key).Append(FieldSeparator)
-                    .Append(pair.Value.Epoch.ToString(CultureInfo.InvariantCulture)).Append(FieldSeparator)
-                    .Append(pair.Value.Revision.ToString(CultureInfo.InvariantCulture)).Append('\n');
-            }
+            builder.Append(pair.Key).Append(FieldSeparator)
+                .Append(pair.Value.Epoch.ToString(CultureInfo.InvariantCulture)).Append(FieldSeparator)
+                .Append(pair.Value.Revision.ToString(CultureInfo.InvariantCulture)).Append('\n');
+        }
 
-            var temporary = _path + ".tmp";
-            File.WriteAllText(temporary, builder.ToString());
-            File.Move(temporary, _path, overwrite: true);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // Best-effort: a failed confirmation write degrades to the declared-revision fallback on the
-            // next restart and never blocks the reconciliation that just succeeded.
-        }
+        var temporary = _path + ".tmp";
+        File.WriteAllText(temporary, builder.ToString());
+        File.Move(temporary, _path, overwrite: true);
     }
 
     private static bool TryParseLine(string line, out string key, out long epoch, out long revision)

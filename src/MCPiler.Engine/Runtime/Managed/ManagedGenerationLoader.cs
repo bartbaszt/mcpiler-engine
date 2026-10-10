@@ -468,6 +468,10 @@ public sealed class ManagedGenerationLoader : IDisposable
             return new ManagedGenerationLoad(null, refusals, warnings);
         }
 
+        // Bound the confirmation journal to the slots this generation actually declares; an identity
+        // that is no longer served keeps no durable confirmation (R11.7).
+        PruneConfirmedRevisions(mounts);
+
         RuntimeStartResult started = RuntimeStartResult.Ready(
             mounts,
             warnings,
@@ -580,8 +584,39 @@ public sealed class ManagedGenerationLoader : IDisposable
     /// <param name="slot">The slot identity.</param>
     /// <param name="authorityEpoch">The authority epoch the confirmation was made under.</param>
     /// <param name="runtimeRevision">The revision the Platform confirmed.</param>
-    public void RecordConfirmedRevision(string mount, string profileId, string slot, long authorityEpoch, long runtimeRevision)
-        => _confirmed?.Record(mount, profileId, slot, authorityEpoch, runtimeRevision);
+    /// <returns>
+    /// True when the confirmation is durably recorded (or no durable store is configured); false when
+    /// the journal write failed, in which case recovery must not be treated as durably confirmed (R11.2).
+    /// </returns>
+    public bool RecordConfirmedRevision(string mount, string profileId, string slot, long authorityEpoch, long runtimeRevision)
+        => _confirmed is null
+            || _confirmed.Record(mount, profileId, slot, authorityEpoch, runtimeRevision);
+
+    /// <summary>
+    /// Drops confirmation-journal entries for identities the active generation no longer declares, so
+    /// the journal is bounded by the live slot set rather than by every identity ever confirmed (R11.7).
+    /// </summary>
+    private void PruneConfirmedRevisions(IReadOnlyList<MountedManifest> mounts)
+    {
+        if (_confirmed is null)
+        {
+            return;
+        }
+
+        List<string> activeKeys = [];
+        foreach (MountedManifest mount in mounts)
+        {
+            foreach (AuthenticationProfile profile in mount.Document.EffectiveAuthentication.Profiles)
+            {
+                foreach (AuthenticationSlot slot in profile.Slots)
+                {
+                    activeKeys.Add(ConfirmedRevisionStore.KeyFor(mount.Prefix, profile.Id, slot.Slot));
+                }
+            }
+        }
+
+        _confirmed.Prune(activeKeys);
+    }
 
     /// <summary>
     /// Re-derives the reconciliation notifications a restarted process still owes for rotations it
@@ -715,6 +750,7 @@ public sealed class ManagedGenerationLoader : IDisposable
             {
                 continue;
             }
+
 
             // The base the Platform must advance from is the revision it currently holds for this slot.
             // When a confirmation is durably known for this epoch the declared revision can lag it: the

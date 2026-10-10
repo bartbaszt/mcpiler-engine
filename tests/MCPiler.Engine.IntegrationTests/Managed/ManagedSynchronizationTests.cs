@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -1133,6 +1134,65 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_lost_response_after_a_committed_report_converges_on_an_idempotent_retry()
+    {
+        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+
+        var attempts = 0;
+
+        await using var platform = await PlatformAsync(_ => Response.Generation(generation));
+        platform.OnReconcile = _ =>
+        {
+            // The Platform commits revision 1 on the first delivery, but the response is lost. The
+            // redelivered report is recognised idempotently and confirmed, so the engine records the
+            // confirmed revision instead of treating the lost response as a terminal divergence (R11.6).
+            if (Interlocked.Increment(ref attempts) == 1)
+            {
+                return Response.Status(HttpStatusCode.ServiceUnavailable);
+            }
+
+            return Response.Bytes(
+                JsonSerializer.SerializeToUtf8Bytes(new { outcome = "recorded" }),
+                isGeneration: false);
+        };
+
+        (ManagedGenerationLoader loader, FileMutableSlotStore slots) = await OpenLoaderWithStateAsync();
+
+        await using ManagedProcess process = await StartAsync(platform, loader);
+
+        await slots.ReplaceAsync(
+            new MutableSlotRecord(
+                "oauth2-client-credentials",
+                "clientSecret",
+                ScopeFingerprint: null,
+                AuthorityEpoch: 1,
+                RuntimeRevision: 1,
+                "CANARY-rotated-value-5e18"),
+            TestContext.Current.CancellationToken);
+
+        process.Worker.RotationCommitted(
+            "/mcp/connector",
+            "oauth2-client-credentials",
+            "clientSecret",
+            authorityEpoch: 1,
+            previousRuntimeRevision: 0,
+            runtimeRevision: 1);
+
+        // The first delivery is lost; the retry lands and is confirmed.
+        await WaitForAsync(() => Volatile.Read(ref attempts) >= 2);
+        await WaitForAsync(() => process.Worker.PendingReconciliations == 0);
+
+        ConfirmedSlotRevision? confirmed = loader.ReadConfirmedRevision(
+            "/mcp/connector",
+            "oauth2-client-credentials",
+            "clientSecret");
+
+        Assert.NotNull(confirmed);
+        Assert.Equal(1, confirmed!.Value.AuthorityEpoch);
+        Assert.Equal(1, confirmed.Value.RuntimeRevision);
+    }
+
+    [Fact]
     public async Task A_restarted_process_selects_the_durable_rotation_over_the_delivered_generation()
     {
         // Platform still describes T0 at epoch E: its stored desired state predates the rotation
@@ -1565,6 +1625,176 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         Assert.Equal(7, confirmed.Value.RuntimeRevision);
     }
 
+    [Fact]
+    public async Task A_failed_confirmation_write_is_reported_and_not_read_back()
+    {
+        string stateRoot = Path.Combine(_root, "state-confirmfail-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-confirmfail-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateRoot);
+
+        // Force the journal write to fail: a directory occupying the journal path makes the atomic
+        // rename fail, so the confirmation must not be treated as durable (R11.2).
+        Directory.CreateDirectory(Path.Combine(stateRoot, "confirmed-revisions.txt"));
+
+        (ManagedGenerationLoader loader, _) = await OpenLoaderWithStateAsync(stateRoot, keyFile);
+
+        bool recorded = loader.RecordConfirmedRevision(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken", authorityEpoch: 1, runtimeRevision: 5);
+
+        Assert.False(recorded);
+        Assert.Null(loader.ReadConfirmedRevision(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken"));
+
+        // R11.2: once the fault is gone a later confirmation is durable, so the two sides converge
+        // instead of the skipped confirmation silently reappearing as the declared-revision fallback.
+        Directory.Delete(Path.Combine(stateRoot, "confirmed-revisions.txt"));
+        Assert.True(loader.RecordConfirmedRevision(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken", authorityEpoch: 1, runtimeRevision: 5));
+        loader.Dispose();
+
+        (ManagedGenerationLoader restarted, _) = await OpenLoaderWithStateAsync(stateRoot, keyFile);
+        ConfirmedSlotRevision? confirmed = restarted.ReadConfirmedRevision(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken");
+        Assert.NotNull(confirmed);
+        Assert.Equal(5, confirmed!.Value.RuntimeRevision);
+        restarted.Dispose();
+    }
+
+    // R11.1: a read failure in an early batch must be remembered for the whole replay cycle. With a
+    // bounded batch the unreadable slot sits behind the advanced resume cursor; a later clean batch
+    // must not acknowledge recovery while that slot was never re-read.
+    [Fact]
+    public async Task A_read_error_in_an_early_recovery_batch_keeps_recovery_pending_until_the_slot_is_readable()
+    {
+        var generation = Generation(
+            "g1",
+            TwoSlotRotatableRefreshSurface(new Uri("https://api.example.com/")),
+            prefix: "/mcp/connector",
+            secrets: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["MANAGED_CLIENT_SECRET"] = "client-secret-canary",
+                ["MANAGED_REFRESH_TOKEN"] = "declared-refresh",
+            });
+
+        var reconciledSlots = new System.Collections.Concurrent.ConcurrentQueue<string>();
+
+        await using var platform = await PlatformAsync(_ => Response.Generation(generation));
+        platform.OnReconcile = body =>
+        {
+            JsonObject report = JsonNode.Parse(body)!.AsObject();
+            reconciledSlots.Enqueue(report["slot"]!.GetValue<string>());
+            return Response.Bytes(
+                JsonSerializer.SerializeToUtf8Bytes(new { outcome = "recorded" }),
+                isGeneration: false);
+        };
+
+        string stateRoot = Path.Combine(_root, "state-readfail-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-readfail-" + Guid.NewGuid().ToString("N"));
+
+        (ManagedGenerationLoader loader, FileMutableSlotStore slots) =
+            await OpenLoaderWithStateAsync(stateRoot, keyFile);
+
+        // clientSecret has an authoritative record; refreshToken's record is unreadable. Capacity 1 makes
+        // the replay bounded: the unreadable candidate is inspected first and the cursor then advances
+        // past it, so the later clean batch must not acknowledge recovery (R11.1).
+        await slots.ReplaceAsync(
+            new MutableSlotRecord("oauth2-authorization-code-pkce-refresh", "clientSecret", null, 1, 1, "v-secret"),
+            TestContext.Current.CancellationToken);
+
+        File.WriteAllBytes(
+            SlotRecordPath(stateRoot, "oauth2-authorization-code-pkce-refresh", "refreshToken"),
+            [0x01, 0x02, 0x03]);
+
+        await using ManagedProcess process = await StartAsync(platform, loader, reconciliationQueueCapacity: 1);
+
+        // Force a recovery request (an overflow eviction) with two synthetic identities that have no
+        // durable record, so the reconcile pass ahead of the replay cannot itself fail.
+        process.Worker.RotationCommitted("/mcp/connector", "oauth2-authorization-code-pkce-refresh", "syntheticA", 1, 0, 1);
+        process.Worker.RotationCommitted("/mcp/connector", "oauth2-authorization-code-pkce-refresh", "syntheticB", 1, 0, 1);
+
+        // The unreadable record keeps recovery pending rather than completing it (R11.1).
+        await WaitForAsync(
+            () =>
+            {
+                lock (process.Diagnostics)
+                {
+                    return process.Diagnostics.Any(message =>
+                        message.Contains("recovery remains pending", StringComparison.Ordinal));
+                }
+            },
+            () =>
+            {
+                lock (process.Diagnostics)
+                {
+                    return "Recovery was not held pending. Diagnostics: " + string.Join(" | ", process.Diagnostics);
+                }
+            });
+
+        // Restore the record. Recovery is still requested, so the skipped slot is re-read and reconciled.
+        File.Delete(SlotRecordPath(stateRoot, "oauth2-authorization-code-pkce-refresh", "refreshToken"));
+        await slots.ReplaceAsync(
+            new MutableSlotRecord("oauth2-authorization-code-pkce-refresh", "refreshToken", null, 1, 1, "v-refresh"),
+            TestContext.Current.CancellationToken);
+
+        // The clean second batch must not clear the earlier failure: recovery stays requested while the
+        // unreadable slot was never re-read, so the slot is never reconciled to the platform (R11.1).
+        Assert.DoesNotContain("refreshToken", reconciledSlots);
+
+        // Once the record is readable again the durable replay names the slot, so a later recovery cycle
+        // reconciles it instead of stranding the credential.
+        File.Delete(SlotRecordPath(stateRoot, "oauth2-authorization-code-pkce-refresh", "refreshToken"));
+        await slots.ReplaceAsync(
+            new MutableSlotRecord("oauth2-authorization-code-pkce-refresh", "refreshToken", null, 1, 1, "v-refresh"),
+            TestContext.Current.CancellationToken);
+
+        ManagedGenerationLoad reloaded = loader.Load(DirectDelivery(
+            "g1",
+            TwoSlotRotatableRefreshSurface(new Uri("https://api.example.com/")),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["MANAGED_CLIENT_SECRET"] = "client-secret-canary",
+                ["MANAGED_REFRESH_TOKEN"] = "declared-refresh",
+            }));
+        var reported = new List<string>();
+        DurableReplayBatch batch = await loader.ReplayDurableRotationsBatchAsync(
+            reloaded.Generation!.Mounts,
+            (_, _, slot, _, _, _, _) =>
+            {
+                reported.Add(slot);
+                return ValueTask.CompletedTask;
+            },
+            0,
+            int.MaxValue,
+            TestContext.Current.CancellationToken);
+        Assert.False(batch.Incomplete);
+        Assert.Contains("refreshToken", reported);
+    }
+
+    [Fact]
+    public async Task A_confirmation_for_a_slot_the_generation_no_longer_declares_is_pruned()
+    {
+        (ManagedGenerationLoader loader, _) = await OpenLoaderWithStateAsync();
+
+        loader.RecordConfirmedRevision(
+            "/mcp/other", "oauth2-authorization-code-pkce-refresh", "refreshToken", authorityEpoch: 1, runtimeRevision: 5);
+        Assert.NotNull(loader.ReadConfirmedRevision(
+            "/mcp/other", "oauth2-authorization-code-pkce-refresh", "refreshToken"));
+
+        ManagedGenerationLoad loaded = loader.Load(DirectDelivery(
+            "g1",
+            ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["MANAGED_CLIENT_SECRET"] = "client-secret-canary",
+                ["MANAGED_REFRESH_TOKEN"] = "declared-refresh",
+            }));
+        Assert.True(loaded.Succeeded, string.Join("; ", loaded.Refusals.Select(refusal => refusal.Message)));
+
+        // The loaded generation declares only /mcp/connector, so the stale identity is pruned (R11.7).
+        Assert.Null(loader.ReadConfirmedRevision(
+            "/mcp/other", "oauth2-authorization-code-pkce-refresh", "refreshToken"));
+    }
+
     private static ManagedGenerationDelivery DirectDelivery(
         string id,
         string manifest,
@@ -1577,6 +1807,17 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
                 Convert.FromBase64String(Bundle(manifest)),
                 new Dictionary<string, string>(StringComparer.Ordinal))],
             secrets);
+
+    /// <summary>
+    /// The on-disk path a <see cref="FileMutableSlotStore"/> resolves for one slot identity, so a test
+    /// can plant an unreadable record at exactly the location a replay will read (R11.1).
+    /// </summary>
+    private static string SlotRecordPath(string stateRoot, string profileId, string slot)
+    {
+        var identity = string.Join('\u001f', "/mcp/connector", profileId, slot);
+        var name = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(identity)));
+        return Path.Combine(stateRoot, name + FileMutableSlotStore.RecordExtension);
+    }
 
     private static string TwoSlotRotatableRefreshSurface(Uri upstream)
         => ServedManifests.RotatableRefreshSurface(upstream).Replace(

@@ -66,6 +66,13 @@ internal sealed class ManagedSyncWorker : IDisposable
     /// (R9.2).
     /// </summary>
     private int _recoveryReplayCursor;
+
+    /// <summary>
+    /// Whether the current recovery replay cycle hit a slot whose durable record could not be read.
+    /// A read failure is remembered for the whole cycle, not just one batch, so a clean final batch
+    /// cannot acknowledge a recovery that skipped an earlier record (R11.1).
+    /// </summary>
+    private bool _recoveryReplayReadFailure;
     private string? _lastCandidateOutcome;
     private string? _lastCandidateCode;
     private string? _lastCandidateMessage;
@@ -223,13 +230,24 @@ internal sealed class ManagedSyncWorker : IDisposable
                 case ReconciliationOutcome.Recorded:
                     // Durably remember what the Platform now holds for this slot, so a recovery report
                     // after a restart bases on it rather than on the served generation's declared
-                    // revision (R10.6).
-                    _loader.RecordConfirmedRevision(
-                        pending.Mount,
-                        pending.ProfileId,
-                        pending.Slot,
-                        record.AuthorityEpoch,
-                        record.RuntimeRevision);
+                    // revision (R10.6). The confirmation is not best-effort: if the journal cannot be
+                    // written the report stays queued and is retried, because a reconciliation the
+                    // Platform accepted but Engine cannot durably remember would still be stranded by a
+                    // later revision mismatch (R11.2).
+                    if (!_loader.RecordConfirmedRevision(
+                            pending.Mount,
+                            pending.ProfileId,
+                            pending.Slot,
+                            record.AuthorityEpoch,
+                            record.RuntimeRevision))
+                    {
+                        _diagnostics?.Invoke(
+                            $"managed: the Platform recorded the reconciliation for '{pending.ProfileId}' "
+                            + $"slot '{pending.Slot}' but the local confirmation could not be written; it "
+                            + "stays queued and will be retried.");
+                        break;
+                    }
+
                     _reconciliations.Acknowledge(
                         pending.Mount,
                         pending.ProfileId,
@@ -410,20 +428,32 @@ internal sealed class ManagedSyncWorker : IDisposable
                         // been traversed (NextCursor is null).
                         _recoveryReplayCursor = batch.NextCursor ?? 0;
 
-                        // Only a pass that traversed the whole candidate list and read every durable record
-                        // completes recovery. While a resume cursor remains, the bounded batch left
-                        // unreconciled candidates unvisited, and while a record could not be read a locally
-                        // held credential was skipped; recovery stays requested so a later pass continues or
-                        // retries instead of silently declaring convergence (R10.1, R10.2).
-                        if (batch.NextCursor is null && !batch.Incomplete)
+                        // A read failure is a property of the whole replay cycle, not one batch: a slot
+                        // that could not be read in an early batch sits behind the advanced cursor and
+                        // would never be revisited by a later clean batch (R11.1).
+                        if (batch.Incomplete)
                         {
-                            _reconciliations.AcknowledgeRecovery(recoveryVersion);
+                            _recoveryReplayReadFailure = true;
                         }
-                        else if (batch.Incomplete)
+
+                        // Only a fully traversed cycle in which every durable record was readable completes
+                        // recovery. While a resume cursor remains, the bounded batch left unreconciled
+                        // candidates unvisited. At the end of a cycle that skipped any record, start a fresh
+                        // full pass and stay requested, so the skipped slots are actually re-read before
+                        // recovery is acknowledged (R10.1, R10.2, R11.1).
+                        if (batch.NextCursor is null)
                         {
-                            _diagnostics?.Invoke(
-                                "managed: recovery replay could not read one or more durable records; "
-                                + "recovery remains pending.");
+                            if (_recoveryReplayReadFailure)
+                            {
+                                _recoveryReplayReadFailure = false;
+                                _diagnostics?.Invoke(
+                                    "managed: recovery replay could not read one or more durable records; "
+                                    + "recovery remains pending and the candidate list will be replayed again.");
+                            }
+                            else
+                            {
+                                _reconciliations.AcknowledgeRecovery(recoveryVersion);
+                            }
                         }
                     }
                     catch (Exception exception) when (exception is not OperationCanceledException)
