@@ -59,6 +59,13 @@ internal sealed class ManagedSyncWorker : IDisposable
     /// never disposed after a successful activation.
     /// </summary>
     private IReadOnlyList<MountedManifest>? _activeMounts;
+
+    /// <summary>
+    /// Resume index of the bounded recovery replay, so a replay over more unreconciled identities than
+    /// the queue capacity covers all of them across passes rather than re-overflowing on the same head
+    /// (R9.2).
+    /// </summary>
+    private int _recoveryReplayCursor;
     private string? _lastCandidateOutcome;
     private string? _lastCandidateCode;
     private string? _lastCandidateMessage;
@@ -376,17 +383,21 @@ internal sealed class ManagedSyncWorker : IDisposable
                 // already-decided rotation from being resent (R8.5).
                 if (_activeMounts is { } activeMounts && _reconciliations.RecoveryRequested)
                 {
+                    var recoveryVersion = _reconciliations.RecoveryVersion;
                     try
                     {
-                        await _loader.ReplayDurableRotationsAsync(
+                        int? resume = await _loader.ReplayDurableRotationsBatchAsync(
                             activeMounts,
                             (mount, profile, slot, epoch, previous, revision, _) =>
                             {
                                 RotationCommitted(mount, profile, slot, epoch, previous, revision);
                                 return ValueTask.CompletedTask;
                             },
+                            _recoveryReplayCursor,
+                            _reconciliations.Capacity,
                             cancellationToken).ConfigureAwait(false);
-                        _reconciliations.ClearRecoveryRequest();
+                        _recoveryReplayCursor = resume ?? 0;
+                        _reconciliations.AcknowledgeRecovery(recoveryVersion);
                     }
                     catch (Exception exception) when (exception is not OperationCanceledException)
                     {

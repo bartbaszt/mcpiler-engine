@@ -1261,6 +1261,85 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task A_restart_re_derives_a_multi_rotation_chain_from_the_declared_base()
+    {
+        // R9.1: the durable record is ahead of the declared generation by more than one revision, so the
+        // recovery base must be the declared Platform revision, not record - 1. Platform refuses a base
+        // that does not equal its stored revision, and the refused report would be dropped.
+        string stateRoot = Path.Combine(_root, "state-multirot-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-multirot-" + Guid.NewGuid().ToString("N"));
+
+        var reconciliations = new List<JsonObject>();
+
+        await using var platform = await PlatformAsync(_ => Response.Generation(
+            Generation(
+                "g1",
+                ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
+                prefix: "/mcp/connector",
+                secrets: new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["MANAGED_CLIENT_SECRET"] = "client-secret-canary",
+                    ["MANAGED_REFRESH_TOKEN"] = "declared-refresh",
+                })));
+        platform.OnReconcile = body =>
+        {
+            lock (reconciliations)
+            {
+                reconciliations.Add(JsonNode.Parse(body)!.AsObject());
+            }
+
+            return Response.Bytes(
+                JsonSerializer.SerializeToUtf8Bytes(new { outcome = "recorded" }),
+                isGeneration: false);
+        };
+
+        (ManagedGenerationLoader first, FileMutableSlotStore firstSlots) =
+            await OpenLoaderWithStateAsync(stateRoot, keyFile);
+        await firstSlots.ReplaceAsync(
+            new MutableSlotRecord(
+                "oauth2-authorization-code-pkce-refresh",
+                "refreshToken",
+                ScopeFingerprint: null,
+                AuthorityEpoch: 1,
+                RuntimeRevision: 2,
+                "CANARY-multirotation-7a11"),
+            TestContext.Current.CancellationToken);
+        first.Dispose();
+
+        (ManagedGenerationLoader restarted, _) = await OpenLoaderWithStateAsync(stateRoot, keyFile);
+        await using var process = await StartAsync(platform, restarted);
+
+        await WaitForAsync(
+            () =>
+            {
+                lock (reconciliations)
+                {
+                    return reconciliations.Count > 0;
+                }
+            },
+            () =>
+            {
+                lock (process.Diagnostics)
+                {
+                    return "No re-derived reconciliation arrived. Diagnostics: "
+                        + string.Join(" | ", process.Diagnostics);
+                }
+            });
+
+        JsonObject report;
+        lock (reconciliations)
+        {
+            report = reconciliations[0];
+        }
+
+        Assert.Equal("refreshToken", report["slot"]!.GetValue<string>());
+        Assert.Equal(1, report["authorityEpoch"]!.GetValue<long>());
+        // Base is the declared generation revision (0), not record - 1 (1): Platform still holds 0.
+        Assert.Equal(0, report["previousRuntimeRevision"]!.GetValue<long>());
+        Assert.Equal(2, report["runtimeRevision"]!.GetValue<long>());
+    }
+
+    [Fact]
     public async Task Reconciliation_messages_carry_the_session_epoch_the_platform_assigned()
     {
         // The Task 8 Platform fence validates the durable session epoch before any secret mutation,

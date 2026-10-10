@@ -37,10 +37,15 @@ internal sealed class PendingReconciliationQueue
     private readonly ConcurrentDictionary<Key, Entry> _acknowledged = new();
 
     /// <summary>
-    /// Set when an overflow eviction drops an identity, so the worker re-derives it from the durable
-    /// record instead of waiting for the next generation activation (R8.5).
+    /// Monotonic counter bumped whenever an overflow eviction drops an identity, so the worker re-derives
+    /// the dropped work from the durable record instead of waiting for the next generation activation
+    /// (R8.5). It is a counter rather than a flag because a recovery replay can itself overflow the queue:
+    /// clearing a single flag after the replay would lose an eviction that happened during it (R9.2).
     /// </summary>
-    private volatile bool _recoveryRequested;
+    private long _recoveryVersion;
+
+    /// <summary>The recovery version the worker last completed, so only a genuinely new eviction re-requests.</summary>
+    private long _completedRecoveryVersion;
 
     /// <summary>Creates the queue with a bounded capacity.</summary>
     /// <param name="maximumEntries">The most distinct pending slot identities retained.</param>
@@ -188,8 +193,9 @@ internal sealed class PendingReconciliationQueue
 
         // An eviction means a committed, unreconciled rotation is no longer in this in-memory queue.
         // Its identity must be re-derived from the durable record rather than waiting for a future
-        // generation activation that may never arrive (R8.5).
-        _recoveryRequested = true;
+        // generation activation that may never arrive (R8.5). A monotonic version (not a flag) keeps a
+        // second eviction during the recovery replay from being lost (R9.2).
+        Interlocked.Increment(ref _recoveryVersion);
 
         _diagnostics?.Invoke(
             $"The pending-reconciliation queue exceeded its capacity of {_maximumEntries} identities and "
@@ -245,11 +251,22 @@ internal sealed class PendingReconciliationQueue
         _pending.TryRemove(new KeyValuePair<Key, Entry>(key, entry));
     }
 
-    /// <summary>True when an overflow eviction dropped an identity a recovery replay must re-derive.</summary>
-    public bool RecoveryRequested => _recoveryRequested;
+    /// <summary>The current recovery version. An eviction bumps it.</summary>
+    public long RecoveryVersion => Volatile.Read(ref _recoveryVersion);
 
-    /// <summary>Clears the recovery request after a successful recovery replay.</summary>
-    public void ClearRecoveryRequest() => _recoveryRequested = false;
+    /// <summary>The bounded capacity of distinct pending identities.</summary>
+    public int Capacity => _maximumEntries;
+
+    /// <summary>True when an overflow eviction has not yet been covered by a completed recovery replay.</summary>
+    public bool RecoveryRequested
+        => Volatile.Read(ref _recoveryVersion) != Volatile.Read(ref _completedRecoveryVersion);
+
+    /// <summary>
+    /// Records the recovery version the worker just completed. A version observed before the replay is
+    /// passed back here, so an eviction during the replay (which bumps the current version past it) keeps
+    /// recovery requested for the next pass (R9.2).
+    /// </summary>
+    public void AcknowledgeRecovery(long version) => Volatile.Write(ref _completedRecoveryVersion, version);
 
     /// <summary>
     /// Remembers the highest decided version for one identity so a recovery replay does not resend a

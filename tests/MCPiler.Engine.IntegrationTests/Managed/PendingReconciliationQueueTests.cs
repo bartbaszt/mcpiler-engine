@@ -139,14 +139,43 @@ public sealed class PendingReconciliationQueueTests
             queue.Snapshot(),
             entry => string.Equals(entry.Slot, "slot-0", StringComparison.Ordinal));
 
-        // A recovery replay re-admits the evicted identity (as ReplayDurableRotationsAsync would), so it
-        // is not stranded.
+        // A recovery replay re-admits the evicted identity (as the batch replay would), so it is not
+        // stranded. Re-admitting into the full queue evicts another identity and bumps the version again.
         queue.Add("/mcp/connector", "profile", "slot-0", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
         Assert.Contains(
             queue.Snapshot(),
             entry => string.Equals(entry.Slot, "slot-0", StringComparison.Ordinal));
+        Assert.True(queue.RecoveryRequested);
 
-        queue.ClearRecoveryRequest();
+        // Acknowledging only the version observed before the replay would leave a later eviction
+        // uncovered; acknowledging the current version completes the recovery (R9.2).
+        queue.AcknowledgeRecovery(queue.RecoveryVersion);
+        Assert.False(queue.RecoveryRequested);
+
+        // The capacity is exposed for a bounded per-pass replay.
+        Assert.Equal(2, queue.Capacity);
+    }
+
+    [Fact]
+    public void An_eviction_during_a_recovery_replay_keeps_recovery_requested()
+    {
+        var queue = new PendingReconciliationQueue(maximumEntries: 2);
+
+        queue.Add("/mcp/connector", "profile", "slot-0", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
+        queue.Add("/mcp/connector", "profile", "slot-1", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
+        queue.Add("/mcp/connector", "profile", "slot-2", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
+
+        // The worker observes the version before the replay.
+        var observed = queue.RecoveryVersion;
+
+        // A further eviction happens before the worker acknowledges (a concurrent rotation, or the replay
+        // itself re-overflowing the fixed-order head).
+        queue.Add("/mcp/connector", "profile", "slot-3", authorityEpoch: 1, previousRuntimeRevision: 0, runtimeRevision: 1);
+
+        queue.AcknowledgeRecovery(observed);
+        Assert.True(queue.RecoveryRequested);
+
+        queue.AcknowledgeRecovery(queue.RecoveryVersion);
         Assert.False(queue.RecoveryRequested);
     }
 

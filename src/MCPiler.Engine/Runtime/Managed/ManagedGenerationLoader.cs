@@ -596,53 +596,103 @@ public sealed class ManagedGenerationLoader : IDisposable
         IReadOnlyList<MountedManifest> mounts,
         RotationNotification rotations,
         CancellationToken cancellationToken)
+        => await ReplayDurableRotationsBatchAsync(mounts, rotations, startIndex: 0, maxSlots: int.MaxValue, cancellationToken)
+            .ConfigureAwait(false);
+
+    /// <summary>
+    /// Re-derives at most <paramref name="maxSlots"/> declared slots starting at <paramref name="startIndex"/>,
+    /// so a recovery replay over more unreconciled identities than the queue capacity makes bounded forward
+    /// progress instead of re-overflowing on the same head every pass (R9.2).
+    /// </summary>
+    /// <param name="mounts">The active generation's mounts whose declared slots are inspected.</param>
+    /// <param name="rotations">The notification sink, identical to the live rotation callback.</param>
+    /// <param name="startIndex">
+    /// The flattened candidate index to start at. The candidate order (mount, profile, slot) is
+    /// deterministic for one mounts list, so a caller can resume across passes.
+    /// </param>
+    /// <param name="maxSlots">The maximum number of declared slots inspected in this call.</param>
+    /// <param name="cancellationToken">Cancellation.</param>
+    /// <returns>The resume index for the next call, or null when every candidate was inspected.</returns>
+    public async ValueTask<int?> ReplayDurableRotationsBatchAsync(
+        IReadOnlyList<MountedManifest> mounts,
+        RotationNotification rotations,
+        int startIndex,
+        int maxSlots,
+        CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(mounts);
         ArgumentNullException.ThrowIfNull(rotations);
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxSlots, 1);
 
         if (_runtimeState is null)
         {
-            return;
+            return null;
         }
 
+        // Flatten the declared slots into one deterministic list. The list is bounded by the generation's
+        // declared configuration, not by any external store, so materializing it is bounded work.
+        var candidates = new List<(string Mount, string ProfileId, string Slot, long AuthorityEpoch, long DeclaredRevision)>();
         foreach (MountedManifest mount in mounts)
         {
             foreach (AuthenticationProfile profile in mount.Document.EffectiveAuthentication.Profiles)
             {
                 foreach (AuthenticationSlot slot in profile.Slots)
                 {
-                    ManagedSlotSnapshot? record;
-                    try
-                    {
-                        record = await ReadSlotAsync(mount.Prefix, profile.Id, slot.Slot, cancellationToken)
-                            .ConfigureAwait(false);
-                    }
-                    catch (RuntimeStateStoreException)
-                    {
-                        // An unreadable record is left for a later reconciliation attempt, exactly as
-                        // the live path does; replaying an invented value would be worse than silence.
-                        continue;
-                    }
-
-                    if (record is null
-                        || record.AuthorityEpoch != slot.AuthorityEpoch
-                        || record.RuntimeRevision <= slot.RuntimeRevision)
-                    {
-                        continue;
-                    }
-
-                    await rotations(
-                        mount.Prefix,
-                        profile.Id,
-                        slot.Slot,
-                        record.AuthorityEpoch,
-                        record.RuntimeRevision - 1,
-                        record.RuntimeRevision,
-                        cancellationToken).ConfigureAwait(false);
+                    candidates.Add((mount.Prefix, profile.Id, slot.Slot, slot.AuthorityEpoch, slot.RuntimeRevision));
                 }
             }
         }
+
+        if (candidates.Count == 0)
+        {
+            return null;
+        }
+
+        var start = ((startIndex % candidates.Count) + candidates.Count) % candidates.Count;
+        var processed = 0;
+
+        for (var offset = 0; offset < candidates.Count && processed < maxSlots; offset++)
+        {
+            var candidate = candidates[(start + offset) % candidates.Count];
+            processed++;
+
+            ManagedSlotSnapshot? record;
+            try
+            {
+                record = await ReadSlotAsync(candidate.Mount, candidate.ProfileId, candidate.Slot, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (RuntimeStateStoreException)
+            {
+                // An unreadable record is left for a later reconciliation attempt, exactly as the live path
+                // does; replaying an invented value would be worse than silence.
+                continue;
+            }
+
+            if (record is null
+                || record.AuthorityEpoch != candidate.AuthorityEpoch
+                || record.RuntimeRevision <= candidate.DeclaredRevision)
+            {
+                continue;
+            }
+
+            // The base the Platform must advance from is the revision the delivered generation declared
+            // for this slot, not record - 1: when several rotations coalesced before the report was sent,
+            // the Platform is still at the declared revision and a record - 1 base is refused as a revision
+            // mismatch, stranding the newer credential (R9.1).
+            await rotations(
+                candidate.Mount,
+                candidate.ProfileId,
+                candidate.Slot,
+                record.AuthorityEpoch,
+                candidate.DeclaredRevision,
+                record.RuntimeRevision,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        var next = start + processed;
+        return next >= candidates.Count ? null : next;
     }
 
     /// <summary>
