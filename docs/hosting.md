@@ -425,11 +425,18 @@ path as Streamable HTTP.
 
 ## Health and shutdown
 
-HTTP mode maps two health endpoints after all mounts have started successfully:
+HTTP mode maps three health endpoints after all mounts have started successfully:
 
 - `GET /health/live` returns HTTP 200 while the process is alive.
 - `GET /health/ready` returns HTTP 200 while the file store is usable and the host is accepting
   work. It returns HTTP 503 during shutdown drain or when the file store becomes unusable.
+- `GET /health/managed` reports the managed confirmation journal. In managed mode it returns HTTP 200
+  with `ok` when the journal is healthy and HTTP 503 while the journal failed its integrity check and
+  managed reconciliation is stalled until an operator runs `confirmed-revisions reset`. In file mode it
+  returns HTTP 200 with `ok: managed synchronization is not configured`, so the two 200 bodies are
+  distinct and file mode is never mistaken for a healthy managed journal. Alert on the 503.
+  `/health/ready` and `/health/live` are deliberately unaffected, so a stalled managed reconciliation
+  does not take a functional Engine out of traffic.
 
 On shutdown, Engine closes admission to new product requests immediately and lets already admitted
 tool invocations finish up to `--drain-timeout-seconds`. Health remains observable during that

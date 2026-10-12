@@ -67,11 +67,20 @@ public sealed class HealthAndDrainTests : IDisposable
         {
             HttpResponseMessage ready = await http.GetAsync(engine.At(HealthEndpoints.ReadyPath), Token);
             HttpResponseMessage live = await http.GetAsync(engine.At(HealthEndpoints.LivePath), Token);
+            HttpResponseMessage managed = await http.GetAsync(engine.At(HealthEndpoints.ManagedPath), Token);
 
             Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
             Assert.Equal("ready\n", await ready.Content.ReadAsStringAsync(Token));
             Assert.Equal(HttpStatusCode.OK, live.StatusCode);
             Assert.Equal("alive\n", await live.Content.ReadAsStringAsync(Token));
+
+            // MTH-HEALTH-6: file mode has no managed confirmation journal, so the surface reports 200 with
+            // a body stating managed synchronization is not configured.
+            Assert.Equal(HttpStatusCode.OK, managed.StatusCode);
+            Assert.Contains(
+                "managed synchronization is not configured",
+                await managed.Content.ReadAsStringAsync(Token),
+                StringComparison.Ordinal);
         }
     }
 
@@ -134,10 +143,15 @@ public sealed class HealthAndDrainTests : IDisposable
                 Token);
             HttpResponseMessage ready = await http.GetAsync(engine.At(HealthEndpoints.ReadyPath), Token);
             HttpResponseMessage live = await http.GetAsync(engine.At(HealthEndpoints.LivePath), Token);
+            HttpResponseMessage managed = await http.GetAsync(engine.At(HealthEndpoints.ManagedPath), Token);
 
             Assert.Equal(HttpStatusCode.ServiceUnavailable, afterDrain.Status);
             Assert.Equal(HttpStatusCode.ServiceUnavailable, ready.StatusCode);
             Assert.Equal(HttpStatusCode.OK, live.StatusCode);
+
+            // MTH-HEALTH-7: the managed health surface is answered during the drain window, not refused by
+            // drain admission.
+            Assert.Equal(HttpStatusCode.OK, managed.StatusCode);
 
             release.TrySetResult();
 

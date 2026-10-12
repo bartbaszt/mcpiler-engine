@@ -106,7 +106,8 @@ public static class EngineWebHost
     internal static WebApplication BuildManaged(
         HostBinding binding,
         DrainCoordinator drain,
-        EngineGenerationManager generations)
+        EngineGenerationManager generations,
+        Func<bool>? managedJournalDegraded = null)
     {
         ArgumentNullException.ThrowIfNull(binding);
         ArgumentNullException.ThrowIfNull(drain);
@@ -132,7 +133,8 @@ public static class EngineWebHost
             active.Execution,
             drain,
             generations,
-            managed: true);
+            managed: true,
+            managedJournalDegraded);
     }
 
     private static WebApplication BuildCore(
@@ -140,7 +142,8 @@ public static class EngineWebHost
         EngineExecution execution,
         DrainCoordinator drain,
         EngineGenerationManager generations,
-        bool managed)
+        bool managed,
+        Func<bool>? managedJournalDegraded = null)
     {
         if (generations.Current is not { } activeGeneration)
         {
@@ -341,7 +344,7 @@ if (binding.Listener.Transport is HostTransport.Http
             McpRegistration.MapMounts(app, generations.Current!.Mounts);
         }
 
-        HealthEndpoints.Map(app, binding.Runtime.FileStoreRoot, drain);
+        HealthEndpoints.Map(app, binding.Runtime.FileStoreRoot, drain, managedJournalDegraded);
 
         // The operator channel is mapped last and only when a dedicated secret was configured.
         // Its routes are not MCP addresses, so neither the origin check nor generation admission

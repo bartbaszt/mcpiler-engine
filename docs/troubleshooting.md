@@ -300,6 +300,50 @@ For an unreadable/authentication-failed record:
 
 Engine deliberately does not fall back to plaintext or silently forget a rotated refresh token.
 
+## Confirmation journal failed its integrity check (managed recovery stalled)
+
+In managed mode Engine keeps a small, non-secret confirmation journal (`confirmed-revisions.txt`) in the
+runtime-state root that records which runtime revision the Platform last confirmed for each mutable slot.
+If that file is torn, bit-rotted or manually edited it fails its checksum, and every managed reconciliation
+for this Engine stalls: no confirmation can be trusted, so recovery keeps being requested but never
+completes. A transient read failure recovers on its own and is not this case.
+
+Symptoms:
+
+- a `managed:` warning on the serve progress stream that the durable confirmation journal failed its
+  integrity check and managed recovery is stalled (re-emitted at a bounded interval while the state
+  persists, and followed by a recovery message once the journal reads valid again);
+- `GET /health/managed` returns HTTP 503 while the journal is integrity-failed. `/health/ready` and
+  `/health/live` are unaffected and keep returning 200, and the Engine keeps serving;
+- repeated recovery replays that never make progress across restarts.
+
+Recovery is an explicit operator action; nothing resets automatically. The reset verb takes the same
+binding options as `serve`:
+
+```text
+mcpiler-engine confirmed-revisions reset \
+  --file-store-root <directory> \
+  --runtime-state-root <directory> \
+  --runtime-state-key-file <file>
+```
+
+- The runtime-state options are required: the journal lives under the runtime-state root, so the command
+  refuses with the configuration exit code and names both options when either is missing. It never reports
+  "nothing to reset" for a store whose runtime state was simply not configured.
+- The action is refused while the journal reads as valid. It runs only against an integrity-failed journal.
+- If the journal merely cannot be read right now (an I/O, sharing or permission fault), it is not proven
+  integrity-failed, so the reset is refused and the file is left byte-identical, ready for a retry.
+- It moves the failed journal aside under `confirmed-revisions.txt.failed-<timestamp>` (a non-overwriting
+  name) and never deletes its bytes, so you can inspect it.
+- After the reset, slots have no confirmation and fall back to their declared revisions. Reconciliations
+  the peer then refuses are the accepted consequence; the Engine never fabricates a confirmation base.
+- The reset may be run while the Engine is serving: it is a single atomic rename and the running Engine
+  re-reads the journal on its next lookup (its `managed:` diagnostic and `/health/managed` return to
+  healthy), then starts a fresh versioned journal on its next write.
+- If the move still fails — for example an editor, a backup or antivirus scanner is holding the journal
+  open — the command reports a failure and leaves the file in place, so the reset can be retried. Close the
+  other program first if the failure repeats.
+
 ## File store refuses startup
 
 The file store is validated before serving.
@@ -426,10 +470,17 @@ logs do not corrupt MCP framing.
 HTTP mode exposes:
 
 - `/health/live`: 200 while the process is alive;
-- `/health/ready`: 200 while work is accepted and the file store is usable, otherwise 503.
+- `/health/ready`: 200 while work is accepted and the file store is usable, otherwise 503;
+- `/health/managed`: in managed mode, 200 `ok` for a healthy confirmation journal and 503 while the
+  journal is integrity-failed; in file mode, 200 `ok: managed synchronization is not configured`. The two
+  200 bodies are distinct, so file mode is never mistaken for a healthy managed journal.
+
+Alert on `/health/managed` returning 503: it means managed reconciliation is stalled until an operator
+runs `confirmed-revisions reset`, while the Engine keeps serving. `/health/ready` and `/health/live` are
+unaffected by the degraded journal.
 
 During graceful shutdown, readiness becomes unavailable while already admitted requests drain.
-Liveness remains observable during that drain.
+Liveness remains observable during that drain, and `/health/managed` is answered too.
 
 A 503 readiness response is therefore not automatically a crash.
 

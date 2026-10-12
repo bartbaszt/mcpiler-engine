@@ -78,6 +78,7 @@ public static class HostCommands
                 CompatibilityDescriptor.EngineSupport().ToCanonicalJson()),
             HostVerb.Serve => await ServeAsync(parsed, identity, progress, cancellationToken).ConfigureAwait(false),
             HostVerb.Inspect => await InspectAsync(parsed, identity, cancellationToken).ConfigureAwait(false),
+            HostVerb.ConfirmedRevisionsReset => await ResetConfirmedRevisionsAsync(parsed, identity, cancellationToken).ConfigureAwait(false),
             _ => await FilesAsync(parsed, cancellationToken).ConfigureAwait(false),
         };
     }
@@ -350,7 +351,12 @@ public static class HostCommands
             binding.Runtime.ResponseCache));
         progress?.Flush();
 
-        await using WebApplication? app = BuildManagedOrRefuse(binding, drain, generations, out CommandOutcome? buildRefusal);
+        await using WebApplication? app = BuildManagedOrRefuse(
+            binding,
+            drain,
+            generations,
+            generationsLoader.IsConfirmedJournalDegraded,
+            out CommandOutcome? buildRefusal);
         if (app is null)
         {
             return buildRefusal!;
@@ -396,12 +402,13 @@ public static class HostCommands
         HostBinding binding,
         DrainCoordinator drain,
         EngineGenerationManager generations,
+        Func<bool> managedJournalDegraded,
         out CommandOutcome? refusal)
     {
         try
         {
             refusal = null;
-            return EngineWebHost.BuildManaged(binding, drain, generations);
+            return EngineWebHost.BuildManaged(binding, drain, generations, managedJournalDegraded);
         }
         catch (InvalidOperationException unbuildable)
         {
@@ -435,6 +442,86 @@ public static class HostCommands
             $"shutdown: abandoned {report.AbandonedTools.Count} invocation(s): "
             + string.Join(", ", report.AbandonedTools));
         progress?.Flush();
+    }
+
+    private static async Task<CommandOutcome> ResetConfirmedRevisionsAsync(
+        CommandLineResult parsed,
+        string identity,
+        CancellationToken cancellationToken)
+    {
+        if (!Bind(parsed, out HostBinding? binding, out CommandOutcome? refused))
+        {
+            return refused;
+        }
+
+        // The confirmation journal lives in the runtime-state root. Without the runtime-state options there
+        // is nothing this command could reset, and reporting "no journal exists" would tell an operator the
+        // stall has no journal while it continues (R17.3). Refuse before opening the loader.
+        if (string.IsNullOrWhiteSpace(binding.Runtime.RuntimeStateRoot)
+            || string.IsNullOrWhiteSpace(binding.Runtime.RuntimeStateKeyFile))
+        {
+            return new CommandOutcome(
+                ExitCodes.Configuration,
+                identity + Environment.NewLine
+                + "The confirmation journal lives under the runtime-state root, so the reset needs "
+                + "--runtime-state-root <directory> and --runtime-state-key-file <file>. Without them the "
+                + "command cannot tell an absent journal from an unconfigured store." + Environment.NewLine);
+        }
+
+        if (ManagedGenerationLoader.TryOpen(
+                binding.Runtime,
+                out ManagedGenerationLoader? loader,
+                out IReadOnlyList<StartupRefusal> loadRefusals))
+        {
+            using (loader)
+            {
+                JournalResetOutcome outcome = loader!.ResetConfirmedJournal(out string? asidePath);
+
+                return outcome switch
+                {
+                    JournalResetOutcome.Reset => new CommandOutcome(
+                        ExitCodes.Success,
+                        identity + Environment.NewLine
+                        + $"The integrity-failed confirmation journal was moved aside to '{asidePath}'. Its bytes are "
+                        + "preserved. Slots now fall back to their declared revisions; some reconciliations may be "
+                        + "refused until the peer re-delivers." + Environment.NewLine),
+                    JournalResetOutcome.RefusedValid => new CommandOutcome(
+                        ExitCodes.Failure,
+                        identity + Environment.NewLine
+                        + "The confirmation journal is readable and valid. Reset is allowed only for an "
+                        + "integrity-failed journal." + Environment.NewLine),
+                    JournalResetOutcome.Missing => new CommandOutcome(
+                        ExitCodes.Success,
+                        identity + Environment.NewLine + "No confirmation journal exists; nothing to reset." + Environment.NewLine),
+                    JournalResetOutcome.NotConfigured => new CommandOutcome(
+                        ExitCodes.Configuration,
+                        identity + Environment.NewLine
+                        + "Durable runtime state is not configured, so there is no confirmation journal. Pass "
+                        + "--runtime-state-root <directory> and --runtime-state-key-file <file>."
+                        + Environment.NewLine),
+                    JournalResetOutcome.Unreadable => new CommandOutcome(
+                        ExitCodes.Failure,
+                        identity + Environment.NewLine
+                        + "The confirmation journal exists but could not be read right now. It is not proven "
+                        + "integrity-failed, so it was left in place; retry once a read succeeds." + Environment.NewLine),
+                    _ => new CommandOutcome(
+                        ExitCodes.Failure,
+                        identity + Environment.NewLine
+                        + "The confirmation journal could not be moved aside; it was left in place. Another "
+                        + "process (an editor, a backup or antivirus scanner) may be holding it open. Close it "
+                        + "or retry the reset." + Environment.NewLine),
+                };
+            }
+        }
+
+        StringBuilder text = new(identity);
+        text.AppendLine();
+        foreach (StartupRefusal refusal in loadRefusals)
+        {
+            text.AppendLine(StartupReport.RenderRefusal(refusal));
+        }
+
+        return new CommandOutcome(ExitCodes.Configuration, text.ToString());
     }
 
     private static async Task<CommandOutcome> InspectAsync(

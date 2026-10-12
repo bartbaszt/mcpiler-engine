@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 
+using MCPiler.Engine.Runtime;
+
 namespace MCPiler.Engine.Execution.Secrets.RuntimeState;
 
 /// <summary>
@@ -77,29 +79,101 @@ internal sealed class ConfirmedRevisionStore
     private readonly string _path;
     private readonly object _sync = new();
     private Dictionary<string, (long Epoch, long Revision)>? _entries;
+    private bool _integrityFailed;
 
     /// <summary>
     /// Test seam: how the journal file is read. Overridable so a test can inject a transient read
-    /// failure deterministically without depending on platform-specific file-locking behavior.
+    /// failure deterministically without depending on platform-specific file-locking behavior. The
+    /// default is <see cref="ReadJournalLines"/>, so the seam and the production open cannot diverge.
     /// </summary>
-    internal Func<string, string[]> ReadAllLines { get; set; } = path => File.ReadAllLines(path);
+    internal Func<string, string[]> ReadAllLines { get; set; } = ReadJournalLines;
+
+    /// <summary>
+    /// Test seam: invoked after the journal temp is flushed to disk and before it is renamed over the
+    /// journal, so a test can prove the flush happens before the publish (R15.10).
+    /// </summary>
+    internal Action? OnFlushedBeforeRename { get; set; }
+
+    /// <summary>
+    /// Opens the journal for reading with the share mode a serving Engine needs: while the journal is
+    /// degraded every lookup, worker pass and health query re-reads it, so an operator reset's rename must
+    /// not be blocked by an in-flight read. <see cref="FileShare.Read"/> would refuse that move while the
+    /// read handle is open, making the documented reset fail intermittently with
+    /// <see cref="JournalResetOutcome.Failed"/> even though it may run while the Engine is serving (R18.1).
+    /// </summary>
+    internal static FileStream OpenJournal(string path)
+        => new(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+
+    /// <summary>
+    /// The default journal read: <see cref="OpenJournal"/>'s sharing plus the line semantics of
+    /// <see cref="File.ReadAllLines(string)"/> (the v2 checksum is computed over the reconstructed lines, so
+    /// the split and any BOM handling must not change). A named method so the open itself is testable.
+    /// </summary>
+    internal static string[] ReadJournalLines(string path)
+    {
+        using FileStream stream = OpenJournal(path);
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        var lines = new List<string>();
+        while (reader.ReadLine() is { } line)
+        {
+            lines.Add(line);
+        }
+
+        return [.. lines];
+    }
+
+    /// <summary>
+    /// Whether the journal exists but failed an integrity check (bad header, checksum mismatch, a corrupt
+    /// record, or a zero-length file). Such a failure does not clear on its own; the Engine surfaces it as an
+    /// operator-visible degraded state that only an explicit reset resolves (R15.12).
+    /// </summary>
+    internal bool IntegrityFailed
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _integrityFailed;
+            }
+        }
+    }
 
     public ConfirmedRevisionStore(string root) => _path = Path.Combine(root, FileName);
 
     /// <summary>
-    /// The revision the Platform last confirmed for one slot identity, or null when none has been
-    /// confirmed yet. A journal that exists but cannot be read also returns null, so a caller degrades to
-    /// the declared revision rather than to an unverified value.
+    /// Re-evaluates whether the journal is currently an integrity failure, for an operator diagnostic and
+    /// the managed health probe (R16.5/R16.7). While the store is known to be degraded it re-runs the load
+    /// under the lock, so a reset performed by another process on the same path is observed rather than a
+    /// stale in-memory failure; otherwise it answers from the validated cached snapshot and touches no disk.
+    /// Only an integrity failure — never a transient read failure — is degraded, and this never persists.
     /// </summary>
-    public (long Epoch, long Revision)? Read(string mount, string profileId, string slot)
+    internal bool ReevaluateIntegrityFailed()
     {
         lock (_sync)
         {
-            var entries = TryLoad();
-            return entries is not null
-                && entries.TryGetValue(KeyFor(mount, profileId, slot), out var entry)
-                ? entry
-                : null;
+            if (_integrityFailed)
+            {
+                // Re-read so a reset performed by another process clears the state instead of lingering. A
+                // transient re-read leaves the state unknown, and the last verified state was an integrity
+                // failure, so it must not be reported as recovered until a read proves otherwise (R17.2):
+                // an unknown state is not a healthy one.
+                _entries = null;
+                _integrityFailed = false;
+                var loaded = TryLoad();
+                if (loaded is null && !_integrityFailed)
+                {
+                    _integrityFailed = true;
+                }
+            }
+            else if (_entries is null)
+            {
+                // Not evaluated yet (or a transient failure left no snapshot): classify once so a first
+                // evaluation after startup reports an already-corrupt journal. A transient failure here has
+                // no previously verified failure to preserve, so it is not reported as degraded.
+                TryLoad();
+            }
+
+            return _integrityFailed;
         }
     }
 
@@ -201,20 +275,96 @@ internal sealed class ConfirmedRevisionStore
                 return;
             }
 
+            // A failed rename must not poison the cached journal that subsequent Record calls
+            // use as their source. Publish a replacement cache only after durable replacement.
+            var pruned = new Dictionary<string, (long Epoch, long Revision)>(entries, StringComparer.Ordinal);
             foreach (var key in stale)
             {
-                entries.Remove(key);
+                pruned.Remove(key);
             }
 
             try
             {
-                Persist(entries);
+                Persist(pruned);
+                _entries = pruned;
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 // Best-effort: a failed prune leaves a larger journal but must not drop a live
                 // confirmation from memory.
             }
+        }
+    }
+
+    /// <summary>
+    /// The explicit operator reset for a permanently integrity-failed journal (R15.12, owner choice R15-A).
+    /// It is refused while the journal is readable and valid, and also refused when the journal merely
+    /// cannot be read right now (a transient fault that must not move a valid journal aside, R16.4). On a
+    /// journal the fresh read positively classified integrity-failed it moves the file aside under a
+    /// non-overwriting name and never deletes its bytes, so the operator can inspect it. After the reset the
+    /// journal is absent: every slot reads <c>NotConfirmed</c> and reconciliation bases on the declared
+    /// revision. Nothing here resets automatically.
+    /// </summary>
+    /// <param name="asidePath">The path the failed journal was moved to, when <see cref="JournalResetOutcome.Reset"/>.</param>
+    public JournalResetOutcome ResetFailedJournal(out string? asidePath)
+    {
+        lock (_sync)
+        {
+            asidePath = null;
+
+            if (!File.Exists(_path))
+            {
+                return JournalResetOutcome.Missing;
+            }
+
+            // Re-read from disk rather than trusting a cached snapshot, so the reset refuses a journal that is
+            // currently valid even if a stale failure was observed earlier.
+            var previousEntries = _entries;
+            bool wasIntegrityFailed = _integrityFailed;
+            _entries = null;
+            _integrityFailed = false;
+
+            // A fresh read must positively classify the journal as integrity-failed before any bytes are
+            // moved. A transient read failure (I/O, permissions, a concurrent rename) leaves the file in
+            // place: moving a valid but momentarily unreadable journal aside would lose every confirmation
+            // and reintroduce the R10.6 stranding risk (R16.4). TryLoad sets _integrityFailed only for a bad
+            // header, a checksum mismatch, a corrupt record or a zero-length file.
+            if (TryLoad() is not null)
+            {
+                return JournalResetOutcome.RefusedValid;
+            }
+
+            if (!_integrityFailed)
+            {
+                // The refused reset must not change the degraded answer: a transient fault proves nothing, so
+                // the integrity state that held before this attempt is restored. Otherwise the next
+                // evaluation would report a known-failed journal as healthy while the fault lasts (R18.2).
+                _entries = previousEntries;
+                _integrityFailed = wasIntegrityFailed;
+                return JournalResetOutcome.Unreadable;
+            }
+
+            string aside = _path + ".failed-" + DateTime.UtcNow.ToString("yyyyMMddTHHmmssfffZ", CultureInfo.InvariantCulture);
+            var collision = 0;
+            while (File.Exists(aside))
+            {
+                aside = _path + ".failed-" + DateTime.UtcNow.ToString("yyyyMMddTHHmmssfffZ", CultureInfo.InvariantCulture)
+                    + "-" + (++collision).ToString(CultureInfo.InvariantCulture);
+            }
+
+            try
+            {
+                File.Move(_path, aside);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return JournalResetOutcome.Failed;
+            }
+
+            asidePath = aside;
+            _entries = null;
+            _integrityFailed = false;
+            return JournalResetOutcome.Reset;
         }
     }
 
@@ -244,8 +394,31 @@ internal sealed class ConfirmedRevisionStore
 
         if (!File.Exists(_path))
         {
+            _integrityFailed = false;
             _entries = new Dictionary<string, (long, long)>(StringComparer.Ordinal);
             return _entries;
+        }
+
+        // An existing zero-length file is a torn or lost write, never a valid empty journal: the writer never
+        // emits one (an empty v2 journal still carries its header), and the headerless v1 format was never
+        // released. Treating it as empty would silently drop every confirmation (R15.10, owner choice R15-B).
+        long length;
+        try
+        {
+            length = new FileInfo(_path).Length;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // The file disappeared or could not be measured between the existence check and this read, for
+            // example a concurrent operator reset renaming it. Fail closed as an unreadable journal rather
+            // than letting FileNotFoundException escape Lookup, Record or Prune in the running Engine (R16.4).
+            return null;
+        }
+
+        if (length == 0)
+        {
+            _integrityFailed = true;
+            return null;
         }
 
         string[] lines;
@@ -256,8 +429,9 @@ internal sealed class ConfirmedRevisionStore
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             // The file exists but its contents could not be verified. Do not cache an empty snapshot: a
-            // later write must not overwrite a journal whose current contents are unknown (R12.4). The
-            // state stays unset so the next call retries the read.
+            // later write must not overwrite a journal whose current contents are unknown (R12.4). This is a
+            // transient fault, so it does not set the persistent integrity-failed state; the next call
+            // retries the read.
             return null;
         }
 
@@ -270,6 +444,7 @@ internal sealed class ConfirmedRevisionStore
             var header = lines[0].Split(FieldSeparator);
             if (header.Length != 3 || !string.Equals(header[1], CurrentFormatVersion, StringComparison.Ordinal))
             {
+                _integrityFailed = true;
                 return null;
             }
 
@@ -277,6 +452,7 @@ internal sealed class ConfirmedRevisionStore
             var actual = Checksum(ReconstructBody(bodyLines));
             if (!string.Equals(header[2], actual, StringComparison.OrdinalIgnoreCase))
             {
+                _integrityFailed = true;
                 return null;
             }
         }
@@ -287,12 +463,14 @@ internal sealed class ConfirmedRevisionStore
             if (!TryParseLine(line, out var key, out var epoch, out var revision))
             {
                 // A corrupt record is an integrity failure for the whole journal (R13.6).
+                _integrityFailed = true;
                 return null;
             }
 
             entries[key] = (epoch, revision);
         }
 
+        _integrityFailed = false;
         _entries = entries;
         return entries;
     }
@@ -341,7 +519,16 @@ internal sealed class ConfirmedRevisionStore
         var header = $"{Magic}{FieldSeparator}{CurrentFormatVersion}{FieldSeparator}{Checksum(bodyText)}\n";
 
         var temporary = _path + ".tmp";
-        File.WriteAllText(temporary, header + bodyText);
+        using (var stream = new FileStream(temporary, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            stream.Write(Encoding.UTF8.GetBytes(header + bodyText));
+            // Flush to disk before the rename, mirroring FileMutableSlotStore: a successful confirmation is a
+            // durable effect, and a power loss must not lose or tear a confirmation the worker already relied
+            // on (R15.10).
+            stream.Flush(flushToDisk: true);
+        }
+
+        OnFlushedBeforeRename?.Invoke();
         File.Move(temporary, _path, overwrite: true);
     }
 

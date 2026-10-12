@@ -557,24 +557,52 @@ public sealed class ManagedGenerationLoader : IDisposable
     }
 
     /// <summary>
-    /// The revision the Platform last confirmed for a mutable slot identity, or null when none has
-    /// been confirmed.
+    /// The three-state confirmation for a mutable slot identity: <see cref="ConfirmationState.Confirmed"/>,
+    /// <see cref="ConfirmationState.NotConfirmed"/>, or <see cref="ConfirmationState.Unavailable"/>. A caller
+    /// must never treat <see cref="ConfirmationState.Unavailable"/> as an absent confirmation; a conflated
+    /// null would let a caller degrade to the declared revision from a source that could not be read
+    /// (R13.1/R15.11). With no durable journal configured the answer is <c>NotConfirmed</c>.
     /// </summary>
     /// <param name="mount">The mount the slot belongs to.</param>
     /// <param name="profileId">The manifest-local profile identity.</param>
     /// <param name="slot">The slot identity.</param>
-    public ConfirmedSlotRevision? ReadConfirmedRevision(string mount, string profileId, string slot)
-        => _confirmed is null
-            ? null
-            : _confirmed.Read(mount, profileId, slot) is { } entry
-                ? new ConfirmedSlotRevision(entry.Epoch, entry.Revision)
-                : null;
+    internal ConfirmationLookup ReadConfirmedRevision(string mount, string profileId, string slot)
+        => _confirmed?.Lookup(mount, profileId, slot) ?? ConfirmationLookup.NotConfirmed;
 
     /// <summary>
     /// Test seam: the durable confirmation journal, when durable runtime state is configured. Production
     /// code never reads it; a test can inject a transient read or integrity failure deterministically.
     /// </summary>
     internal ConfirmedRevisionStore? ConfirmedJournal => _confirmed;
+
+    /// <summary>
+    /// Whether the confirmation journal exists but failed an integrity check. Such a state is operator-visible
+    /// and resolves only through an explicit reset; nothing recovers it automatically (R15.12).
+    /// </summary>
+    public bool ConfirmedJournalIntegrityFailed => _confirmed?.IntegrityFailed ?? false;
+
+    /// <summary>
+    /// Re-evaluates whether the confirmation journal is currently integrity-failed, shared by the managed
+    /// worker diagnostic and the <c>/health/managed</c> probe (R16.5/R16.7). It reads the validated cached
+    /// snapshot when healthy and re-runs the load only while degraded, so a reset performed by another
+    /// process is observed; it never persists. With no durable journal configured the answer is false.
+    /// </summary>
+    public bool IsConfirmedJournalDegraded()
+        => _confirmed?.ReevaluateIntegrityFailed() ?? false;
+
+    /// <summary>
+    /// Runs the explicit operator reset for a permanently integrity-failed confirmation journal, moving it aside
+    /// without deleting it. Refused while the journal is readable and valid (R15.12). With no durable runtime
+    /// state configured the answer is <see cref="JournalResetOutcome.NotConfigured"/>, which is never reported as
+    /// "no journal exists" (R17.3).
+    /// </summary>
+    public JournalResetOutcome ResetConfirmedJournal(out string? asidePath)
+    {
+        asidePath = null;
+        return _confirmed is null
+            ? JournalResetOutcome.NotConfigured
+            : _confirmed.ResetFailedJournal(out asidePath);
+    }
 
     /// <summary>
     /// Durably records the revision the Platform confirmed for a mutable slot identity, so a recovery
@@ -905,11 +933,3 @@ public sealed class ManagedGenerationLoader : IDisposable
 /// failure. The caller must retry rather than treat the batch as a completed recovery.
 /// </param>
 public readonly record struct DurableReplayBatch(int? NextCursor, bool Incomplete);
-
-/// <summary>
-/// The revision the Platform last confirmed for a mutable slot identity, tied to the authority epoch it
-/// was confirmed under.
-/// </summary>
-/// <param name="AuthorityEpoch">The authority epoch the confirmation was made under.</param>
-/// <param name="RuntimeRevision">The confirmed runtime revision.</param>
-public readonly record struct ConfirmedSlotRevision(long AuthorityEpoch, long RuntimeRevision);

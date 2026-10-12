@@ -57,6 +57,8 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     private const string ProviderKey = "MCPILER_OAUTH2_CLIENT_CREDENTIALS_CLIENTSECRET";
     private const string ProviderValueCanary = "CANARY-provider-value-4d27";
 
+    private static CancellationToken Token => TestContext.Current.CancellationToken;
+
     private readonly string _root =
         Path.Combine(Path.GetTempPath(), "mcpiler-managed-sync-" + Guid.NewGuid().ToString("N"));
 
@@ -1182,14 +1184,14 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         await WaitForAsync(() => Volatile.Read(ref attempts) >= 2);
         await WaitForAsync(() => process.Worker.PendingReconciliations == 0);
 
-        ConfirmedSlotRevision? confirmed = loader.ReadConfirmedRevision(
+        ConfirmationLookup confirmed = loader.ReadConfirmedRevision(
             "/mcp/connector",
             "oauth2-client-credentials",
             "clientSecret");
 
-        Assert.NotNull(confirmed);
-        Assert.Equal(1, confirmed!.Value.AuthorityEpoch);
-        Assert.Equal(1, confirmed.Value.RuntimeRevision);
+        Assert.Equal(ConfirmationState.Confirmed, confirmed.State);
+        Assert.Equal(1, confirmed.Epoch);
+        Assert.Equal(1, confirmed.Revision);
     }
 
     [Fact]
@@ -1617,12 +1619,12 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         first.Dispose();
 
         (ManagedGenerationLoader restarted, _) = await OpenLoaderWithStateAsync(stateRoot, keyFile);
-        ConfirmedSlotRevision? confirmed = restarted.ReadConfirmedRevision(
+        ConfirmationLookup confirmed = restarted.ReadConfirmedRevision(
             "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken");
 
-        Assert.NotNull(confirmed);
-        Assert.Equal(3, confirmed!.Value.AuthorityEpoch);
-        Assert.Equal(7, confirmed.Value.RuntimeRevision);
+        Assert.Equal(ConfirmationState.Confirmed, confirmed.State);
+        Assert.Equal(3, confirmed.Epoch);
+        Assert.Equal(7, confirmed.Revision);
     }
 
     [Fact]
@@ -1642,8 +1644,8 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken", authorityEpoch: 1, runtimeRevision: 5);
 
         Assert.False(recorded);
-        Assert.Null(loader.ReadConfirmedRevision(
-            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken"));
+        Assert.Equal(ConfirmationState.NotConfirmed, loader.ReadConfirmedRevision(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken").State);
 
         // R11.2: once the fault is gone a later confirmation is durable, so the two sides converge
         // instead of the skipped confirmation silently reappearing as the declared-revision fallback.
@@ -1653,10 +1655,10 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         loader.Dispose();
 
         (ManagedGenerationLoader restarted, _) = await OpenLoaderWithStateAsync(stateRoot, keyFile);
-        ConfirmedSlotRevision? confirmed = restarted.ReadConfirmedRevision(
+        ConfirmationLookup confirmed = restarted.ReadConfirmedRevision(
             "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken");
-        Assert.NotNull(confirmed);
-        Assert.Equal(5, confirmed!.Value.RuntimeRevision);
+        Assert.Equal(ConfirmationState.Confirmed, confirmed.State);
+        Assert.Equal(5, confirmed.Revision);
         restarted.Dispose();
     }
 
@@ -1730,44 +1732,30 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
                 }
             });
 
-        // Restore the record. Recovery is still requested, so the skipped slot is re-read and reconciled.
-        File.Delete(SlotRecordPath(stateRoot, "oauth2-authorization-code-pkce-refresh", "refreshToken"));
-        await slots.ReplaceAsync(
-            new MutableSlotRecord("oauth2-authorization-code-pkce-refresh", "refreshToken", null, 1, 1, "v-refresh"),
-            TestContext.Current.CancellationToken);
-
-        // The clean second batch must not clear the earlier failure: recovery stays requested while the
-        // unreadable slot was never re-read, so the slot is never reconciled to the platform (R11.1).
+        // A clean later batch must not acknowledge the earlier unreadable candidate. No report
+        // can have reached the Platform while the durable record remains corrupt (R11.1).
         Assert.DoesNotContain("refreshToken", reconciledSlots);
+        Assert.True(process.Worker.RecoveryRequested);
 
-        // Once the record is readable again the durable replay names the slot, so a later recovery cycle
-        // reconciles it instead of stranding the credential.
+        // Restore the record once. The live worker owns recovery and may confirm the rotation
+        // before an independent replay could inspect it, so observe its actual reconciliation.
         File.Delete(SlotRecordPath(stateRoot, "oauth2-authorization-code-pkce-refresh", "refreshToken"));
         await slots.ReplaceAsync(
             new MutableSlotRecord("oauth2-authorization-code-pkce-refresh", "refreshToken", null, 1, 1, "v-refresh"),
             TestContext.Current.CancellationToken);
 
-        ManagedGenerationLoad reloaded = loader.Load(DirectDelivery(
-            "g1",
-            TwoSlotRotatableRefreshSurface(new Uri("https://api.example.com/")),
-            new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                ["MANAGED_CLIENT_SECRET"] = "client-secret-canary",
-                ["MANAGED_REFRESH_TOKEN"] = "declared-refresh",
-            }));
-        var reported = new List<string>();
-        DurableReplayBatch batch = await loader.ReplayDurableRotationsBatchAsync(
-            reloaded.Generation!.Mounts,
-            (_, _, slot, _, _, _, _) =>
-            {
-                reported.Add(slot);
-                return ValueTask.CompletedTask;
-            },
-            0,
-            int.MaxValue,
-            TestContext.Current.CancellationToken);
-        Assert.False(batch.Incomplete);
-        Assert.Contains("refreshToken", reported);
+        await WaitForAsync(
+            () => reconciledSlots.Contains("refreshToken"),
+            () => "The restored slot was never reconciled. Pending=" + process.Worker.PendingReconciliations
+                + " RecoveryRequested=" + process.Worker.RecoveryRequested);
+        await WaitForAsync(
+            () => process.Worker.PendingReconciliations == 0 && !process.Worker.RecoveryRequested,
+            () => "Recovery did not finish. Pending=" + process.Worker.PendingReconciliations
+                + " RecoveryRequested=" + process.Worker.RecoveryRequested);
+        ConfirmationLookup confirmed = loader.ReadConfirmedRevision(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken");
+        Assert.Equal(ConfirmationState.Confirmed, confirmed.State);
+        Assert.Equal(1, confirmed.Revision);
     }
 
     // R13.1: an unreadable confirmation journal must defer the slot, not base a report on the declared
@@ -1933,8 +1921,8 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         loader.RecordConfirmedRevision(
             "/mcp/other", "oauth2-authorization-code-pkce-refresh", "refreshToken", authorityEpoch: 1, runtimeRevision: 5);
-        Assert.NotNull(loader.ReadConfirmedRevision(
-            "/mcp/other", "oauth2-authorization-code-pkce-refresh", "refreshToken"));
+        Assert.Equal(ConfirmationState.Confirmed, loader.ReadConfirmedRevision(
+            "/mcp/other", "oauth2-authorization-code-pkce-refresh", "refreshToken").State);
 
         ManagedGenerationLoad loaded = loader.Load(DirectDelivery(
             "g1",
@@ -1948,14 +1936,14 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         // Preparing a candidate must not mutate the running generation's durable state: the worker can
         // still refuse it in host validation, and the confirmation must survive (R12.2).
-        Assert.NotNull(loader.ReadConfirmedRevision(
-            "/mcp/other", "oauth2-authorization-code-pkce-refresh", "refreshToken"));
+        Assert.Equal(ConfirmationState.Confirmed, loader.ReadConfirmedRevision(
+            "/mcp/other", "oauth2-authorization-code-pkce-refresh", "refreshToken").State);
 
         // Pruning is an activation-time side effect. Applied with the active mounts it drops the stale
         // identity (R11.7/R12.2).
         loader.PruneConfirmedRevisions(loaded.Generation!.Mounts);
-        Assert.Null(loader.ReadConfirmedRevision(
-            "/mcp/other", "oauth2-authorization-code-pkce-refresh", "refreshToken"));
+        Assert.Equal(ConfirmationState.NotConfirmed, loader.ReadConfirmedRevision(
+            "/mcp/other", "oauth2-authorization-code-pkce-refresh", "refreshToken").State);
     }
 
     [Fact]
@@ -2002,8 +1990,8 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             });
 
         Assert.Equal("g1", engine.Worker.ActiveGenerationId);
-        Assert.NotNull(engine.Loader.ReadConfirmedRevision(
-            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "clientSecret"));
+        Assert.Equal(ConfirmationState.Confirmed, engine.Loader.ReadConfirmedRevision(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "clientSecret").State);
 
         // A candidate that activates and no longer declares the clientSecret slot prunes only that
         // identity; the slot it still declares keeps its confirmation (R12.2/R11.7).
@@ -2014,10 +2002,407 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             secrets: secrets);
         await WaitForAsync(() => engine.Worker.ActiveGenerationId == "g3");
 
-        Assert.NotNull(engine.Loader.ReadConfirmedRevision(
-            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken"));
-        Assert.Null(engine.Loader.ReadConfirmedRevision(
-            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "clientSecret"));
+        Assert.Equal(ConfirmationState.Confirmed, engine.Loader.ReadConfirmedRevision(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken").State);
+        Assert.Equal(ConfirmationState.NotConfirmed, engine.Loader.ReadConfirmedRevision(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "clientSecret").State);
+    }
+
+    // R16.7 / MTH-HEALTH-1: an absent or valid confirmation journal reports the managed health surface 200.
+    [Fact]
+    public async Task Managed_health_is_ok_with_an_absent_or_valid_confirmation_journal()
+    {
+        (ManagedGenerationLoader loader, _) = await OpenLoaderWithStateAsync();
+
+        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        await using var platform = await PlatformAsync(_ => Response.Generation(generation));
+        await using ManagedProcess engine = await StartAsync(platform, providedLoader: loader);
+
+        using var http = new HttpClient();
+
+        HttpResponseMessage absent = await http.GetAsync(engine.At(HealthEndpoints.ManagedPath), Token);
+        Assert.Equal(HttpStatusCode.OK, absent.StatusCode);
+        Assert.Equal("ok\n", await absent.Content.ReadAsStringAsync(Token));
+
+        Assert.True(engine.Loader.RecordConfirmedRevision(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken", authorityEpoch: 1, runtimeRevision: 1));
+        HttpResponseMessage valid = await http.GetAsync(engine.At(HealthEndpoints.ManagedPath), Token);
+        Assert.Equal(HttpStatusCode.OK, valid.StatusCode);
+        Assert.Equal("ok\n", await valid.Content.ReadAsStringAsync(Token));
+    }
+
+    // R16.5 / R16.7 / MTH-HEALTH-2: a checksum-mismatch journal and, separately, a zero-length journal put
+    // the managed health surface at 503; the body names the integrity failure and the operator action, and
+    // carries no journal path, identity or secret material. The worker emits the degraded diagnostic
+    // exactly once per state.
+    [Theory]
+    [InlineData("checksum")]
+    [InlineData("empty")]
+    public async Task Managed_health_reports_a_degraded_confirmation_journal(string kind)
+    {
+        string stateRoot = Path.Combine(_root, "state-health-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-health-" + Guid.NewGuid().ToString("N"));
+        (ManagedGenerationLoader loader, _) = await OpenLoaderWithStateAsync(stateRoot, keyFile);
+
+        string journal = Path.Combine(stateRoot, "confirmed-revisions.txt");
+        if (kind == "checksum")
+        {
+            // R18.3(b): a real record under a wrong checksum, so the body assertions can prove the 503
+            // carries neither the checksum text, nor the slot identity, nor the revision.
+            string record = ConfirmedRevisionStore.KeyFor(
+                    "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken")
+                + "\t1\t424242\n";
+            File.WriteAllText(journal, "#MCPilerConfirmedRevisions\t2\tDEADBEEF\n" + record);
+        }
+        else
+        {
+            File.WriteAllBytes(journal, []);
+        }
+
+        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        await using var platform = await PlatformAsync(_ => Response.Generation(generation));
+        await using ManagedProcess engine = await StartAsync(platform, providedLoader: loader);
+
+        await WaitForAsync(
+            () => DiagnosticsContaining(engine, "failed its integrity check") == 1,
+            () => "Diagnostics: " + string.Join(" | ", engine.Diagnostics));
+        Assert.DoesNotContain(engine.Diagnostics, message => message.Contains(SecretCanary, StringComparison.Ordinal));
+        Assert.DoesNotContain(engine.Diagnostics, message => message.Contains(stateRoot, StringComparison.Ordinal));
+
+        using var http = new HttpClient();
+        HttpResponseMessage response = await http.GetAsync(engine.At(HealthEndpoints.ManagedPath), Token);
+        string body = await response.Content.ReadAsStringAsync(Token);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Contains("integrity", body, StringComparison.Ordinal);
+        Assert.Contains("confirmed-revisions reset", body, StringComparison.Ordinal);
+        Assert.DoesNotContain(stateRoot, body, StringComparison.Ordinal);
+        Assert.DoesNotContain("g1", body, StringComparison.Ordinal);
+        Assert.DoesNotContain(SecretCanary, body, StringComparison.Ordinal);
+        Assert.DoesNotContain("DEADBEEF", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("refreshToken", body, StringComparison.Ordinal);
+        Assert.DoesNotContain("424242", body, StringComparison.Ordinal);
+    }
+
+    // R16.7 / MTH-HEALTH-3: while the journal is degraded, readiness and liveness stay 200 with their
+    // unchanged bodies and a served tool call still succeeds.
+    [Fact]
+    public async Task A_degraded_journal_does_not_affect_ready_live_or_serving()
+    {
+        string stateRoot = Path.Combine(_root, "state-health3-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-health3-" + Guid.NewGuid().ToString("N"));
+        (ManagedGenerationLoader loader, _) = await OpenLoaderWithStateAsync(stateRoot, keyFile);
+        File.WriteAllBytes(Path.Combine(stateRoot, "confirmed-revisions.txt"), []);
+
+        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        await using var platform = await PlatformAsync(_ => Response.Generation(generation));
+        await using ManagedProcess engine = await StartAsync(platform, providedLoader: loader);
+
+        using var http = new HttpClient();
+        HttpResponseMessage managed = await http.GetAsync(engine.At(HealthEndpoints.ManagedPath), Token);
+        HttpResponseMessage ready = await http.GetAsync(engine.At(HealthEndpoints.ReadyPath), Token);
+        HttpResponseMessage live = await http.GetAsync(engine.At(HealthEndpoints.LivePath), Token);
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, managed.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, ready.StatusCode);
+        Assert.Equal("ready\n", await ready.Content.ReadAsStringAsync(Token));
+        Assert.Equal(HttpStatusCode.OK, live.StatusCode);
+        Assert.Equal("alive\n", await live.Content.ReadAsStringAsync(Token));
+
+        using McpHttpSession session = await McpHttpSession.OpenAsync(engine.At("/mcp/connector/full"), Token);
+        Assert.Equal(["list-pets", "add-pet"], Names(await session.RequestAsync("tools/list", 2, Token)));
+    }
+
+    // R16.7 / MTH-HEALTH-4: an injected transient read failure is not an integrity failure, so the managed
+    // health surface stays 200.
+    [Fact]
+    public async Task A_transient_confirmation_read_failure_is_not_reported_as_degraded()
+    {
+        string stateRoot = Path.Combine(_root, "state-health4-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-health4-" + Guid.NewGuid().ToString("N"));
+        (ManagedGenerationLoader loader, _) = await OpenLoaderWithStateAsync(stateRoot, keyFile);
+        File.WriteAllText(Path.Combine(stateRoot, "confirmed-revisions.txt"), "x\n");
+        loader.ConfirmedJournal!.ReadAllLines = _ => throw new IOException("transient read failure");
+
+        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        await using var platform = await PlatformAsync(_ => Response.Generation(generation));
+        await using ManagedProcess engine = await StartAsync(platform, providedLoader: loader);
+
+        using var http = new HttpClient();
+        HttpResponseMessage response = await http.GetAsync(engine.At(HealthEndpoints.ManagedPath), Token);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.DoesNotContain(
+            engine.Diagnostics,
+            message => message.Contains("failed its integrity check", StringComparison.Ordinal));
+    }
+
+    // R16.7 / MTH-HEALTH-5 / R16.5 obligation 4: a reset performed through a separate store instance, as
+    // the CLI does, is observed by the running host without a restart or a new activation; the corrupt
+    // journal and its preserved copy are left byte-identical. R18.3(a): the checksum row uses a non-empty
+    // integrity-failed journal so the no-write assertions cannot pass vacuously.
+    [Theory]
+    [InlineData("checksum")]
+    [InlineData("empty")]
+    public async Task A_reset_while_serving_clears_the_degraded_state_without_restart_or_reactivation(string kind)
+    {
+        string stateRoot = Path.Combine(_root, "state-health5-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-health5-" + Guid.NewGuid().ToString("N"));
+        (ManagedGenerationLoader loader, _) = await OpenLoaderWithStateAsync(stateRoot, keyFile);
+        string journal = Path.Combine(stateRoot, "confirmed-revisions.txt");
+        if (kind == "checksum")
+        {
+            // A real body under a wrong checksum: the journal is non-empty, so the no-write assertions
+            // below cannot pass vacuously.
+            string body = ConfirmedRevisionStore.KeyFor(
+                    "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken")
+                + "\t1\t424242\n";
+            File.WriteAllText(journal, "#MCPilerConfirmedRevisions\t2\tDEADBEEF\n" + body);
+        }
+        else
+        {
+            File.WriteAllBytes(journal, []);
+        }
+
+        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        await using var platform = await PlatformAsync(_ => Response.Generation(generation));
+        await using ManagedProcess engine = await StartAsync(platform, providedLoader: loader);
+
+        using var http = new HttpClient();
+        byte[] before = await File.ReadAllBytesAsync(journal, TestContext.Current.CancellationToken);
+
+        // The degraded query observes the failed journal without changing a byte (MTH-HEALTH-5).
+        Assert.Equal(
+            HttpStatusCode.ServiceUnavailable,
+            (await http.GetAsync(engine.At(HealthEndpoints.ManagedPath), Token)).StatusCode);
+        Assert.Equal(before, await File.ReadAllBytesAsync(journal, TestContext.Current.CancellationToken));
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+
+        // Reset through a second loader over the same root, exactly as the operator CLI does.
+        (ManagedGenerationLoader operatorLoader, _) = await OpenLoaderWithStateAsync(stateRoot, keyFile);
+        string aside;
+        using (operatorLoader)
+        {
+            Assert.Equal(JournalResetOutcome.Reset, operatorLoader.ResetConfirmedJournal(out string? moved));
+            aside = moved!;
+            Assert.NotNull(aside);
+            Assert.False(File.Exists(journal));
+            Assert.True(File.Exists(aside), "The corrupt journal bytes are preserved, never deleted.");
+            Assert.Equal(before, await File.ReadAllBytesAsync(aside, TestContext.Current.CancellationToken));
+        }
+
+        // The running host observes the reset: no restart, no new activation.
+        await WaitForAsync(
+            () => http.GetAsync(engine.At(HealthEndpoints.ManagedPath), Token).GetAwaiter().GetResult().StatusCode
+                == HttpStatusCode.OK,
+            () => "The running host did not observe the reset of the corrupt journal.");
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(1, DiagnosticsContaining(engine, "activated generation"));
+
+        // This generation declares no rotatable slot, so the post-reset 200 records nothing: the journal
+        // stays absent and the preserved copy still holds the original bytes (MTH-HEALTH-5).
+        Assert.False(File.Exists(journal));
+        string preserved = Assert.Single(Directory.GetFiles(stateRoot, "confirmed-revisions.txt.failed-*"));
+        Assert.Equal(before, await File.ReadAllBytesAsync(preserved, TestContext.Current.CancellationToken));
+    }
+
+    // R16.5 obligation 2: a journal that becomes integrity-failed after activation is reported without a
+    // new activation, when the cyclic replay or a reconciliation observes it.
+    [Fact]
+    public async Task A_journal_that_becomes_integrity_failed_after_activation_is_reported_without_reactivation()
+    {
+        string stateRoot = Path.Combine(_root, "state-health6-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-health6-" + Guid.NewGuid().ToString("N"));
+        (ManagedGenerationLoader loader, _) = await OpenLoaderWithStateAsync(stateRoot, keyFile);
+        string journal = Path.Combine(stateRoot, "confirmed-revisions.txt");
+        File.WriteAllText(journal, "x\n");
+
+        // A transient read failure at activation leaves no cached snapshot, so the next read re-reads the
+        // file and can discover a corruption that appeared afterwards.
+        Func<string, string[]> productionRead = loader.ConfirmedJournal!.ReadAllLines;
+        loader.ConfirmedJournal!.ReadAllLines = _ => throw new IOException("transient read failure");
+
+        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        await using var platform = await PlatformAsync(_ => Response.Generation(generation));
+        await using ManagedProcess engine = await StartAsync(platform, providedLoader: loader);
+
+        Assert.DoesNotContain(
+            engine.Diagnostics,
+            message => message.Contains("failed its integrity check", StringComparison.Ordinal));
+
+        // The fault clears, and the journal on disk is now genuinely corrupt. Restore the production read
+        // rather than File.ReadAllLines: the latter's FileShare.Read races this overwrite while the worker
+        // holds the journal open on Windows (R18.1).
+        loader.ConfirmedJournal!.ReadAllLines = productionRead;
+        File.WriteAllText(journal, "corrupt\n");
+
+        await WaitForAsync(
+            () => DiagnosticsContaining(engine, "failed its integrity check") >= 1,
+            () => "Diagnostics: " + string.Join(" | ", engine.Diagnostics));
+        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+
+        using var http = new HttpClient();
+        Assert.Equal(
+            HttpStatusCode.ServiceUnavailable,
+            (await http.GetAsync(engine.At(HealthEndpoints.ManagedPath), Token)).StatusCode);
+    }
+
+    // R17.2: a degraded serving host whose journal read becomes transiently failing keeps answering 503 and
+    // emits no recovery diagnostic. An unknown state is never reported as recovered.
+    [Fact]
+    public async Task A_degraded_host_whose_journal_read_fails_transiently_stays_degraded()
+    {
+        string stateRoot = Path.Combine(_root, "state-r172-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-r172-" + Guid.NewGuid().ToString("N"));
+        (ManagedGenerationLoader loader, _) = await OpenLoaderWithStateAsync(stateRoot, keyFile);
+        File.WriteAllText(
+            Path.Combine(stateRoot, "confirmed-revisions.txt"),
+            "#MCPilerConfirmedRevisions\t2\tDEADBEEF\n");
+
+        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        await using var platform = await PlatformAsync(_ => Response.Generation(generation));
+        await using ManagedProcess engine = await StartAsync(platform, providedLoader: loader);
+
+        using var http = new HttpClient();
+        Assert.Equal(
+            HttpStatusCode.ServiceUnavailable,
+            (await http.GetAsync(engine.At(HealthEndpoints.ManagedPath), Token)).StatusCode);
+        await WaitForAsync(
+            () => DiagnosticsContaining(engine, "failed its integrity check") >= 1,
+            () => "Diagnostics: " + string.Join(" | ", engine.Diagnostics));
+
+        // The journal read now fails transiently. The known failure must persist: the next worker pass and
+        // the health probe must both keep reporting degraded. Wait for two polls so at least one complete
+        // pass evaluated the journal under the fault (the worker evaluates it before it polls, so a single
+        // observed poll can belong to a pass that evaluated before the fault, R18.3(c)).
+        int pollsBefore = platform.PollSessionEpochHeaders.Count;
+        loader.ConfirmedJournal!.ReadAllLines = _ => throw new IOException("transient read failure");
+
+        await WaitForAsync(
+            () => platform.PollSessionEpochHeaders.Count >= pollsBefore + 2,
+            () => "The worker did not complete two passes under the transient fault.");
+        Assert.Equal(0, DiagnosticsContaining(engine, "reads as valid again"));
+        Assert.Equal(
+            HttpStatusCode.ServiceUnavailable,
+            (await http.GetAsync(engine.At(HealthEndpoints.ManagedPath), Token)).StatusCode);
+    }
+
+    // R17.1 / R15.12 obligations 3-4: after an operator reset of an integrity-failed journal, the cyclic
+    // recovery bases its report on the declared revision, Record writes a fresh v2 journal, the report is
+    // acknowledged and the stall ends — without a new generation or a restart.
+    [Theory]
+    [InlineData("checksum")]
+    [InlineData("empty")]
+    public async Task A_reset_of_an_integrity_failed_journal_ends_the_stall_and_reconciles_on_the_declared_base(
+        string kind)
+    {
+        var generation = Generation(
+            "g1",
+            ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
+            prefix: "/mcp/connector",
+            secrets: new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["MANAGED_CLIENT_SECRET"] = "client-secret-canary",
+                ["MANAGED_REFRESH_TOKEN"] = "declared-refresh",
+            });
+
+        var reports = new System.Collections.Concurrent.ConcurrentQueue<JsonObject>();
+        await using var platform = await PlatformAsync(_ => Response.Generation(generation));
+        platform.OnReconcile = body =>
+        {
+            reports.Enqueue(JsonNode.Parse(body)!.AsObject());
+            return Response.Bytes(
+                JsonSerializer.SerializeToUtf8Bytes(new { outcome = "recorded" }),
+                isGeneration: false);
+        };
+
+        string stateRoot = Path.Combine(_root, "state-r171-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-r171-" + Guid.NewGuid().ToString("N"));
+        (ManagedGenerationLoader loader, FileMutableSlotStore slots) =
+            await OpenLoaderWithStateAsync(stateRoot, keyFile);
+
+        // A locally committed rotation ahead of the declared revision.
+        await slots.ReplaceAsync(
+            new MutableSlotRecord("oauth2-authorization-code-pkce-refresh", "refreshToken", null, 1, 1, "v-refresh"),
+            TestContext.Current.CancellationToken);
+
+        // An integrity-failed journal exists before the process starts.
+        string journal = Path.Combine(stateRoot, "confirmed-revisions.txt");
+        byte[] corruptBytes;
+        if (kind == "checksum")
+        {
+            File.WriteAllText(journal, "#MCPilerConfirmedRevisions\t2\tDEADBEEF\n");
+            corruptBytes = await File.ReadAllBytesAsync(journal, TestContext.Current.CancellationToken);
+        }
+        else
+        {
+            File.WriteAllBytes(journal, []);
+            corruptBytes = [];
+        }
+
+        await using ManagedProcess process = await StartAsync(platform, loader);
+        Assert.Equal("g1", process.Worker.ActiveGenerationId);
+
+        // While degraded: 503, recovery stays requested, and no report reaches the Platform.
+        using var http = new HttpClient();
+        Assert.Equal(
+            HttpStatusCode.ServiceUnavailable,
+            (await http.GetAsync(process.At(HealthEndpoints.ManagedPath), Token)).StatusCode);
+        await WaitForAsync(
+            () => process.Worker.RecoveryRequested,
+            () => "Recovery was not kept pending for the slot behind the integrity-failed journal.");
+        Assert.Empty(reports);
+
+        // Reset through a separate loader over the same root and key, as the CLI does.
+        (ManagedGenerationLoader operatorLoader, _) = await OpenLoaderWithStateAsync(stateRoot, keyFile);
+        string aside;
+        using (operatorLoader)
+        {
+            Assert.Equal(JournalResetOutcome.Reset, operatorLoader.ResetConfirmedJournal(out string? moved));
+            aside = moved!;
+        }
+
+        // The cyclic recovery now reconciles: exactly one report based on the declared revision (0) with the
+        // durable revision (1).
+        await WaitForAsync(
+            () => !reports.IsEmpty,
+            () => "The recovered rotation was not reported. Pending=" + process.Worker.PendingReconciliations
+                + " RecoveryRequested=" + process.Worker.RecoveryRequested
+                + " Diagnostics: " + string.Join(" | ", process.Diagnostics));
+        await WaitForAsync(
+            () => process.Worker.PendingReconciliations == 0 && !process.Worker.RecoveryRequested,
+            () => "The reconciliation did not complete. Pending=" + process.Worker.PendingReconciliations
+                + " RecoveryRequested=" + process.Worker.RecoveryRequested);
+
+        JsonObject report = Assert.Single(reports);
+        Assert.Equal("refreshToken", report["slot"]!.GetValue<string>());
+        Assert.Equal(0, report["previousRuntimeRevision"]!.GetValue<long>());
+        Assert.Equal(1, report["runtimeRevision"]!.GetValue<long>());
+
+        // The journal is a fresh v2 file whose checksum verifies, so a fresh store sees the confirmation.
+        string journalText = await File.ReadAllTextAsync(journal, TestContext.Current.CancellationToken);
+        Assert.StartsWith("#MCPilerConfirmedRevisions", journalText, StringComparison.Ordinal);
+        var fresh = new ConfirmedRevisionStore(stateRoot);
+        ConfirmationLookup confirmed = fresh.Lookup(
+            "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken");
+        Assert.Equal(ConfirmationState.Confirmed, confirmed.State);
+        Assert.Equal(1, confirmed.Revision);
+
+        // The moved-aside file still holds the original corrupt bytes.
+        Assert.True(File.Exists(aside));
+        Assert.Equal(corruptBytes, await File.ReadAllBytesAsync(aside, TestContext.Current.CancellationToken));
+
+        Assert.Equal(
+            HttpStatusCode.OK,
+            (await http.GetAsync(process.At(HealthEndpoints.ManagedPath), Token)).StatusCode);
+        Assert.Equal("g1", process.Worker.ActiveGenerationId);
+    }
+
+    private static int DiagnosticsContaining(ManagedProcess engine, string text)
+    {
+        lock (engine.Diagnostics)
+        {
+            return engine.Diagnostics.Count(message => message.Contains(text, StringComparison.Ordinal));
+        }
     }
 
     private static ManagedGenerationDelivery DirectDelivery(
@@ -2109,7 +2494,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         Assert.True(initial.Started, initial.Refusal?.Message);
 
-        WebApplication app = EngineWebHost.BuildManaged(binding, drain, manager);
+        WebApplication app = EngineWebHost.BuildManaged(binding, drain, manager, loader.IsConfirmedJournalDegraded);
 
         await app.StartAsync(TestContext.Current.CancellationToken);
 

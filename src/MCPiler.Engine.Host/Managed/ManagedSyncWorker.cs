@@ -46,6 +46,15 @@ internal sealed class ManagedSyncWorker : IDisposable
     /// </summary>
     private readonly string _instanceId = Guid.NewGuid().ToString("N");
 
+    private bool _journalDegradedReported;
+    private DateTime _lastJournalDegradedReportUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// How often a persistent confirmation-journal degraded state is re-emitted, so a long-lived stalled
+    /// Engine stays observable without flooding the diagnostic stream (R16.5).
+    /// </summary>
+    private static readonly TimeSpan JournalDegradedReemitInterval = TimeSpan.FromMinutes(5);
+
     private long _reportSequence;
     private long? _sessionEpoch;
 
@@ -281,6 +290,10 @@ internal sealed class ManagedSyncWorker : IDisposable
                     break;
             }
         }
+
+        // A reconciliation is a path that can observe the journal: a Record refused because the journal is
+        // integrity-failed must surface the degraded state without waiting for a new activation (R16.5).
+        EvaluateJournalDegraded();
     }
 
     /// <summary>
@@ -466,6 +479,11 @@ internal sealed class ManagedSyncWorker : IDisposable
                     }
                 }
 
+                // The journal's integrity is observable on any path: re-evaluate it every pass so a failure
+                // first seen by the cyclic recovery replay or a reconciliation is reported without waiting
+                // for a new activation, and a long-lived stalled Engine keeps a bounded re-emit (R16.5).
+                EvaluateJournalDegraded();
+
                 ManagedPollResult result = await _client
                     .PollAsync(BuildRequest(), _sessionEpoch, cancellationToken)
                     .ConfigureAwait(false);
@@ -542,6 +560,47 @@ internal sealed class ManagedSyncWorker : IDisposable
                 await Task.Delay(_backoff.Next(), cancellationToken).ConfigureAwait(false);
             }
         }
+    }
+
+    /// <summary>
+    /// Evaluates and reports the confirmation journal's integrity on any path that can observe it: a
+    /// generation activation, the cyclic recovery replay and a reconciliation write. The state is surfaced
+    /// precisely on the <c>managed:</c> diagnostic stream (this message) and by <c>/health/managed</c>
+    /// returning 503; <c>/health/ready</c> and <c>/health/live</c> are deliberately unaffected (R16.7). An
+    /// integrity-failed journal is operator-visible and stalls managed recovery until an explicit reset; it
+    /// is re-emitted at a bounded interval so a long-lived stalled Engine stays observable, and a return to
+    /// health emits one recovery message. A transient read failure is never reported as degraded, and a
+    /// failure after a clear is reported again (R15.12/R16.5). The journal path and slot values are never
+    /// printed.
+    /// </summary>
+    private void EvaluateJournalDegraded()
+    {
+        if (!_loader.IsConfirmedJournalDegraded())
+        {
+            if (_journalDegradedReported)
+            {
+                _journalDegradedReported = false;
+                _diagnostics?.Invoke(
+                    "managed: the durable confirmation journal reads as valid again; managed reconciliation "
+                    + "can resume.");
+            }
+
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        if (_journalDegradedReported && now - _lastJournalDegradedReportUtc < JournalDegradedReemitInterval)
+        {
+            return;
+        }
+
+        _journalDegradedReported = true;
+        _lastJournalDegradedReportUtc = now;
+        _diagnostics?.Invoke(
+            "managed: the durable confirmation journal failed its integrity check, so no reconciliation can be "
+            + "confirmed from it and managed recovery is stalled. Run the operator action "
+            + "'confirmed-revisions reset' to move the corrupt journal aside (its bytes are never deleted); "
+            + "nothing recovers it automatically.");
     }
 
     /// <summary>
@@ -674,6 +733,8 @@ if (_binding.Listener.Transport is HostTransport.Http
 
         _diagnostics?.Invoke(
             $"managed: activated generation {delivery.GenerationId} at address number {number}.");
+
+        EvaluateJournalDegraded();
 
         // Retirement is observed in the background: a superseded generation finishes its leased
         // requests on its own schedule, and blocking activation on that would stop new admissions

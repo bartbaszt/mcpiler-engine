@@ -23,6 +23,12 @@ public enum HostVerb
 
     /// <summary>Report the machine-readable compatibility descriptor.</summary>
     Compatibility,
+
+    /// <summary>
+    /// Move a permanently integrity-failed confirmation journal aside, without deleting it, so the Engine can
+    /// start a fresh journal and managed reconciliation is no longer stalled (R15.12).
+    /// </summary>
+    ConfirmedRevisionsReset,
 }
 
 /// <summary>One parsed command line.</summary>
@@ -90,6 +96,8 @@ public static class CommandLine
           files list               Print every handle the file store holds.
           files show <id>          Print one handle.
           files sweep              Reclaim expired handles and orphan content.
+          confirmed-revisions reset
+                                   Move a permanently integrity-failed confirmation journal aside.
           version                  Print the build identity and supported Manifest format range.
           compatibility            Print the machine-readable compatibility descriptor.
 
@@ -222,6 +230,8 @@ public static class CommandLine
                 return HostVerb.Compatibility;
             case "files":
                 return ReadFilesVerb(positional, out operand, refusals);
+            case "confirmed-revisions":
+                return ReadConfirmedRevisionsVerb(positional, refusals);
             default:
                 refusals.Add($"'{positional[0]}' is not a verb this host knows.");
                 return null;
@@ -260,6 +270,24 @@ public static class CommandLine
                 refusals.Add($"'{positional[1]}' is not one of: list, show, sweep.");
                 return null;
         }
+    }
+
+    private static HostVerb? ReadConfirmedRevisionsVerb(IReadOnlyList<string> positional, List<string> refusals)
+    {
+        if (positional.Count < 2)
+        {
+            refusals.Add("'confirmed-revisions' needs its 'reset' subcommand.");
+            return null;
+        }
+
+        if (positional[1] != "reset")
+        {
+            refusals.Add($"'{positional[1]}' is not one of: reset.");
+            return null;
+        }
+
+        Extra(positional, 2, refusals);
+        return HostVerb.ConfirmedRevisionsReset;
     }
 
     private static void Extra(IReadOnlyList<string> positional, int consumed, List<string> refusals)

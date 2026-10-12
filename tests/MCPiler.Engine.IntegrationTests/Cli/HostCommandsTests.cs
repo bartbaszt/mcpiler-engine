@@ -315,6 +315,7 @@ public sealed class HostCommandsTests : IDisposable
 
     [Theory]
     [InlineData("/health", "live")]
+    [InlineData("/health", "managed")]
     [InlineData("/HEALTH", "live")]
     [InlineData("/.ENGINE", "response-cache")]
     [InlineData("/.WELL-KNOWN/oauth-protected-resource", "api")]
@@ -514,6 +515,172 @@ public sealed class HostCommandsTests : IDisposable
         Assert.Contains("abandoned 2 invocation(s)", output, StringComparison.Ordinal);
         Assert.Contains("list-pets", output, StringComparison.Ordinal);
         Assert.Contains("get-pet", output, StringComparison.Ordinal);
+    }
+
+    // R15.12: the operator reset verb moves an integrity-failed confirmation journal aside (never deleting it).
+    [Fact]
+    public async Task Confirmed_revisions_reset_moves_an_integrity_failed_journal_aside()
+    {
+        string stateRoot = Path.Combine(_root, "state-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateRoot);
+        File.WriteAllBytes(keyFile, new byte[32]);
+        string journal = Path.Combine(stateRoot, "confirmed-revisions.txt");
+        File.WriteAllBytes(journal, []);
+
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "confirmed-revisions", "reset",
+                "--file-store-root", Store(),
+                "--runtime-state-root", stateRoot,
+                "--runtime-state-key-file", keyFile,
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Success, outcome.ExitCode);
+        Assert.Contains("moved aside", outcome.Output, StringComparison.Ordinal);
+        Assert.False(File.Exists(journal));
+        Assert.NotEmpty(Directory.GetFiles(stateRoot, "confirmed-revisions.txt.failed-*"));
+    }
+
+    // R15.12: the reset is refused while the journal is readable and valid.
+    [Fact]
+    public async Task Confirmed_revisions_reset_refuses_a_valid_journal()
+    {
+        string stateRoot = Path.Combine(_root, "state-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateRoot);
+        File.WriteAllBytes(keyFile, new byte[32]);
+        string journal = Path.Combine(stateRoot, "confirmed-revisions.txt");
+        // A valid header-only v2 journal: checksum of the empty body (SHA-256 of "").
+        File.WriteAllText(
+            journal,
+            "#MCPilerConfirmedRevisions\t2\tE3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855\n");
+
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "confirmed-revisions", "reset",
+                "--file-store-root", Store(),
+                "--runtime-state-root", stateRoot,
+                "--runtime-state-key-file", keyFile,
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Failure, outcome.ExitCode);
+        Assert.True(File.Exists(journal), "A valid journal must be left in place.");
+    }
+
+    // R16.4: a journal that merely cannot be read right now is not proven integrity-failed, so the reset
+    // refuses (non-success) and leaves the file in place instead of moving a valid journal aside.
+    [Fact]
+    public async Task Confirmed_revisions_reset_refuses_a_transiently_unreadable_journal()
+    {
+        string stateRoot = Path.Combine(_root, "state-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateRoot);
+        File.WriteAllBytes(keyFile, new byte[32]);
+        string journal = Path.Combine(stateRoot, "confirmed-revisions.txt");
+        File.WriteAllText(journal, "valid-but-held\n");
+
+        // Hold the file exclusively so the operator process cannot read it, reproducing a transient
+        // sharing/permission fault rather than an integrity failure.
+        using (new FileStream(journal, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            CommandOutcome outcome = await HostCommands.RunAsync(
+                [
+                    "confirmed-revisions", "reset",
+                    "--file-store-root", Store(),
+                    "--runtime-state-root", stateRoot,
+                    "--runtime-state-key-file", keyFile,
+                ],
+                Identity,
+                TestContext.Current.CancellationToken);
+
+            Assert.Equal(ExitCodes.Failure, outcome.ExitCode);
+            Assert.Contains("could not be read", outcome.Output, StringComparison.Ordinal);
+        }
+
+        Assert.True(File.Exists(journal), "A transiently unreadable journal must be left in place.");
+        Assert.Empty(Directory.GetFiles(stateRoot, "confirmed-revisions.txt.failed-*"));
+    }
+
+    // R16.6b: the documented reset command must bind. It takes the same --file-store-root as the other
+    // verbs; without it HostConfiguration refuses and the documented command would exit with the
+    // configuration code. This runs the documented argument list verbatim.
+    [Fact]
+    public async Task Confirmed_revisions_reset_accepts_the_documented_argument_list()
+    {
+        string stateRoot = Path.Combine(_root, "state-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateRoot);
+        File.WriteAllBytes(keyFile, new byte[32]);
+        string journal = Path.Combine(stateRoot, "confirmed-revisions.txt");
+        File.WriteAllText(
+            journal,
+            "#MCPilerConfirmedRevisions\t2\tE3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855\n");
+
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "confirmed-revisions", "reset",
+                "--file-store-root", Store(),
+                "--runtime-state-root", stateRoot,
+                "--runtime-state-key-file", keyFile,
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.NotEqual(ExitCodes.Configuration, outcome.ExitCode);
+        Assert.True(File.Exists(journal));
+    }
+
+    // R17.3: without the runtime-state options there is nothing the reset could act on. It must refuse with
+    // the configuration code and name both options, never report "nothing to reset" for an unconfigured
+    // store, and leave any journal untouched.
+    [Fact]
+    public async Task Confirmed_revisions_reset_without_runtime_state_refuses_and_names_the_options()
+    {
+        string stateRoot = Path.Combine(_root, "state-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateRoot);
+        File.WriteAllBytes(keyFile, new byte[32]);
+        string journal = Path.Combine(stateRoot, "confirmed-revisions.txt");
+        File.WriteAllBytes(journal, []);
+        byte[] before = await File.ReadAllBytesAsync(journal, TestContext.Current.CancellationToken);
+
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            ["confirmed-revisions", "reset", "--file-store-root", Store()],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
+        Assert.Contains("--runtime-state-root", outcome.Output, StringComparison.Ordinal);
+        Assert.Contains("--runtime-state-key-file", outcome.Output, StringComparison.Ordinal);
+        Assert.Equal(before, await File.ReadAllBytesAsync(journal, TestContext.Current.CancellationToken));
+    }
+
+    // R17.3: with configured runtime state and no journal on disk the existing success message stays.
+    [Fact]
+    public async Task Confirmed_revisions_reset_with_no_journal_still_reports_nothing_to_reset()
+    {
+        string stateRoot = Path.Combine(_root, "state-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateRoot);
+        File.WriteAllBytes(keyFile, new byte[32]);
+
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "confirmed-revisions", "reset",
+                "--file-store-root", Store(),
+                "--runtime-state-root", stateRoot,
+                "--runtime-state-key-file", keyFile,
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Success, outcome.ExitCode);
+        Assert.Contains("nothing to reset", outcome.Output, StringComparison.Ordinal);
     }
 
     private static async Task<FileHandleReference> IssueAsync(string root, string payload, TimeSpan? lifetime = null)
