@@ -1758,7 +1758,67 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         Assert.Equal(1, confirmed.Revision);
     }
 
+    // P1-B: a slot whose durable record was unreadable must not be treated as reconciled when a later
+    // read returns null during operator repair; it stays pending until the record is read again.
+    [Fact]
+    public async Task A_recovery_read_error_is_not_resolved_by_a_transient_null_record()
+    {
+        string stateRoot = Path.Combine(_root, "state-nullrecovery-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-nullrecovery-" + Guid.NewGuid().ToString("N"));
+
+        (ManagedGenerationLoader loader, FileMutableSlotStore slots) =
+            await OpenLoaderWithStateAsync(stateRoot, keyFile);
+
+        ManagedGenerationLoad loaded = loader.Load(DirectDelivery(
+            "g1",
+            TwoSlotRotatableRefreshSurface(new Uri("https://api.example.com/")),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["MANAGED_CLIENT_SECRET"] = "client-secret-canary",
+                ["MANAGED_REFRESH_TOKEN"] = "declared-refresh",
+            }));
+        Assert.True(loaded.Succeeded);
+        IReadOnlyList<MountedManifest> mounts = loaded.Generation!.Mounts;
+
+        var reported = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        var rotations = new RotationNotification((_, _, slot, _, _, _, _) =>
+        {
+            reported.Enqueue(slot);
+            return ValueTask.CompletedTask;
+        });
+
+        // The refreshToken record is corrupt, so the first pass reads a failure and marks the slot unresolved.
+        File.WriteAllBytes(
+            SlotRecordPath(stateRoot, "oauth2-authorization-code-pkce-refresh", "refreshToken"),
+            [0x01, 0x02, 0x03]);
+
+        var failed = await loader.ReplayDurableRotationsBatchAsync(
+            mounts, rotations, startIndex: 0, maxSlots: 10, TestContext.Current.CancellationToken);
+        Assert.True(failed.Incomplete);
+        Assert.True(loader.HasUnresolvedRecoverySlotsForTest);
+
+        // Operator repair step 1: delete the corrupt record. A read in the gap returns null; the batch must
+        // stay incomplete and nothing may be reported for the slot.
+        File.Delete(SlotRecordPath(stateRoot, "oauth2-authorization-code-pkce-refresh", "refreshToken"));
+
+        var gap = await loader.ReplayDurableRotationsBatchAsync(
+            mounts, rotations, startIndex: 0, maxSlots: 10, TestContext.Current.CancellationToken);
+        Assert.True(gap.Incomplete);
+        Assert.Empty(reported);
+
+        // Operator repair step 2: write the correct record. The next pass reads it and reconciles the slot.
+        await slots.ReplaceAsync(
+            new MutableSlotRecord("oauth2-authorization-code-pkce-refresh", "refreshToken", null, 1, 1, "v-refresh"),
+            TestContext.Current.CancellationToken);
+
+        var restored = await loader.ReplayDurableRotationsBatchAsync(
+            mounts, rotations, startIndex: 0, maxSlots: 10, TestContext.Current.CancellationToken);
+        Assert.False(restored.Incomplete);
+        Assert.Contains("refreshToken", reported);
+    }
+
     // R13.1: an unreadable confirmation journal must defer the slot, not base a report on the declared
+
     // revision (which the Platform would refuse as a mismatch).
     [Fact]
     public async Task A_replay_defers_a_slot_while_the_confirmation_journal_is_unreadable()

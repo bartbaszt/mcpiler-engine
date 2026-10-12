@@ -206,6 +206,16 @@ public sealed class ManagedGenerationLoader : IDisposable
     private readonly ConfirmedRevisionStore? _confirmed;
     private bool _disposed;
 
+    /// <summary>
+    /// Slots whose durable record could not be read during a recovery replay. A later null read for such a
+    /// slot is not a completed recovery: the record may be momentarily absent while an operator repairs it.
+    /// The slot stays unresolved until a read succeeds (and the record is evaluated) or the process restarts
+    /// (P1-B, R10.2/R11.1).
+    /// </summary>
+    private readonly HashSet<(string Mount, string ProfileId, string Slot)> _unresolvedRecoverySlots = new();
+
+    private readonly object _unresolvedRecoveryGate = new();
+
     private ManagedGenerationLoader(
         RuntimeOptions options,
         OutboundConnectionPolicy connections,
@@ -782,13 +792,31 @@ public sealed class ManagedGenerationLoader : IDisposable
                 // An unreadable record is left for a later reconciliation attempt, exactly as the live path
                 // does; replaying an invented value would be worse than silence. The batch is marked
                 // incomplete so the caller does not treat this pass as a completed recovery while a locally
-                // held credential was never reconciled (R10.2).
+                // held credential was never reconciled (R10.2). The slot identity is remembered so a later
+                // transient absence of its record is not mistaken for a completed recovery (P1-B).
+                MarkRecoverySlotUnresolved(candidate.Mount, candidate.ProfileId, candidate.Slot);
                 incomplete = true;
                 continue;
             }
 
-            if (record is null
-                || record.AuthorityEpoch != candidate.AuthorityEpoch
+            if (record is null)
+            {
+                if (IsRecoverySlotUnresolved(candidate.Mount, candidate.ProfileId, candidate.Slot))
+                {
+                    // A slot whose durable record could not be read is not resolved by a null read: the
+                    // record can be momentarily absent while an operator repairs it, and treating that as
+                    // "nothing to reconcile" would let recovery complete while a restored, unreconciled
+                    // rotation still diverges from the Platform (P1-B). It stays pending until the record is
+                    // read again (and reconciled) or an explicit terminal operation clears it.
+                    incomplete = true;
+                }
+
+                continue;
+            }
+
+            ClearRecoverySlotUnresolved(candidate.Mount, candidate.ProfileId, candidate.Slot);
+
+            if (record.AuthorityEpoch != candidate.AuthorityEpoch
                 || record.RuntimeRevision <= candidate.DeclaredRevision)
             {
                 continue;
@@ -844,6 +872,42 @@ public sealed class ManagedGenerationLoader : IDisposable
 
         var next = start + processed;
         return new DurableReplayBatch(next >= candidates.Count ? null : next, incomplete);
+    }
+
+    private void MarkRecoverySlotUnresolved(string mount, string profileId, string slot)
+    {
+        lock (_unresolvedRecoveryGate)
+        {
+            _unresolvedRecoverySlots.Add((mount, profileId, slot));
+        }
+    }
+
+    private bool IsRecoverySlotUnresolved(string mount, string profileId, string slot)
+    {
+        lock (_unresolvedRecoveryGate)
+        {
+            return _unresolvedRecoverySlots.Contains((mount, profileId, slot));
+        }
+    }
+
+    private void ClearRecoverySlotUnresolved(string mount, string profileId, string slot)
+    {
+        lock (_unresolvedRecoveryGate)
+        {
+            _unresolvedRecoverySlots.Remove((mount, profileId, slot));
+        }
+    }
+
+    /// <summary>Test seam: whether any recovery slot is currently unresolved after a read failure.</summary>
+    internal bool HasUnresolvedRecoverySlotsForTest
+    {
+        get
+        {
+            lock (_unresolvedRecoveryGate)
+            {
+                return _unresolvedRecoverySlots.Count > 0;
+            }
+        }
     }
 
     /// <summary>
