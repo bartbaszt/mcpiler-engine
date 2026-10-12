@@ -600,6 +600,140 @@ public sealed class IntrospectionTokenValidatorTests
         Assert.True(content.BytesPulled < total, "the producer must not have been fully drained");
     }
 
+    [Fact]
+    public async Task Zero_ttl_admission_is_bounded_and_overflow_is_refused_without_a_call()
+    {
+        // MTH-RUN-2: disabling result caching and single-flight must not disable load control. A
+        // TTL=0 flood of distinct tokens is bounded by the producer admission, and the overflow is
+        // refused immediately, fail-closed, with no HTTP call.
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new StubHandler(async (_, cancellationToken) =>
+        {
+            await gate.Task.WaitAsync(cancellationToken);
+            return ActiveResponse(Now.AddMinutes(5));
+        });
+        using var client = new HttpClient(handler);
+        var validator = CreateValidator(client, new FakeTimeProvider(Now), ttlSeconds: 0);
+
+        List<Task<TokenVerification>> held = [];
+        for (int index = 0; index < IntrospectionTokenValidator.MaximumInFlight; index++)
+        {
+            held.Add(validator.ValidateAsync($"zero-held-{index}", TestContext.Current.CancellationToken));
+        }
+
+        for (var attempt = 0; attempt < 200 && validator.AdmittedInFlightCount < IntrospectionTokenValidator.MaximumInFlight; attempt++)
+        {
+            await Task.Delay(5, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(IntrospectionTokenValidator.MaximumInFlight, validator.AdmittedInFlightCount);
+        int callsAtBound = handler.Calls;
+        Assert.Equal(IntrospectionTokenValidator.MaximumInFlight, callsAtBound);
+
+        TokenVerification overflow = await validator.ValidateAsync("zero-overflow", TestContext.Current.CancellationToken);
+        Assert.False(overflow.Active);
+        Assert.Equal(callsAtBound, handler.Calls);
+
+        gate.SetResult();
+        await Task.WhenAll(held);
+        Assert.All(held, task => Assert.True(task.Result.Active));
+
+        for (var attempt = 0; attempt < 200 && validator.AdmittedInFlightCount != 0; attempt++)
+        {
+            await Task.Delay(5, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(0, validator.AdmittedInFlightCount);
+    }
+
+    [Fact]
+    public async Task Zero_ttl_cancellation_stops_the_started_introspection()
+    {
+        // MTH-RUN-2: the TTL=0 operation is dedicated to the caller, so its cancellation token must
+        // reach the HTTP call: a cancelled request stops the introspection it started instead of
+        // leaving it running detached.
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var observedCancellation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new StubHandler(async (_, cancellationToken) =>
+        {
+            started.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                observedCancellation.TrySetResult();
+                throw;
+            }
+
+            return ActiveResponse(Now.AddMinutes(5));
+        });
+        using var client = new HttpClient(handler);
+        var validator = CreateValidator(client, new FakeTimeProvider(Now), ttlSeconds: 0);
+
+        using var cancellation = new CancellationTokenSource();
+        Task<TokenVerification> pending = validator.ValidateAsync("zero-cancel", cancellation.Token);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        cancellation.Cancel();
+
+        try
+        {
+            await pending;
+            Assert.Fail("The cancelled TTL=0 request should observe cancellation.");
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected: the caller observes cancellation and the started call was aborted with it.
+        }
+
+        await observedCancellation.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        for (var attempt = 0; attempt < 200 && validator.AdmittedInFlightCount != 0; attempt++)
+        {
+            await Task.Delay(5, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(0, validator.AdmittedInFlightCount);
+    }
+
+    [Fact]
+    public async Task Waiters_on_a_single_flight_are_bounded_per_token()
+    {
+        // MTH-RUN-2: the producer bound limits distinct keys, not the callers waiting on one key. A
+        // slow issuer must not retain an unbounded waiter set on a single token; the overflow is
+        // refused immediately, fail-closed, without joining the flight.
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new StubHandler(async (_, cancellationToken) =>
+        {
+            await gate.Task.WaitAsync(cancellationToken);
+            return ActiveResponse(Now.AddMinutes(5));
+        });
+        using var client = new HttpClient(handler);
+        var validator = CreateValidator(client, new FakeTimeProvider(Now), ttlSeconds: 30);
+
+        Task<TokenVerification> producer = validator.ValidateAsync("shared-bounded", TestContext.Current.CancellationToken);
+        await WaitForCallsAsync(handler, 1);
+
+        List<Task<TokenVerification>> waiters = [];
+        for (int index = 0; index < IntrospectionTokenValidator.MaximumWaitersPerToken; index++)
+        {
+            waiters.Add(validator.ValidateAsync("shared-bounded", TestContext.Current.CancellationToken));
+        }
+
+        // The next waiter is refused immediately and does not join the flight or add a call.
+        TokenVerification overflow = await validator.ValidateAsync("shared-bounded", TestContext.Current.CancellationToken);
+        Assert.False(overflow.Active);
+        Assert.Equal(1, handler.Calls);
+
+        gate.SetResult();
+        Assert.True((await producer).Active);
+        TokenVerification[] results = await Task.WhenAll(waiters);
+        Assert.All(results, result => Assert.True(result.Active));
+        Assert.Equal(1, handler.Calls);
+    }
+
     private static IntrospectionTokenValidator CreateValidator(
         HttpClient client,
         TimeProvider clock,

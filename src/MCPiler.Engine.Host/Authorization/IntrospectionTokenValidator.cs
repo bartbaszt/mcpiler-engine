@@ -43,11 +43,18 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
     /// </remarks>
     internal const int MaximumInFlight = 512;
 
+    /// <summary>
+    /// The most callers that may wait on a single in-flight token's introspection. The producer bound
+    /// (<see cref="MaximumInFlight"/>) limits distinct keys, not the waiters retained behind one slow
+    /// key, so a per-token waiter cap is needed as well (MTH-RUN-2).
+    /// </summary>
+    internal const int MaximumWaitersPerToken = 32;
+
     /// <summary>The most bytes read from an introspection response body before it is refused.</summary>
     internal const int MaximumResponseBodyBytes = 256 * 1024;
 
     private readonly IntrospectionResultCache _cache = new();
-    private readonly ConcurrentDictionary<string, TaskCompletionSource<TokenVerification>> _inFlight = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, IntrospectionFlight> _inFlight = new(StringComparer.Ordinal);
     private readonly HttpClient _client;
     private readonly string _issuer;
     private readonly string? _endpointOverride;
@@ -91,12 +98,24 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
 
         if (_cacheTtlSeconds == 0)
         {
-            // Zero is the explicit "fresh issuer validation per request" mode. It disables
-            // every form of result reuse, including transient per-token single-flight
-            // coalescing between concurrent protected requests.
-            return await ValidateFreshFailClosedAsync(token)
-                .WaitAsync(cancellationToken)
-                .ConfigureAwait(false);
+            // Zero is the explicit "fresh issuer validation per request" mode: it disables every form
+            // of result reuse, including transient per-token single-flight coalescing. It must NOT
+            // disable load control, so a producer admission is still reserved and released around the
+            // call. This operation is dedicated to the caller (never shared), so the caller's
+            // cancellation token reaches the HTTP call and a cancelled request stops it (MTH-RUN-2).
+            if (!TryAdmitProducer())
+            {
+                return TokenVerification.Inactive;
+            }
+
+            try
+            {
+                return await ValidateFreshFailClosedAsync(token, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                ReleaseProducer();
+            }
         }
 
         string key = Digest(token);
@@ -110,61 +129,98 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
         // atomically before it publishes a coalescing entry, so a concurrent burst cannot overshoot
         // the bound. A caller that cannot reserve is refused immediately and fail-closed: it makes
         // no HTTP call and is not retained as a waiter, so the map and its task state stay bounded.
-        if (!_inFlight.TryGetValue(key, out TaskCompletionSource<TokenVerification>? existing))
+        if (!_inFlight.TryGetValue(key, out IntrospectionFlight? flight))
         {
-            if (Interlocked.Increment(ref _admittedInFlight) > MaximumInFlight)
+            if (!TryAdmitProducer())
             {
-                Interlocked.Decrement(ref _admittedInFlight);
                 return TokenVerification.Inactive;
             }
 
-            TaskCompletionSource<TokenVerification> candidate = new(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            existing = _inFlight.GetOrAdd(key, candidate);
+            IntrospectionFlight candidate = new();
+            flight = _inFlight.GetOrAdd(key, candidate);
 
-            if (ReferenceEquals(candidate, existing))
+            if (ReferenceEquals(candidate, flight))
             {
-                _ = CompleteSingleFlightAsync(key, token, candidate);
+                _ = CompleteSingleFlightAsync(key, token, flight);
+                // The producer observes its own flight through the same completion; it consumes no
+                // waiter slot because it is bounded by the producer admission above.
+                return await flight.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
-            else
-            {
-                // Lost a race for the same key: join the existing flight and release the slot.
-                Interlocked.Decrement(ref _admittedInFlight);
-            }
+
+            // Lost a race for the same key: release the producer slot and join the existing flight.
+            ReleaseProducer();
         }
 
-        return await existing.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        // A caller joining an existing flight is bounded per token, independently of the producer
+        // bound: a slow issuer must not retain an unbounded waiter set on one key (MTH-RUN-2). A caller
+        // beyond the bound is refused immediately and is not retained.
+        if (!flight.TryReserveWaiter())
+        {
+            return TokenVerification.Inactive;
+        }
+
+        try
+        {
+            return await flight.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            flight.ReleaseWaiter();
+        }
     }
+
+    private bool TryAdmitProducer()
+    {
+        if (Interlocked.Increment(ref _admittedInFlight) > MaximumInFlight)
+        {
+            Interlocked.Decrement(ref _admittedInFlight);
+            return false;
+        }
+
+        return true;
+    }
+
+    private void ReleaseProducer() => Interlocked.Decrement(ref _admittedInFlight);
 
     private async Task CompleteSingleFlightAsync(
         string key,
         string token,
-        TaskCompletionSource<TokenVerification> completion)
+        IntrospectionFlight flight)
     {
         try
         {
-            TokenVerification verification = await ValidateFreshFailClosedAsync(token).ConfigureAwait(false);
+            // The shared operation is deliberately independent of any one waiter's cancellation token
+            // (CancellationToken.None): a cancelled waiter must not abort validation observed by other
+            // waiters on the same key.
+            TokenVerification verification = await ValidateFreshFailClosedAsync(token, CancellationToken.None).ConfigureAwait(false);
             CacheIfAllowed(key, verification);
-            completion.TrySetResult(verification);
+            flight.Completion.TrySetResult(verification);
         }
         catch
         {
             // Keep the shared authorization operation fail-closed even if local cache bookkeeping
             // fails unexpectedly; no waiter may be left pinned on an incomplete shared task.
-            completion.TrySetResult(TokenVerification.Inactive);
+            flight.Completion.TrySetResult(TokenVerification.Inactive);
         }
         finally
         {
-            _inFlight.TryRemove(new KeyValuePair<string, TaskCompletionSource<TokenVerification>>(key, completion));
-            Interlocked.Decrement(ref _admittedInFlight);
+            _inFlight.TryRemove(new KeyValuePair<string, IntrospectionFlight>(key, flight));
+            ReleaseProducer();
         }
     }
 
-    private async Task<TokenVerification> ValidateFreshFailClosedAsync(string token)
+    private async Task<TokenVerification> ValidateFreshFailClosedAsync(string token, CancellationToken cancellationToken)
     {
         try
         {
-            return await ValidateFreshAsync(token, CancellationToken.None).ConfigureAwait(false);
+            return await ValidateFreshAsync(token, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // The request's own cancellation fired: the caller must observe cancellation and the
+            // started issuer call is aborted with it, rather than being reported as a silent
+            // fail-closed inactive verdict.
+            throw;
         }
         catch (Exception failure) when (failure is HttpRequestException or JsonException or TaskCanceledException)
         {
@@ -249,6 +305,13 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
                 Audience: ReadString(root, "aud"),
                 Scopes: ReadScopes(root),
                 ExpiresAt: ReadFutureExpiration(root, _clock.GetUtcNow()));
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // The caller cancelled this operation; propagate rather than masking it as an inactive
+            // verdict, so a cancelled request observes cancellation (the shared single-flight path
+            // passes CancellationToken.None and is unaffected).
+            throw;
         }
         catch (Exception failure) when (failure is HttpRequestException or JsonException or TaskCanceledException)
         {
@@ -439,6 +502,38 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
         }
 
         return [.. declared.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)];
+    }
+
+    /// <summary>
+    /// One in-flight introspection for a single token digest: a shared completion plus a bounded
+    /// waiter reservation, so a slow issuer cannot retain an unbounded number of callers on one key
+    /// (MTH-RUN-2).
+    /// </summary>
+    private sealed class IntrospectionFlight
+    {
+        private int _waiters;
+
+        internal TaskCompletionSource<TokenVerification> Completion { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal bool TryReserveWaiter()
+        {
+            while (true)
+            {
+                int current = Volatile.Read(ref _waiters);
+                if (current >= MaximumWaitersPerToken)
+                {
+                    return false;
+                }
+
+                if (Interlocked.CompareExchange(ref _waiters, current + 1, current) == current)
+                {
+                    return true;
+                }
+            }
+        }
+
+        internal void ReleaseWaiter() => Interlocked.Decrement(ref _waiters);
     }
 }
 
