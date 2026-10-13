@@ -81,6 +81,24 @@ must be justified. Engine's dependency graph is intentionally small.
 
 ## Quality gates
 
+Before committing, install the repo-local BetterLeaks 1.9.0 hook once:
+
+```bash
+git config --local core.hooksPath .githooks
+```
+
+The hook calls `bash eng/check-secrets.sh --staged` and checks the staged diff for
+potential credentials. You can also scan all accessible Git history with
+`bash eng/check-secrets.sh --history`. The scanner must be on `PATH`; credentials
+are redacted in its output and no online credential validation is performed.
+The `Secret scanning` GitHub Actions workflow repeats the complete history scan
+on each PR and push to main. It is independent of the private Platform repository.
+
+The four reviewed fixture findings in `.betterleaksignore` are pinned to their
+original commit, path, rule and line: the fake userinfo URI, two response-cache
+fingerprints, and the dedicated RSA signing test key. New findings are not
+automatically accepted; do not disable scanning for `tests/` as a whole.
+
 ```bash
 dotnet build MCPiler.Engine.slnx -c Release
 bash eng/verify-source.sh
