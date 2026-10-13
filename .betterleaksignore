@@ -1,0 +1,10 @@
+# Reviewed findings from the existing public-intended Engine history.
+# Fingerprints bind each exception to its original commit, path, rule, and line;
+# new matches in other commits or files must still fail the security gate.
+# Intentionally invalid external-resource URI with fake userinfo (.test domain).
+7110c5381d8af9a5d238b653d82aa7b9cfb70530:tests/MCPiler.Engine.IntegrationTests/Configuration/HostConfigurationTests.cs:generic-credential-uri:266
+# Two synthetic response-cache fingerprint fields (not API credentials).
+0eaa3c386e0cdff9b49b5fa44619fcf33d563187:tests/fixtures/response-cache/operator-v1.json:generic-api-key:16
+0eaa3c386e0cdff9b49b5fa44619fcf33d563187:tests/fixtures/response-cache/operator-v1.json:generic-api-key:28
+# Dedicated OAuth 1.0a RSA-SHA1 signing fixture, not a production key.
+09c3e0629c86a7a4e0fc46845797f71456bad424:tests/fixtures/oauth1/jira-rsa-test-private.pem:private-key:1

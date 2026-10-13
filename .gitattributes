@@ -1,4 +1,6 @@
 *.sh text eol=lf
+.githooks/* text eol=lf
+.betterleaksignore text eol=lf
 THIRD-PARTY-NOTICES.md text eol=lf
 
 # Release evidence read by LF-sensitive gates. Engine's changelog readers normalize line endings
