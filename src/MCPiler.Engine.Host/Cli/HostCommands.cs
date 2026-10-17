@@ -44,16 +44,29 @@ public static class HostCommands
     /// its startup and then blocks, so an operator who only saw the returned output would
     /// learn what happened at start only once the process had stopped.
     /// </param>
+    /// <param name="outcomes">
+    /// Where the <c>auth</c> verbs record their sanitized outcomes. Defaults to the process-wide
+    /// buffer, which is what a real invocation uses; a test supplies its own so it can read back
+    /// exactly what one invocation recorded.
+    /// </param>
+    /// <param name="timeProvider">
+    /// The clock the authorization attempt is created against. Defaults to the system clock; a
+    /// test supplies its own so it can place an attempt's lifetime boundary where it can observe
+    /// the expiry outcome without waiting for it.
+    /// </param>
     public static async Task<CommandOutcome> RunAsync(
         IReadOnlyList<string> args,
         string identity,
         CancellationToken cancellationToken,
-        TextWriter? progress = null)
+        TextWriter? progress = null,
+        AuthorizationOutcomeLog? outcomes = null,
+        TimeProvider? timeProvider = null)
     {
         ArgumentNullException.ThrowIfNull(args);
         ArgumentException.ThrowIfNullOrEmpty(identity);
 
         CommandLineResult parsed = CommandLine.Parse(args);
+        AuthorizationOutcomeLog log = outcomes ?? AuthorizationOutcomeLog.Shared;
 
         if (!parsed.Valid)
         {
@@ -78,6 +91,26 @@ public static class HostCommands
                 CompatibilityDescriptor.EngineSupport().ToCanonicalJson()),
             HostVerb.Serve => await ServeAsync(parsed, identity, progress, cancellationToken).ConfigureAwait(false),
             HostVerb.Inspect => await InspectAsync(parsed, identity, cancellationToken).ConfigureAwait(false),
+            HostVerb.AuthAuthorize => parsed.OAuthOperatorEndpoint is { Length: > 0 }
+                ? await OAuthOperatorRelayCommands
+                    .AuthorizeAsync(parsed, identity, progress, log, cancellationToken)
+                    .ConfigureAwait(false)
+                : await OAuthAuthorizationCommands
+                    .AuthorizeAsync(parsed, identity, progress, log, timeProvider, cancellationToken)
+                    .ConfigureAwait(false),
+            HostVerb.AuthStatus => await OAuthAuthorizationCommands
+                .StatusAsync(parsed, identity, log, cancellationToken)
+                .ConfigureAwait(false),
+            HostVerb.AuthClear => await OAuthAuthorizationCommands
+                .ClearAsync(parsed, identity, log, cancellationToken)
+                .ConfigureAwait(false),
+            HostVerb.AuthEvents => await OAuthAuthorizationCommands
+                .EventsAsync(parsed, identity, log, cancellationToken)
+                .ConfigureAwait(false),
+            HostVerb.AuthAuthorityReset => await OAuthAuthorizationCommands
+                .ResetAsync(parsed, identity, log, cancellationToken)
+                .ConfigureAwait(false),
+            HostVerb.IssuerReadiness => await IssuerReadinessProbeAsync(parsed, identity, cancellationToken).ConfigureAwait(false),
             HostVerb.ConfirmedRevisionsReset => await ResetConfirmedRevisionsAsync(parsed, identity, cancellationToken).ConfigureAwait(false),
             _ => await FilesAsync(parsed, cancellationToken).ConfigureAwait(false),
         };
@@ -104,6 +137,18 @@ public static class HostCommands
             return refused;
         }
 
+        // Keep this OS handle open until all listeners and mutable runtime work
+        // have drained. Claim ownership before opening the key/store or contacting
+        // a provider, for both standalone and managed processes using this root.
+        if (!EngineRuntime.TryAcquireRuntimeStateOwner(
+                binding.Runtime.RuntimeStateRoot, out IDisposable? stateOwner, out string? ownerRefusal))
+        {
+            return new CommandOutcome(ExitCodes.Configuration,
+                identity + Environment.NewLine + ownerRefusal + Environment.NewLine);
+        }
+
+        using var runtimeStateOwner = stateOwner;
+
         if (binding.Mode is HostDeploymentMode.Managed)
         {
             // Managed mode has no local generation yet, so validate the authorization settings
@@ -128,7 +173,11 @@ public static class HostCommands
 
         RuntimeStartResult result = EngineRuntime.Start(
             binding.Runtime with { ExpressionValidator = expressions, ProjectionWorker = expressions });
-        string report = identity + Environment.NewLine + StartupReport.Render(result, binding.Authorization, binding.ResponseCacheOperatorSecret is not null);
+        string report = identity + Environment.NewLine + StartupReport.Render(
+            result,
+            binding.Authorization,
+            binding.ResponseCacheOperatorSecret is not null,
+            binding.OAuthOperatorSecret is not null);
 
         if (!result.Started)
         {
@@ -524,6 +573,35 @@ public static class HostCommands
         return new CommandOutcome(ExitCodes.Configuration, text.ToString());
     }
 
+    /// <summary>
+    /// Runs the explicit, operator-only issuer readiness probe (IDP-2).
+    /// </summary>
+    /// <remarks>
+    /// The verb is deliberately its own command rather than a flag on <c>inspect</c>: inspection
+    /// answers what would be served, and readiness answers whether the configured issuer can be
+    /// reached and trusted right now. Neither answer may silently become the other. The probe binds
+    /// the same deployment settings every verb binds, opens no listener, takes no store-root lease,
+    /// reads no Manifest and changes no authorization policy.
+    /// </remarks>
+    private static async Task<CommandOutcome> IssuerReadinessProbeAsync(
+        CommandLineResult parsed,
+        string identity,
+        CancellationToken cancellationToken)
+    {
+        if (!Bind(parsed, out HostBinding binding, out CommandOutcome refused))
+        {
+            return refused;
+        }
+
+        IssuerReadinessReport report = await IssuerReadiness
+            .ProbeAsync(binding.Authorization, cancellationToken)
+            .ConfigureAwait(false);
+
+        return new CommandOutcome(
+            IssuerReadiness.ExitCode(report.Category),
+            identity + Environment.NewLine + IssuerReadiness.Render(report));
+    }
+
     private static async Task<CommandOutcome> InspectAsync(
         CommandLineResult parsed,
         string identity,
@@ -550,7 +628,10 @@ public static class HostCommands
         {
             return new CommandOutcome(
                 StartupReport.ExitCode(result),
-                identity + Environment.NewLine + StartupReport.Render(result, operatorChannelConfigured: binding.ResponseCacheOperatorSecret is not null));
+                identity + Environment.NewLine + StartupReport.Render(
+                    result,
+                    operatorChannelConfigured: binding.ResponseCacheOperatorSecret is not null,
+                    oauthOperatorChannelConfigured: binding.OAuthOperatorSecret is not null));
         }
 
         if (!TryValidateExternalResources(result, binding.ExternalResources, out IReadOnlyList<string>? externalResourceRefusals))
@@ -568,7 +649,10 @@ public static class HostCommands
 
         StringBuilder text = new(identity);
         text.AppendLine();
-        text.Append(StartupReport.Render(result, operatorChannelConfigured: binding.ResponseCacheOperatorSecret is not null));
+        text.Append(StartupReport.Render(
+            result,
+            operatorChannelConfigured: binding.ResponseCacheOperatorSecret is not null,
+            oauthOperatorChannelConfigured: binding.OAuthOperatorSecret is not null));
 
         bool unstartable = false;
 
@@ -720,7 +804,7 @@ List<StartupRefusal> refusals = [.. HostRouteTopologyValidation.Find(mounts)];
             + $"scan={handle.ScanVerdict} signature={handle.SignatureVerdict} "
             + $"state={(handle.Expired ? "expired" : handle.ContentPresent ? "available" : "content-absent")}");
 
-    private static bool Bind(
+    internal static bool Bind(
         CommandLineResult parsed,
         out HostBinding binding,
         out CommandOutcome refused)

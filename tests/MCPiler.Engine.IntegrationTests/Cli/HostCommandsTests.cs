@@ -1,7 +1,12 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Http;
+using System.Net.Sockets;
+using System.Text;
 using System.Text.Json.Nodes;
+using System.Threading;
 using System.Threading.Tasks;
 
 using MCPiler.Engine.Execution;
@@ -19,6 +24,7 @@ namespace MCPiler.Engine.IntegrationTests.Cli;
 /// <summary>
 /// The operator surface end to end: what each verb reports and what it exits with.
 /// </summary>
+[Collection(AuthorizationCommandCollection.Name)]
 public sealed class HostCommandsTests : IDisposable
 {
     private const string Identity = "mcpiler-engine test (manifest format 0.2)";
@@ -1442,6 +1448,425 @@ public sealed class HostCommandsTests : IDisposable
                     "slug": "list-pets",
                     "name": "List pets",
                     "binding": { "type": "http", "operation": "GET /pets" }
+                  }
+                ]
+              }
+            }
+          }
+        }
+        """;
+
+    // ST-1/ST-5: managed deployments are Platform-owned, so a local 'auth authorize' is refused before
+    // anything is bound, and the operator is pointed at the managed surface instead.
+    [Fact]
+    public async Task Authorize_in_managed_mode_is_refused_before_binding()
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "auth", "authorize", "/api", "oauth",
+                "--mode", "managed",
+                "--oauth-redirect-uri", "http://127.0.0.1:57431/oauth/callback",
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
+        Assert.Contains("managed mode", outcome.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Reauthorize", outcome.Output, StringComparison.Ordinal);
+    }
+
+    // ST-2a: the callback URI is explicit operator input, never inferred, because the provider must
+    // have the exact URI registered. A missing one is a configuration refusal that names the option.
+    [Fact]
+    public async Task Authorize_without_a_redirect_uri_is_refused_by_name()
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "auth", "authorize", "/api", "oauth",
+                "--file-store-root", Store(),
+                "--mount", "/api=" + AuthorizeManifest("oauth-no-redirect"),
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
+        Assert.Contains("--oauth-redirect-uri", outcome.Output, StringComparison.Ordinal);
+    }
+
+    // ST-3: durability is the point, so a deployment without a runtime-state store is refused and
+    // told which options supply one, rather than appearing to authorize into memory.
+    [Fact]
+    public async Task Authorize_without_runtime_state_is_refused_by_name()
+    {
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "auth", "authorize", "/api", "oauth",
+                "--oauth-redirect-uri", "http://127.0.0.1:57431/oauth/callback",
+                "--file-store-root", Store(),
+                "--mount", "/api=" + AuthorizeManifest("oauth-no-state"),
+            ],
+            Identity,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
+        Assert.Contains("--runtime-state-root", outcome.Output, StringComparison.Ordinal);
+        Assert.Contains("--runtime-state-key-file", outcome.Output, StringComparison.Ordinal);
+    }
+
+    // ST-2b: a wrong target is refused while the command still holds the lease and before it opens
+    // the listener or contacts the provider, so no port is exposed and nothing upstream changes.
+    [Fact]
+    public async Task Authorize_refuses_an_unknown_profile_before_opening_a_listener()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        string stateRoot = Path.Combine(_root, "state-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateRoot);
+        File.WriteAllBytes(keyFile, new byte[32]);
+
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "auth", "authorize", "/api", "no-such-profile",
+                "--oauth-redirect-uri", "http://127.0.0.1:57431/oauth/callback",
+                "--file-store-root", Store(),
+                "--runtime-state-root", stateRoot,
+                "--runtime-state-key-file", keyFile,
+                "--mount", "/api=" + AuthorizeManifest("oauth-unknown-profile"),
+            ],
+            Identity,
+            cancellationToken);
+
+        Assert.Equal(ExitCodes.Configuration, outcome.ExitCode);
+        Assert.Contains("standalone/unknown-profile", outcome.Output, StringComparison.Ordinal);
+    }
+
+    // ST-2/ST-4: the operator-visible lifecycle. The command presents one authorization URL, admits a
+    // single callback, reports a stable non-secret refusal for a provider denial, and closes the
+    // listener so the process leaves no port bound.
+    [Fact]
+    public async Task Authorize_presents_a_url_completes_a_denied_callback_and_closes_the_listener()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        int port = LoopbackPorts.Reserve();
+        string redirect = $"http://127.0.0.1:{port}/oauth/callback";
+        string stateRoot = Path.Combine(_root, "state-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateRoot);
+        File.WriteAllBytes(keyFile, new byte[32]);
+
+        using var progress = new CapturingTextWriter();
+        Task<CommandOutcome> run = HostCommands.RunAsync(
+            [
+                "auth", "authorize", "/api", "oauth",
+                "--oauth-redirect-uri", redirect,
+                "--file-store-root", Store(),
+                "--runtime-state-root", stateRoot,
+                "--runtime-state-key-file", keyFile,
+                "--mount", "/api=" + AuthorizeManifest("oauth-denied"),
+            ],
+            Identity,
+            cancellationToken,
+            progress);
+
+        string authorizationUrl = await progress.AuthorizationUrl.WaitAsync(TimeSpan.FromSeconds(15), cancellationToken);
+        string state = QueryValue(new Uri(authorizationUrl), "state");
+
+        using var client = new HttpClient();
+        using HttpResponseMessage callback = await client.GetAsync(
+            new Uri($"{redirect}?error=access_denied&state={Uri.EscapeDataString(state)}"),
+            cancellationToken);
+
+        Assert.True(callback.IsSuccessStatusCode, "The callback listener must accept the registered redirect.");
+
+        CommandOutcome outcome = await run;
+
+        Assert.Equal(ExitCodes.Failure, outcome.ExitCode);
+        Assert.Contains("oauth/provider-denied", outcome.Output, StringComparison.Ordinal);
+        Assert.Contains("Nothing was changed", outcome.Output, StringComparison.Ordinal);
+
+        using var probe = new TcpListener(IPAddress.Loopback, port);
+        probe.Start();
+        probe.Stop();
+    }
+
+    // ST-1: the real entry point, in its own process with no Platform available, runs the whole
+    // presented-attempt lifecycle and reports a stable refusal for a denial.
+    [Fact]
+    public async Task Authorize_subprocess_completes_a_denied_callback_and_closes_the_listener()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        int port = LoopbackPorts.Reserve();
+        string redirect = $"http://127.0.0.1:{port}/oauth/callback";
+        string stateRoot = Path.Combine(_root, "state-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateRoot);
+        File.WriteAllBytes(keyFile, new byte[32]);
+
+        await using EngineCliProcess child = EngineCliProcess.Start(
+            "auth", "authorize", "/api", "oauth",
+            "--oauth-redirect-uri", redirect,
+            "--file-store-root", Store(),
+            "--runtime-state-root", stateRoot,
+            "--runtime-state-key-file", keyFile,
+            "--mount", "/api=" + AuthorizeManifest("oauth-subprocess"));
+
+        string authorizationUrl = await child.WaitForStderrLineAsync("authorize?", cancellationToken);
+        string state = QueryValue(new Uri(authorizationUrl.Trim()), "state");
+
+        using var client = new HttpClient();
+        using HttpResponseMessage callback = await client.GetAsync(
+            new Uri($"{redirect}?error=access_denied&state={Uri.EscapeDataString(state)}"),
+            cancellationToken);
+
+        Assert.True(callback.IsSuccessStatusCode, "The callback listener must accept the registered redirect.");
+
+        EngineCliOutcome outcome = await child.CompleteAsync(cancellationToken);
+
+        Assert.Equal(ExitCodes.Failure, outcome.ExitCode);
+        Assert.Contains("oauth/provider-denied", outcome.Stdout, StringComparison.Ordinal);
+
+        using var probe = new TcpListener(IPAddress.Loopback, port);
+        probe.Start();
+        probe.Stop();
+    }
+
+    // ST-2/ST-4: the operator interrupts the wait before any callback arrives. The command reports
+    // one actionable, non-secret terminal outcome and closes the listener, so the port is free for
+    // the next attempt and nothing was written.
+    [Fact]
+    public async Task Authorize_reports_cancellation_and_closes_the_listener()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        int port = LoopbackPorts.Reserve();
+        string redirect = $"http://127.0.0.1:{port}/oauth/callback";
+        string stateRoot = Path.Combine(_root, "state-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateRoot);
+        File.WriteAllBytes(keyFile, new byte[32]);
+
+        using var progress = new CapturingTextWriter();
+        using var interrupted = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        Task<CommandOutcome> run = HostCommands.RunAsync(
+            [
+                "auth", "authorize", "/api", "oauth",
+                "--oauth-redirect-uri", redirect,
+                "--file-store-root", Store(),
+                "--runtime-state-root", stateRoot,
+                "--runtime-state-key-file", keyFile,
+                "--mount", "/api=" + AuthorizeManifest("oauth-cancelled"),
+            ],
+            Identity,
+            interrupted.Token,
+            progress);
+
+        await progress.AuthorizationUrl.WaitAsync(TimeSpan.FromSeconds(15), cancellationToken);
+
+        interrupted.Cancel();
+
+        CommandOutcome outcome = await run;
+
+        Assert.Equal(ExitCodes.Failure, outcome.ExitCode);
+        Assert.Contains("oauth/attempt-cancelled", outcome.Output, StringComparison.Ordinal);
+        Assert.Contains("Nothing was changed", outcome.Output, StringComparison.Ordinal);
+        Assert.Empty(Directory.GetFiles(stateRoot, "*.rstate", SearchOption.AllDirectories));
+
+        using var probe = new TcpListener(IPAddress.Loopback, port);
+        probe.Start();
+        probe.Stop();
+    }
+
+    // ST-2: an attempt whose lifetime has elapsed reports expiry rather than waiting forever, and
+    // the elapsed attempt changes nothing. The clock is pinned behind the attempt's lifetime, so
+    // the boundary is observed instead of waited for.
+    [Fact]
+    public async Task Authorize_reports_expiry_when_the_attempt_lifetime_has_already_elapsed()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        int port = LoopbackPorts.Reserve();
+        string redirect = $"http://127.0.0.1:{port}/oauth/callback";
+        string stateRoot = Path.Combine(_root, "state-" + Guid.NewGuid().ToString("N"));
+        string keyFile = Path.Combine(_root, "key-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stateRoot);
+        File.WriteAllBytes(keyFile, new byte[32]);
+
+        var elapsed = new FixedClock(DateTimeOffset.UtcNow - TimeSpan.FromMinutes(11));
+        CommandOutcome outcome = await HostCommands.RunAsync(
+            [
+                "auth", "authorize", "/api", "oauth",
+                "--oauth-redirect-uri", redirect,
+                "--file-store-root", Store(),
+                "--runtime-state-root", stateRoot,
+                "--runtime-state-key-file", keyFile,
+                "--mount", "/api=" + AuthorizeManifest("oauth-expired"),
+            ],
+            Identity,
+            cancellationToken,
+            timeProvider: elapsed);
+
+        Assert.Equal(ExitCodes.Failure, outcome.ExitCode);
+        Assert.Contains("oauth/attempt-expired", outcome.Output, StringComparison.Ordinal);
+        Assert.Contains("Nothing was changed", outcome.Output, StringComparison.Ordinal);
+        Assert.Empty(Directory.GetFiles(stateRoot, "*.rstate", SearchOption.AllDirectories));
+
+        using var probe = new TcpListener(IPAddress.Loopback, port);
+        probe.Start();
+        probe.Stop();
+    }
+
+    /// <summary>A pinned clock, so an attempt's lifetime boundary lands where a test can observe it.</summary>
+    private sealed class FixedClock(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
+
+    private static string QueryValue(Uri uri, string name)
+    {
+        foreach (string pair in uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            int equals = pair.IndexOf('=', StringComparison.Ordinal);
+
+            if (equals > 0
+                && string.Equals(Uri.UnescapeDataString(pair[..equals]), name, StringComparison.Ordinal))
+            {
+                return Uri.UnescapeDataString(pair[(equals + 1)..]);
+            }
+        }
+
+        throw new InvalidOperationException($"The query carried no '{name}' parameter.");
+    }
+
+    private string AuthorizeManifest(string name)
+    {
+        string directory = Path.Combine(_root, name);
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "manifest.json"), AuthorizeManifestText);
+        return directory;
+    }
+
+    /// <summary>Captures a progress writer's text and surfaces the first presented authorization URL.</summary>
+    private sealed class CapturingTextWriter : TextWriter
+    {
+        private readonly object _gate = new();
+        private readonly StringBuilder _text = new();
+        private readonly StringBuilder _line = new();
+        private readonly TaskCompletionSource<string> _authorizationUrl =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override Encoding Encoding => Encoding.UTF8;
+
+        public Task<string> AuthorizationUrl => _authorizationUrl.Task;
+
+        public override void Write(char value) => Write(value.ToString());
+
+        public override void Write(string? value)
+        {
+            if (value is null)
+            {
+                return;
+            }
+
+            lock (_gate)
+            {
+                _text.Append(value);
+
+                int start = 0;
+
+                while (true)
+                {
+                    int newline = value.IndexOf('\n', start);
+
+                    if (newline < 0)
+                    {
+                        _line.Append(value, start, value.Length - start);
+                        return;
+                    }
+
+                    _line.Append(value, start, newline - start);
+                    Offer(_line.ToString());
+                    _line.Clear();
+                    start = newline + 1;
+                }
+            }
+        }
+
+        private void Offer(string line)
+        {
+            string candidate = line.Trim();
+
+            if (candidate.Contains("://", StringComparison.Ordinal)
+                && candidate.Contains("authorize?", StringComparison.Ordinal))
+            {
+                _authorizationUrl.TrySetResult(candidate);
+            }
+        }
+    }
+
+    /// <summary>
+    /// An authorization-code profile whose endpoints are deliberately unreachable. A denial callback
+    /// is refused before any token exchange, so this suite never contacts the provider.
+    /// </summary>
+    private const string AuthorizeManifestText = """
+        {
+          "manifestFormatVersion": "0.3",
+          "sections": {
+            "server": { "inline": {
+              "name": "OAuth API",
+              "authenticationRequired": false
+            } },
+            "policy": { "inline": { "baseUrl": "https://api.example.com" } },
+            "operations": {
+              "inline": {
+                "operations": [ { "key": "GET /pets", "method": "GET", "path": "/pets" } ]
+              }
+            },
+            "agentSurface": {
+              "inline": {
+                "operations": [
+                  {
+                    "slug": "list-pets",
+                    "name": "List pets",
+                    "binding": { "type": "http", "operation": "GET /pets", "authenticationRef": "oauth" }
+                  }
+                ]
+              }
+            },
+            "credentials": {
+              "inline": {
+                "formatVersion": 4,
+                "credentials": [
+                  {
+                    "id": "oauth-refresh",
+                    "scheme": "oauth2-authorization-code",
+                    "slot": "refreshToken",
+                    "value": { "fromEnv": "MCPILER_TEST_UNUSED_REFRESH" }
+                  }
+                ]
+              }
+            },
+            "authentication": {
+              "inline": {
+                "formatVersion": 2,
+                "profiles": [
+                  {
+                    "id": "oauth",
+                    "kind": "oauth2-authorization-code-pkce-refresh",
+                    "configuration": {
+                      "strategyId": "oauth2-authorization-code-pkce-refresh",
+                      "inputs": { "clientId": "example-client" },
+                      "clientId": "example-client",
+                      "tokenEndpoint": "https://auth.example.com/oauth2/token",
+                      "authorizationEndpoint": "https://auth.example.com/oauth2/authorize",
+                      "tokenAuthMethod": "none",
+                      "scopes": ["pets.read"],
+                      "resource": "https://api.example.com"
+                    },
+                    "authenticationOrigins": ["https://auth.example.com:443"],
+                    "destinationOrigins": ["https://api.example.com:443"],
+                    "credentialRef": ["oauth-refresh"],
+                    "scopeFingerprint": "0000000000000000000000000000000000000000000000000000000000000001",
+                    "slots": [
+                      { "slot": "refreshToken", "authorityEpoch": 1, "runtimeRevision": 0 }
+                    ]
                   }
                 ]
               }

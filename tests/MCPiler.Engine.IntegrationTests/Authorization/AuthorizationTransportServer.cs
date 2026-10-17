@@ -28,6 +28,7 @@ internal sealed class AuthorizationTransportServer : IAsyncDisposable
 
     private readonly WebApplication _app;
     private readonly Func<HttpContext, Task> _handler;
+    private readonly List<string> _requestPaths = [];
     private int _requestCount;
     private string? _lastAuthorization;
     private string? _lastBody;
@@ -41,6 +42,23 @@ internal sealed class AuthorizationTransportServer : IAsyncDisposable
     public Uri Address { get; private set; } = null!;
 
     public int RequestCount => Volatile.Read(ref _requestCount);
+
+    /// <summary>Every request path this server has answered, in arrival order.</summary>
+    /// <remarks>
+    /// A count alone cannot prove which well-known an authorization client actually asked for, and
+    /// the discovery tests need exactly that: the issuer-derived OIDC path must be absent from the
+    /// list when no fallback is permitted.
+    /// </remarks>
+    public IReadOnlyList<string> RequestedPaths
+    {
+        get
+        {
+            lock (_requestPaths)
+            {
+                return [.. _requestPaths];
+            }
+        }
+    }
 
     public string? LastAuthorization => Volatile.Read(ref _lastAuthorization);
 
@@ -65,6 +83,11 @@ internal sealed class AuthorizationTransportServer : IAsyncDisposable
     {
         Interlocked.Increment(ref _requestCount);
         _lastAuthorization = context.Request.Headers.Authorization.ToString();
+
+        lock (_requestPaths)
+        {
+            _requestPaths.Add(context.Request.Path.Value ?? string.Empty);
+        }
 
         context.Request.EnableBuffering();
         using (StreamReader reader = new(context.Request.Body, Encoding.UTF8, leaveOpen: true))

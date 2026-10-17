@@ -517,6 +517,29 @@ public sealed class EngineExecution : IDisposable
         return null;
     }
 
+    /// <summary>
+    /// The authentication runtime one mounted prefix serves through, or null when this execution
+    /// serves no such prefix.
+    /// </summary>
+    /// <remarks>
+    /// An in-host operator mutation reaches the mount through the runtime the serving path acquires
+    /// through, so the clear shares that mount's slot gate, its access-token cache and its durable
+    /// store instance. A second runtime over the same mount would fence nothing: it would hold a
+    /// different gate and would not be the cache a served request reads.
+    /// </remarks>
+    internal AuthenticationRuntime? MountAuthentication(string mountPrefix)
+    {
+        foreach ((MountedManifest mount, MountExecution execution) in _mounts)
+        {
+            if (string.Equals(mount.Prefix, mountPrefix, StringComparison.Ordinal))
+            {
+                return execution.Authentication;
+            }
+        }
+
+        return null;
+    }
+
     public ResponseCacheObservation? ObserveScopedResponseCache(string mountPrefix, string? operationSlug)
     {
         if (string.IsNullOrEmpty(mountPrefix))
@@ -566,6 +589,8 @@ public sealed class EngineExecution : IDisposable
     {
         public ExecutionService Executions { get; } = executions;
 
+        public AuthenticationRuntime Authentication { get; } = authentication;
+
         public ResponseCache? Cache { get; } = cache;
 
         public void Dispose()
@@ -573,7 +598,7 @@ public sealed class EngineExecution : IDisposable
             // Providers first: a retired generation's secrets must stop resolving before the
             // execution that could still read them finishes disposing.
             providers?.Dispose();
-            authentication.Dispose();
+            Authentication.Dispose();
             clients.Dispose();
             Cache?.Dispose();
         }

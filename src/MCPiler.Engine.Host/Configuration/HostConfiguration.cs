@@ -144,6 +144,43 @@ public sealed record HostBinding(
     /// rather than re-read per request. Null means the operator channel is not mapped at all.
     /// </remarks>
     public string? ResponseCacheOperatorSecret { get; init; }
+
+    /// <summary>
+    /// The dedicated standalone-authorization operator secret, or null when that channel is absent.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A separate secret from <see cref="ResponseCacheOperatorSecret"/> because it authenticates a
+    /// channel with different powers: it can clear a profile's local authorization, which stops the
+    /// next tool call from using a working credential. An operator who is willing to let tooling
+    /// drop warm cache entries is not thereby willing to let it drop a credential.
+    /// </para>
+    /// <para>
+    /// Read once at bind time for the same reasons: a missing or unusable file refuses startup, and
+    /// the secret is held for the process lifetime rather than re-read per request. Null means the
+    /// channel is not mapped at all.
+    /// </para>
+    /// </remarks>
+    public string? OAuthOperatorSecret { get; init; }
+
+    /// <summary>
+    /// Whether the standalone authorization transport, and only that transport, may reach
+    /// loopback token and revocation endpoints.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A separate property rather than a <see cref="RuntimeOptions"/> value on purpose: the
+    /// runtime options describe what is served, and every served request must keep the shipped
+    /// address judgement. This one describes what an operator's own CLI verb is allowed to
+    /// contact while bootstrapping a credential, so it cannot reach a mounted Manifest's
+    /// execution path by construction.
+    /// </para>
+    /// <para>
+    /// See <see cref="HostConfiguration.AllowLoopbackAuthorizationKey"/> for the bound: only
+    /// loopback widens; private, link-local, metadata and reserved ranges stay refused.
+    /// </para>
+    /// </remarks>
+    public bool AllowLoopbackAuthorization { get; init; }
 }
 
 /// <summary>How a process decides which Manifests it serves.</summary>
@@ -215,6 +252,14 @@ public sealed record HostAuthorizationOptions(
     public int IntrospectionCacheTtlSeconds { get; init; } = 30;
 
     /// <summary>
+    /// Whether a definitive RFC 8414 absence (an exact HTTP 404/410 from the configured issuer's
+    /// authorization-server metadata URL) permits one request to the issuer-derived OIDC
+    /// <c>openid-configuration</c> URL. Disabled by default; no other status, document or transport
+    /// failure may permit it.
+    /// </summary>
+    public bool OidcDiscoveryFallbackEnabled { get; init; }
+
+    /// <summary>
     /// The configuration for a process that trusts no issuer, which serves mounts that declare
     /// no surface scope and refuses mounts that do.
     /// </summary>
@@ -255,6 +300,35 @@ public static class HostConfiguration
     /// <summary>Key permitting a literal secret inside a Manifest.</summary>
     public const string AllowInlineSecretsKey = "allow-inline-secrets";
 
+    /// <summary>
+    /// Key permitting the standalone authorization transport to reach a loopback token or
+    /// revocation endpoint.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Off by default, and it changes nothing for a deployment that serves callers: the shipped
+    /// address table still refuses loopback, private, carrier-NAT, link-local (where cloud
+    /// instance metadata lives) and every other reserved range, and no code path carries this key
+    /// into tool execution.
+    /// </para>
+    /// <para>
+    /// It exists for one bounded case: an authorization server running on the operator's own
+    /// machine. Reaching it needs loopback, and only an operator's own CLI process selects the
+    /// profile and the endpoint that attempt contacts — never a served request and never a
+    /// Manifest-supplied address at request time. The allowance widens exactly one judgement and
+    /// only inside the authorization transport: loopback becomes reachable while private,
+    /// link-local, metadata and reserved ranges stay refused, so an authorization endpoint that
+    /// resolves into a cloud metadata address is refused with this key set too.
+    /// </para>
+    /// <para>
+    /// It is named as an authority decision an operator makes, in the same family as
+    /// <see cref="AllowInlineSecretsKey"/>, and it is documented in the verb's usage text rather
+    /// than hidden, because an undocumented escape hatch inside a serving process is a worse
+    /// property than a named and reviewable one.
+    /// </para>
+    /// </remarks>
+    public const string AllowLoopbackAuthorizationKey = "allow-loopback-authorization";
+
     /// <summary>Key naming a directory this process serves, which the file store must sit outside.</summary>
     public const string ServedContentRootKey = "served-content-root";
 
@@ -282,6 +356,27 @@ public static class HostConfiguration
 
     /// <summary>Key bounding positive and negative introspection result caching in seconds.</summary>
     public const string IntrospectionCacheTtlSecondsKey = "introspection-cache-ttl-seconds";
+
+    /// <summary>
+    /// Key permitting the restricted issuer-derived OIDC discovery fallback, boolean, default false.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// RFC 8414 remains the primary metadata authority. With this key true, and only then, an exact
+    /// HTTP 404 or 410 from the configured issuer's RFC 8414 metadata URL permits one request to the
+    /// OIDC <c>openid-configuration</c> URL derived from that same issuer. Every other outcome —
+    /// malformed or wrong-issuer metadata, a redirect, 401/403, 5xx, timeout, DNS or TLS failure —
+    /// fails closed without fallback, because otherwise a trust configuration error would become a
+    /// different trust authority.
+    /// </para>
+    /// <para>
+    /// The alternate URL is constructed from the configured issuer alone, with the same
+    /// exact-issuer and outbound-origin checks as the primary route. There is no arbitrary metadata
+    /// URL setting and no slug inference; an issuer whose provider-scoped discovery URL is not
+    /// derivable from the issuer string is not supported by this fallback.
+    /// </para>
+    /// </remarks>
+    public const string OidcDiscoveryFallbackKey = "oidc-discovery-fallback";
 
     /// <summary>Key naming the issuer's JWKS URI, overriding the <c>jwks_uri</c> in its published metadata.</summary>
     public const string JwksUriKey = "jwks-uri";
@@ -349,6 +444,24 @@ public static class HostConfiguration
     /// </para>
     /// </remarks>
     public const string ResponseCacheOperatorSecretFileKey = "response-cache-operator-secret-file";
+
+    /// <summary>
+    /// Key naming the file holding the dedicated standalone-authorization operator secret.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The authorization operator channel is opt-in: without this file it is not mapped at all, so
+    /// there is no unauthenticated route that can read local authorization state or clear a profile's
+    /// local authority. It is deliberately a different file from
+    /// <see cref="ResponseCacheOperatorSecretFileKey"/>, because the two channels carry different
+    /// powers and an operator must be able to grant one without granting the other.
+    /// </para>
+    /// <para>
+    /// A file rather than a value for the same reason every other Engine secret is: a secret on a
+    /// command line is visible to every process listing on the host.
+    /// </para>
+    /// </remarks>
+    public const string OAuthOperatorSecretFileKey = "oauth-operator-secret-file";
 
 
     /// <summary>Key naming the directory runtime-owned mutable authentication state is kept in.</summary>
@@ -444,11 +557,13 @@ public static class HostConfiguration
         TransportKey,
         RequireSealedKey,
         AllowInlineSecretsKey,
+        AllowLoopbackAuthorizationKey,
         ServedContentRootKey,
         IssuerKey,
         TokenValidationKey,
         IntrospectionEndpointKey,
         IntrospectionCacheTtlSecondsKey,
+        OidcDiscoveryFallbackKey,
         JwksUriKey,
         IntrospectionClientIdKey,
         IntrospectionClientSecretFileKey,
@@ -460,6 +575,7 @@ public static class HostConfiguration
         ResponseCacheMaxFlightsKey,
         ResponseCacheMaxWaitersKey,
         ResponseCacheOperatorSecretFileKey,
+        OAuthOperatorSecretFileKey,
         RuntimeStateRootKey,
         RuntimeStateKeyFileKey,
         ModeKey,
@@ -524,10 +640,12 @@ public static class HostConfiguration
         HostTransport transport = HostTransport.Http;
         bool requireSealed = false;
         bool allowInlineSecrets = false;
+        bool allowLoopbackAuthorization = false;
         string? issuer = null;
         HostTokenValidation? validation = null;
         string? introspectionEndpoint = null;
         int? introspectionCacheTtlSeconds = null;
+        bool? oidcDiscoveryFallback = null;
         string? jwksUri = null;
         string? introspectionClientId = null;
         string? introspectionClientSecretFile = null;
@@ -541,6 +659,7 @@ public static class HostConfiguration
         string? runtimeStateRoot = null;
         string? runtimeStateKeyFile = null;
         string? responseCacheOperatorSecretFile = null;
+        string? oauthOperatorSecretFile = null;
         HostDeploymentMode mode = HostDeploymentMode.File;
         bool modeExplicit = false;
         string? managementEndpoint = null;
@@ -589,6 +708,9 @@ public static class HostConfiguration
                 case AllowInlineSecretsKey:
                     allowInlineSecrets = Flag(key, value, rejected);
                     break;
+                case AllowLoopbackAuthorizationKey:
+                    allowLoopbackAuthorization = Flag(key, value, rejected);
+                    break;
                 case ListenKey:
                     listen = Address(key, value, rejected);
                     break;
@@ -606,6 +728,9 @@ public static class HostConfiguration
                     break;
                 case IntrospectionCacheTtlSecondsKey:
                     introspectionCacheTtlSeconds = NonNegativeWholeSeconds(key, value, rejected);
+                    break;
+                case OidcDiscoveryFallbackKey:
+                    oidcDiscoveryFallback = Flag(key, value, rejected);
                     break;
                 case JwksUriKey:
                     jwksUri = AuthorizationUriSetting(key, value, rejected);
@@ -676,6 +801,9 @@ public static class HostConfiguration
                 case ResponseCacheOperatorSecretFileKey:
                     responseCacheOperatorSecretFile = value;
                     break;
+                case OAuthOperatorSecretFileKey:
+                    oauthOperatorSecretFile = value;
+                    break;
                 case ModeKey:
                     if (DeploymentMode(key, value, rejected) is { } parsed)
                     {
@@ -730,6 +858,7 @@ public static class HostConfiguration
             validation,
             introspectionEndpoint,
             introspectionCacheTtlSeconds,
+            oidcDiscoveryFallback,
             jwksUri,
             introspectionClientId,
             introspectionClientSecretFile,
@@ -752,6 +881,24 @@ public static class HostConfiguration
             else
             {
                 rejected.Add(operatorSecretRefusal!);
+            }
+        }
+
+        // Read now for the same reason: an unusable file refuses startup rather than surfacing at
+        // the first operator request. An absent setting is the opt-out, not a refusal.
+        string? oauthOperatorSecret = null;
+        if (oauthOperatorSecretFile is not null)
+        {
+            if (OAuthOperatorSecret.TryRead(
+                    oauthOperatorSecretFile,
+                    out string readOAuthSecret,
+                    out string? oauthSecretRefusal))
+            {
+                oauthOperatorSecret = readOAuthSecret;
+            }
+            else
+            {
+                rejected.Add(oauthSecretRefusal!);
             }
         }
 
@@ -824,6 +971,8 @@ public static class HostConfiguration
             ExternalResources = externalResources,
             AllowedHosts = allowedHosts,
             ResponseCacheOperatorSecret = responseCacheOperatorSecret,
+            OAuthOperatorSecret = oauthOperatorSecret,
+            AllowLoopbackAuthorization = allowLoopbackAuthorization,
         };
         refusals = [];
         return true;
@@ -1191,6 +1340,7 @@ public static class HostConfiguration
         HostTokenValidation? validation,
         string? introspectionEndpoint,
         int? introspectionCacheTtlSeconds,
+        bool? oidcDiscoveryFallback,
         string? jwksUri,
         string? introspectionClientId,
         string? introspectionClientSecretFile,
@@ -1211,6 +1361,11 @@ public static class HostConfiguration
             if (introspectionCacheTtlSeconds is not null)
             {
                 rejected.Add($"'{IntrospectionCacheTtlSecondsKey}' requires '{TokenValidationKey}' to be '{IntrospectionModeName}'. It is unused when no issuer validation is configured.");
+            }
+
+            if (oidcDiscoveryFallback is true)
+            {
+                rejected.Add($"'{OidcDiscoveryFallbackKey}' requires '{IssuerKey}' and '{TokenValidationKey}'. Without a trusted issuer there is no RFC 8414 metadata route to fall back from.");
             }
 
             return null;
@@ -1243,6 +1398,15 @@ public static class HostConfiguration
             rejected.Add($"'{IntrospectionCacheTtlSecondsKey}' names a cache nothing uses: '{TokenValidationKey}' is 'jwks'. Remove it, or select 'introspection'.");
         }
 
+        if (oidcDiscoveryFallback is true
+            && ((mode is HostTokenValidation.Jwks && jwksUri is not null)
+                || (mode is HostTokenValidation.Introspection && introspectionEndpoint is not null)))
+        {
+            rejected.Add(
+                $"'{OidcDiscoveryFallbackKey}' names a fallback nothing reads: the explicit endpoint override "
+                + $"for '{TokenValidationKey}' mode replaces metadata discovery entirely. Remove the override or the fallback.");
+        }
+
         BindIntrospectionClient(
             mode,
             introspectionClientId,
@@ -1260,6 +1424,7 @@ public static class HostConfiguration
         return options with
         {
             IntrospectionCacheTtlSeconds = introspectionCacheTtlSeconds ?? options.IntrospectionCacheTtlSeconds,
+            OidcDiscoveryFallbackEnabled = oidcDiscoveryFallback ?? false,
         };
     }
 

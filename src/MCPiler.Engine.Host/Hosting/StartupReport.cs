@@ -57,10 +57,15 @@ public static class StartupReport
     /// Whether the dedicated response-cache operator channel is configured, or null to say nothing
     /// about it. The line states presence and never the secret.
     /// </param>
+    /// <param name="oauthOperatorChannelConfigured">
+    /// Whether the dedicated standalone-authorization operator channel is configured, or null to say
+    /// nothing about it. Presence only, for the same reason as the response-cache channel.
+    /// </param>
     public static string Render(
         RuntimeStartResult result,
         HostAuthorizationOptions? authorization = null,
-        bool? operatorChannelConfigured = null)
+        bool? operatorChannelConfigured = null,
+        bool? oauthOperatorChannelConfigured = null)
     {
         ArgumentNullException.ThrowIfNull(result);
 
@@ -99,6 +104,8 @@ public static class StartupReport
             AppendResponseCache(text, result.ResponseCache);
 
             AppendOperatorChannel(text, operatorChannelConfigured);
+
+            AppendOAuthOperatorChannel(text, oauthOperatorChannelConfigured);
 
             AppendAuthorizationPolicy(text, authorization);
 
@@ -285,6 +292,38 @@ public static class StartupReport
         if (configured is { } present)
         {
             text.AppendLine(RenderOperatorChannel(present));
+        }
+    }
+
+    /// <summary>
+    /// States whether the dedicated standalone-authorization operator channel is configured.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Presence only, like its response-cache counterpart. It is a separate line rather than a
+    /// combined one because the two channels have separate secrets and different powers, and an
+    /// operator who has configured one must not be able to read the line as saying the other is
+    /// present.
+    /// </para>
+    /// <para>
+    /// The managed variant says so explicitly: there the channel is configured but read-only, and a
+    /// line that only said "configured" would let an operator expect a clear verb that this process
+    /// deliberately does not map.
+    /// </para>
+    /// </remarks>
+    internal static string RenderOAuthOperatorChannel(bool configured, bool managed = false)
+        => (configured, managed) switch
+        {
+            (true, true) => "authorization operator channel: configured read-only (managed mode maps status and events only)",
+            (true, false) => "authorization operator channel: configured (dedicated secret file)",
+            (false, _) => "authorization operator channel: absent (no dedicated secret file)",
+        };
+
+    private static void AppendOAuthOperatorChannel(StringBuilder text, bool? configured)
+    {
+        if (configured is { } present)
+        {
+            text.AppendLine(RenderOAuthOperatorChannel(present));
         }
     }
 

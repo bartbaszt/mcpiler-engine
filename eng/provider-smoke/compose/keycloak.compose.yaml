@@ -1,0 +1,22 @@
+# Throwaway Keycloak for the MCPiler Engine provider smoke harness.
+#
+# Started by eng/provider-smoke/run-provider-smoke.sh with an explicit project name:
+#   docker compose -p mcpiler-provider-smoke -f compose/keycloak.compose.yaml up -d
+#
+# The realm fixture is templated by the harness (generated password and client secret, the exact
+# MCP audience) and imported on start. Nothing in this directory is a real credential.
+services:
+  keycloak:
+    image: ${KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.4.0}
+    command:
+      - start-dev
+      - --import-realm
+      - --http-port=8080
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER:?set KEYCLOAK_ADMIN_USER}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?set KEYCLOAK_ADMIN_PASSWORD}
+      KC_HEALTH_ENABLED: "false"
+    ports:
+      - "${KEYCLOAK_PORT:-18080}:8080"
+    volumes:
+      - ${KEYCLOAK_REALM_FILE:?set KEYCLOAK_REALM_FILE}:/opt/keycloak/data/import/realm.json:ro

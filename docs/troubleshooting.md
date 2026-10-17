@@ -66,10 +66,20 @@ Common host-level codes include:
 | `host/floor-malformed` / `host/limit-malformed` | A narrowing value is not in the expected unit/shape. |
 | `host/surface-address-noncanonical` / `host/surface-address-reserved` / `host/surface-address-transfer-collision` | A final mounted surface address is not a canonical literal route or collides with an Engine-owned HTTP namespace. |
 | `auth/allowed-host-missing` | Protected HTTP serving has no trusted authority because the listen address is wildcard/non-concrete. Add repeatable `--allowed-host host[:port]`. |
-| `auth/issuer-discovery-unusable` | RFC 8414 discovery returned a definitive unusable HTTP response such as 4xx or an unsupported redirect. 429/5xx and transport outages remain transient. |
+| `auth/issuer-discovery-unusable` | RFC 8414 discovery returned a definitive unusable HTTP response such as 4xx or an unsupported redirect. 429/5xx and transport outages remain transient. With `--oidc-discovery-fallback true`, a 404/410 from RFC 8414 sends the same check to the issuer-derived OIDC URL; that response is classified the same way. |
 | `auth/issuer-missing` | An HTTP mount is protected (the default) but the host has no issuer/validation boundary. Add `--issuer` + `--token-validation`, or explicitly set `authenticationRequired: false` only for an intentionally open mount. |
 | `auth/introspection-client-secret-unusable` | The configured introspection client secret file is missing, empty or unreadable. `inspect` and `serve` both refuse with exit 78 before opening a listener. |
-| `auth/issuer-metadata-invalid` | RFC 8414 discovery returned malformed metadata, omitted `issuer`, or declared an issuer that is not byte-identical to the configured `--issuer`. Fix the issuer URL/metadata; do not override the mismatch by trusting the discovered endpoints. |
+| `auth/issuer-metadata-invalid` | The discovered metadata (RFC 8414, or the enabled OIDC fallback after a definitive 404/410) is malformed, omits `issuer`, declares `issuer` more than once, or declares an issuer that is not byte-identical to the configured `--issuer`. Fix the issuer URL/metadata; do not override the mismatch by trusting the discovered endpoints. |
+| `auth/jwks-uri-ambiguous` / `auth/introspection-endpoint-ambiguous` | The discovered metadata declares the endpoint member more than once. Duplicate endpoint members are ambiguity, not a choice of occurrence: publish exactly one, or configure `--jwks-uri`/`--introspection-endpoint` explicitly. |
+
+`issuer readiness` reports its own stable outcome categories instead of startup refusal codes:
+`issuer/unconfigured`, `issuer/unsupported-mode`, `issuer/credential-unusable`,
+`issuer/invalid-metadata`, `issuer/issuer-unavailable`, `issuer/origin-refused`,
+`issuer/endpoint-unreachable`, `issuer/endpoint-unauthorized` and `issuer/endpoint-unusable`.
+A currently unreachable issuer or endpoint exits `1` (retry); every other not-ready outcome exits
+`78` (fix the named configuration). A ready result never claims issued-token audience, scope or
+revocation behavior; those need a real provider-issued token accepted by the protected MCP
+resource.
 
 If the code begins with `manifest/`, `schema/`, `operations/`, `agent/`, `binding/`,
 `surface/`, `policy/`, `credential/`, `authentication/`, `tools/`, `search/`,
@@ -212,6 +222,35 @@ For JWKS:
 - check token issuer/audience/scope against the resource that is being called.
 
 Do not try to solve inbound token validation by changing Manifest upstream credentials.
+
+## Is the issuer down, or was the token refused?
+
+An authenticated operator can read the serving process's bounded trust observations from the
+operator channel:
+
+```bash
+curl -H "Authorization: Bearer <operator-secret>" \
+  -H "X-MCPiler-Contract-Generation: 1" \
+  https://engine.example/.engine/oauth/status
+```
+
+When issuer validation is configured, the response carries `issuerAvailability` with the validation
+mode and the recent observations. Read the newest category:
+
+- `keys-refreshed` / `issuer-answered` — the trust endpoint answered and validation continued.
+- `metadata-unavailable` — no usable metadata document resolved; protected requests fail closed
+  unless a bounded cached key set or positive introspection result still covers them.
+- `keys-unavailable` — metadata resolved but the key endpoint failed or published unusable material;
+  a stale key set inside the accepted window can still validate a JWT.
+- `introspection-unavailable` — the introspection request failed, timed out or answered unusably;
+  protected requests fail closed unless the bounded positive cache still covers them.
+- `token-inactive` — the issuer stated the token is inactive. That is an answer, not an outage.
+- `token-rejected` — this process refused the token while key material was available; treat it as an
+  invalid, expired or wrongly addressed token rather than an endpoint problem.
+
+An endpoint outage is never cached as the issuer declaring a token inactive, and the observations
+never influence validation. An empty `events` list means no observation was recorded — including
+right after startup — not that the issuer is healthy.
 
 ## Browser client gets an Origin refusal
 

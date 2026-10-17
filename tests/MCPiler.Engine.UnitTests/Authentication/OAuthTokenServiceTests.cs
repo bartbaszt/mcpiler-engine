@@ -142,6 +142,37 @@ public sealed class OAuthTokenServiceTests
     }
 
     [Fact]
+    public async Task An_authorization_code_grant_with_the_none_method_sends_no_client_authentication()
+    {
+        // A public PKCE client declares 'none': the exchange carries the code and verifier but never
+        // a client secret, in the form or in a header.
+        var transport = new RecordingTransport(RespondsWithRefresh("access-a", "refresh-a", expiresIn: 3600));
+        var client = new OAuthTokenEndpointClient(transport, new AdvanceableClock(Now));
+        var configuration = Configuration(
+            """{"clientId":"public-client","tokenEndpoint":"https://auth.example.com/oauth2/token","authorizationEndpoint":"https://auth.example.com/oauth2/authorize","tokenAuthMethod":"none"}""");
+
+        await client.ExchangeAsync(
+            configuration,
+            ["https://auth.example.com:443"],
+            new Dictionary<string, string>
+            {
+                ["grant_type"] = "authorization_code",
+                ["code"] = "code-canary",
+                ["redirect_uri"] = "http://127.0.0.1:57431/callback",
+                ["code_verifier"] = "verifier-canary",
+            },
+            clientSecret: null,
+            CancellationToken.None);
+
+        var sent = Assert.Single(transport.Requests);
+        Assert.Contains("grant_type=authorization_code", sent.Form, StringComparison.Ordinal);
+        Assert.Contains("code_verifier=verifier-canary", sent.Form, StringComparison.Ordinal);
+        Assert.Contains("client_id=public-client", sent.Form, StringComparison.Ordinal);
+        Assert.DoesNotContain("client_secret", sent.Form, StringComparison.Ordinal);
+        Assert.DoesNotContain("Authorization", sent.Headers.Keys, StringComparer.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task A_cached_token_is_reused_without_another_exchange()
     {
         var transport = new RecordingTransport(Responds("access-a", expiresIn: 3600));
@@ -436,22 +467,419 @@ public sealed class OAuthTokenServiceTests
             await service.AcquireAsync(StaticProfile(), [], CancellationToken.None).AsTask());
     }
 
+    [Fact]
+    public async Task A_local_authorized_decision_supersedes_the_declared_refresh_source()
+    {
+        var slots = new InMemoryMutableSlotStore();
+        var profile = AuthorizationCodeProfile(slot: new AuthenticationSlot("refreshToken", 1, 0));
+        await slots.CompareAndCommitAsync(
+            AuthorizedDecision(profile, epoch: 2, revision: 0, "local-refresh"),
+            expectedVersion: null,
+            declaredEpoch: 1,
+            CancellationToken.None);
+
+        var transport = new RecordingTransport(Responds("access-a", expiresIn: 3600));
+        var service = Service(transport, slots: slots);
+
+        var acquisition = await service.AcquireAsync(profile, AuthorizationCodeCredentials(), CancellationToken.None);
+
+        var sent = Assert.Single(transport.Requests);
+        Assert.Contains("refresh_token=local-refresh", sent.Form, StringComparison.Ordinal);
+        Assert.DoesNotContain("declared-refresh", sent.Form, StringComparison.Ordinal);
+        Assert.Equal(2, acquisition.AuthorityEpoch);
+        Assert.Equal(0, acquisition.RuntimeRevision);
+    }
+
+    [Fact]
+    public async Task A_cleared_decision_masks_the_declared_source_before_any_provider_call()
+    {
+        var slots = new InMemoryMutableSlotStore();
+        var profile = AuthorizationCodeProfile(slot: new AuthenticationSlot("refreshToken", 1, 0));
+        await slots.CompareAndCommitAsync(
+            ClearedDecision(profile, epoch: 2), expectedVersion: null, declaredEpoch: 1, CancellationToken.None);
+
+        var transport = new RecordingTransport(Responds("access-a", expiresIn: 3600));
+        var service = Service(transport, slots: slots);
+
+        await Assert.ThrowsAsync<CredentialUnavailableException>(async () =>
+            await service.AcquireAsync(profile, AuthorizationCodeCredentials(), CancellationToken.None).AsTask());
+
+        Assert.Empty(transport.Requests);
+    }
+
+    [Fact]
+    public async Task A_cleared_decision_is_not_bypassed_by_a_newer_manifest_epoch_or_scope()
+    {
+        var slots = new InMemoryMutableSlotStore();
+        var seedProfile = AuthorizationCodeProfile(slot: new AuthenticationSlot("refreshToken", 1, 0));
+        await slots.CompareAndCommitAsync(
+            ClearedDecision(seedProfile, epoch: 2), expectedVersion: null, declaredEpoch: 1, CancellationToken.None);
+
+        // A newer Manifest epoch and a changed scope would each expose the declared source under the
+        // legacy rule; the durable clear floor masks every declared source regardless.
+        var transport = new RecordingTransport(Responds("access-a", expiresIn: 3600));
+        var service = Service(transport, slots: slots);
+
+        await Assert.ThrowsAsync<CredentialUnavailableException>(async () =>
+            await service.AcquireAsync(
+                AuthorizationCodeProfile(slot: new AuthenticationSlot("refreshToken", 99, 0), scopeFingerprint: "changed-scope"),
+                AuthorizationCodeCredentials(),
+                CancellationToken.None).AsTask());
+
+        Assert.Empty(transport.Requests);
+    }
+
+    [Fact]
+    public async Task An_authorized_decision_with_a_changed_configuration_fails_closed()
+    {
+        var slots = new InMemoryMutableSlotStore();
+        var seedProfile = AuthorizationCodeProfile(slot: new AuthenticationSlot("refreshToken", 1, 0));
+        await slots.CompareAndCommitAsync(
+            AuthorizedDecision(seedProfile, epoch: 2, revision: 0, "local-refresh"),
+            expectedVersion: null,
+            declaredEpoch: 1,
+            CancellationToken.None);
+
+        // The stored successor was minted for a different client identity, so it must not be
+        // presented to the token endpoint the deployment now declares.
+        var transport = new RecordingTransport(Responds("access-a", expiresIn: 3600));
+        var service = Service(transport, slots: slots);
+
+        await Assert.ThrowsAsync<CredentialUnavailableException>(async () =>
+            await service.AcquireAsync(
+                AuthorizationCodeProfile(slot: new AuthenticationSlot("refreshToken", 1, 0), clientId: "other-client"),
+                AuthorizationCodeCredentials(),
+                CancellationToken.None).AsTask());
+
+        Assert.Empty(transport.Requests);
+    }
+
+    [Fact]
+    public async Task A_rotation_under_a_local_decision_advances_the_decision_by_compare_and_commit()
+    {
+        var slots = new InMemoryMutableSlotStore();
+        var profile = AuthorizationCodeProfile(slot: new AuthenticationSlot("refreshToken", 1, 0));
+        await slots.CompareAndCommitAsync(
+            AuthorizedDecision(profile, epoch: 2, revision: 0, "local-refresh"),
+            expectedVersion: null,
+            declaredEpoch: 1,
+            CancellationToken.None);
+
+        var transport = new RecordingTransport(RespondsWithRefresh("access-a", "rotated-local", expiresIn: 3600));
+        var service = Service(transport, slots: slots);
+
+        var acquisition = await service.AcquireAsync(profile, AuthorizationCodeCredentials(), CancellationToken.None);
+
+        Assert.Contains("refresh_token=local-refresh", Assert.Single(transport.Requests).Form, StringComparison.Ordinal);
+
+        var decision = await slots.LoadDecisionAsync("oauth", "refreshToken", CancellationToken.None);
+        Assert.NotNull(decision);
+        Assert.Equal(MutableSlotDecisionKind.Authorized, decision!.Kind);
+        Assert.Equal("rotated-local", decision.RefreshToken);
+        Assert.Equal(2, decision.AuthorityEpoch);
+        Assert.Equal(1, decision.RuntimeRevision);
+        Assert.Equal(2, acquisition.AuthorityEpoch);
+        Assert.Equal(1, acquisition.RuntimeRevision);
+    }
+
+    [Fact]
+    public async Task A_rotated_local_authority_reuses_its_access_token_under_the_committed_revision()
+    {
+        var slots = new InMemoryMutableSlotStore();
+        var profile = AuthorizationCodeProfile(slot: new AuthenticationSlot("refreshToken", 1, 0));
+        await slots.CompareAndCommitAsync(
+            AuthorizedDecision(profile, epoch: 2, revision: 0, "local-refresh"),
+            expectedVersion: null,
+            declaredEpoch: 1,
+            CancellationToken.None);
+
+        // A second token-endpoint request would consume an already-rotated refresh token even
+        // though the first access token remains valid. A provider may rate-limit that request.
+        var transport = new RecordingTransport(RespondsWithRefresh("access-a", "rotated-local", expiresIn: 3600));
+        var service = Service(transport, slots: slots);
+
+        var first = await service.AcquireAsync(profile, AuthorizationCodeCredentials(), CancellationToken.None);
+        var second = await service.AcquireAsync(profile, AuthorizationCodeCredentials(), CancellationToken.None);
+
+        Assert.Equal("access-a", first.Credentials[0].Value);
+        Assert.Equal("access-a", second.Credentials[0].Value);
+        Assert.Equal(1, first.RuntimeRevision);
+        Assert.Equal(1, second.RuntimeRevision);
+        Assert.Single(transport.Requests);
+    }
+
+    [Fact]
+    public async Task A_rotated_legacy_authority_preserves_its_declaration_cache_identity()
+    {
+        var slots = new InMemoryMutableSlotStore();
+        var profile = AuthorizationCodeProfile(slot: new AuthenticationSlot("refreshToken", 1, 0));
+        var transport = new RecordingTransport(RespondsWithRefresh("access-a", "rotated-legacy", expiresIn: 3600));
+        var service = Service(transport, slots: slots);
+
+        var first = await service.AcquireAsync(profile, AuthorizationCodeCredentials(), CancellationToken.None);
+        var second = await service.AcquireAsync(profile, AuthorizationCodeCredentials(), CancellationToken.None);
+
+        Assert.Equal("access-a", first.Credentials[0].Value);
+        Assert.Equal("access-a", second.Credentials[0].Value);
+        Assert.Single(transport.Requests);
+    }
+
+    [Fact]
+    public async Task A_queued_slot_participant_observes_the_clear_fence_before_the_gate_reopens()
+    {
+        var slots = new InMemoryMutableSlotStore();
+        var profile = AuthorizationCodeProfile(slot: new AuthenticationSlot("refreshToken", 1, 0));
+        await slots.CompareAndCommitAsync(
+            AuthorizedDecision(profile, epoch: 2, revision: 0, "local-refresh"),
+            expectedVersion: null, declaredEpoch: 1, CancellationToken.None);
+
+        var cache = new AccessTokenCache();
+        var transport = new RecordingTransport(Responds("access-a", expiresIn: 3600));
+        var service = Service(transport, slots: slots, cache: cache);
+        await service.AcquireAsync(profile, AuthorizationCodeCredentials(), CancellationToken.None);
+        Assert.Equal(1, cache.Count);
+
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var held = service.Authority.RunExclusiveAsync(profile.Id, "refreshToken", async token =>
+        {
+            entered.SetResult();
+            await release.Task.WaitAsync(token);
+            return true;
+        }, cancellationToken).AsTask();
+
+        await entered.Task.WaitAsync(cancellationToken);
+        var clearing = service.ClearAuthorityAsync(profile, declaredRefreshPresent: true, cancellationToken).AsTask();
+        // This participant queues after the clear and inspects the state while holding the same
+        // gate. The committed clear must have published its generation and dropped the cache.
+        var observing = service.Authority.RunExclusiveAsync(profile.Id, "refreshToken", _ =>
+            ValueTask.FromResult((service.Authority.Generation(profile.Id, "refreshToken"), cache.Count)),
+            cancellationToken).AsTask();
+
+        release.SetResult();
+        await held;
+        var (generation, cachedEntries) = await observing;
+        var cleared = await clearing;
+
+        Assert.True(cleared.Cleared);
+        Assert.Equal(1, generation);
+        Assert.Equal(0, cachedEntries);
+        Assert.Single(transport.Requests);
+        await Assert.ThrowsAsync<CredentialUnavailableException>(async () =>
+            await service.AcquireAsync(profile, AuthorizationCodeCredentials(), cancellationToken).AsTask());
+        Assert.Single(transport.Requests);
+    }
+
+    [Fact]
+    public async Task A_queued_acquisition_refreshes_the_new_authority_after_reauthorization()
+    {
+        var slots = new InMemoryMutableSlotStore();
+        var profile = AuthorizationCodeProfile(slot: new AuthenticationSlot("refreshToken", 1, 0));
+        var original = await slots.CompareAndCommitAsync(
+            AuthorizedDecision(profile, epoch: 2, revision: 0, "old-refresh"),
+            expectedVersion: null, declaredEpoch: 1, CancellationToken.None);
+
+        var transport = new RecordingTransport(RespondsWithRefresh("access-new", "rotated-new", expiresIn: 3600));
+        var service = Service(transport, slots: slots);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var reauthorizing = service.Authority.RunExclusiveAsync(profile.Id, "refreshToken", async token =>
+        {
+            entered.SetResult();
+            await release.Task.WaitAsync(token);
+            await slots.CompareAndCommitAsync(
+                AuthorizedDecision(profile, epoch: 3, revision: 0, "new-refresh"),
+                original.Version, declaredEpoch: 1, token);
+            service.NotifyAuthorityChanged(profile.Id, "refreshToken");
+            return true;
+        }, cancellationToken).AsTask();
+
+        await entered.Task.WaitAsync(cancellationToken);
+        var acquiring = service.AcquireAsync(profile, AuthorizationCodeCredentials(), cancellationToken).AsTask();
+        Assert.False(acquiring.IsCompleted);
+
+        release.SetResult();
+        await reauthorizing;
+        var acquisition = await acquiring;
+
+        Assert.Equal("access-new", Assert.Single(acquisition.Credentials).Value);
+        Assert.Equal(3, acquisition.AuthorityEpoch);
+        Assert.Equal(1, acquisition.RuntimeRevision);
+        Assert.Contains("refresh_token=new-refresh", Assert.Single(transport.Requests).Form, StringComparison.Ordinal);
+        var current = await slots.LoadDecisionAsync(profile.Id, "refreshToken", cancellationToken);
+        Assert.Equal("rotated-new", current!.RefreshToken);
+        Assert.Equal(1, current.RuntimeRevision);
+    }
+
+    [Fact]
+    public async Task A_clear_committed_during_the_provider_call_refuses_the_older_rotation()
+    {
+        var slots = new InMemoryMutableSlotStore();
+        var profile = AuthorizationCodeProfile(slot: new AuthenticationSlot("refreshToken", 1, 0));
+        var authorized = await slots.CompareAndCommitAsync(
+            AuthorizedDecision(profile, epoch: 2, revision: 0, "local-refresh"),
+            expectedVersion: null,
+            declaredEpoch: 1,
+            CancellationToken.None);
+
+        var transport = new RecordingTransport(async (_, _, token) =>
+        {
+            // A clear commits a newer epoch while the refresh is in flight.
+            await slots.CompareAndCommitAsync(
+                ClearedDecision(profile, epoch: 3), authorized.Version, declaredEpoch: 2, token);
+            return RespondsWithRefresh("access-a", "rotated-local", expiresIn: 3600);
+        });
+
+        var cache = new AccessTokenCache();
+        var service = Service(transport, slots: slots, cache: cache);
+
+        // The compare-and-commit of the successor sees a changed observed version and refuses; the
+        // displaced access token from the provider is never published.
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(async () =>
+            await service.AcquireAsync(profile, AuthorizationCodeCredentials(), CancellationToken.None).AsTask());
+
+        var decision = await slots.LoadDecisionAsync("oauth", "refreshToken", CancellationToken.None);
+        Assert.Equal(MutableSlotDecisionKind.Cleared, decision!.Kind);
+        Assert.Equal(3, decision.AuthorityEpoch);
+        Assert.Equal(0, cache.Count);
+    }
+
+    [Fact]
+    public async Task An_in_flight_acquisition_refuses_to_publish_after_an_authority_change()
+    {
+        var release = new TaskCompletionSource();
+        var slots = new InMemoryMutableSlotStore();
+        var profile = AuthorizationCodeProfile(slot: new AuthenticationSlot("refreshToken", 1, 0));
+
+        var transport = new RecordingTransport(async (_, _, token) =>
+        {
+            await release.Task.WaitAsync(token);
+            return Responds("access-a", expiresIn: 3600);
+        });
+
+        var cache = new AccessTokenCache();
+        var service = Service(transport, slots: slots, cache: cache);
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var acquiring = service.AcquireAsync(profile, AuthorizationCodeCredentials(), cancellationToken).AsTask();
+        await Task.Delay(50, cancellationToken);
+
+        // An explicit authority transition commits while the provider call is still in flight.
+        service.NotifyAuthorityChanged(profile.Id, "refreshToken");
+
+        release.SetResult();
+
+        // The older completion must not serve or cache a token minted under the displaced authority.
+        CredentialUnavailableException? refusal = null;
+        try
+        {
+            await acquiring;
+        }
+        catch (CredentialUnavailableException exception)
+        {
+            refusal = exception;
+        }
+
+        Assert.NotNull(refusal);
+        Assert.Equal(0, cache.Count);
+    }
+
+    [Fact]
+    public async Task A_cached_token_is_dropped_when_its_authority_changes()
+    {
+        var slots = new InMemoryMutableSlotStore();
+        var profile = AuthorizationCodeProfile(slot: new AuthenticationSlot("refreshToken", 1, 0));
+        var cache = new AccessTokenCache();
+        var transport = new RecordingTransport(Responds("access-a", expiresIn: 3600), Responds("access-b", expiresIn: 3600));
+        var service = Service(transport, slots: slots, cache: cache);
+
+        var first = await service.AcquireAsync(profile, AuthorizationCodeCredentials(), CancellationToken.None);
+        Assert.Equal("access-a", first.Credentials[0].Value);
+        Assert.Single(transport.Requests);
+
+        service.NotifyAuthorityChanged(profile.Id, "refreshToken");
+
+        // The previously cached token must not be reachable after the authority advanced.
+        var second = await service.AcquireAsync(profile, AuthorizationCodeCredentials(), CancellationToken.None);
+        Assert.Equal("access-b", second.Credentials[0].Value);
+        Assert.Equal(2, transport.Requests.Count);
+    }
+
+    [Fact]
+    public async Task A_post_commit_notification_failure_is_not_a_failed_rotation()
+    {
+        var slots = new InMemoryMutableSlotStore();
+        var profile = AuthorizationCodeProfile(slot: new AuthenticationSlot("refreshToken", 1, 0));
+        var transport = new RecordingTransport(RespondsWithRefresh("access-a", "rotated-refresh", expiresIn: 3600));
+        var service = Service(
+            transport,
+            slots: slots,
+            onRotated: (_, _) => throw new InvalidOperationException("reconciliation is unreachable"));
+
+        // The rotation is durable before the notification runs, so a throwing observer must not turn
+        // a committed rotation into a refused acquisition.
+        var acquisition = await service.AcquireAsync(profile, AuthorizationCodeCredentials(), CancellationToken.None);
+
+        Assert.Equal("access-a", acquisition.Credentials[0].Value);
+        var stored = await slots.LoadAsync(profile.Id, "refreshToken", CancellationToken.None);
+        Assert.NotNull(stored);
+        Assert.Equal("rotated-refresh", stored!.Value);
+    }
+
     private static OAuthTokenService Service(
         RecordingTransport transport,
         AdvanceableClock? clock = null,
         InMemoryMutableSlotStore? slots = null,
-        Func<RotatedRefreshToken, CancellationToken, ValueTask>? onRotated = null)
+        Func<RotatedRefreshToken, CancellationToken, ValueTask>? onRotated = null,
+        AccessTokenCache? cache = null)
     {
         var timeProvider = clock ?? new AdvanceableClock(Now);
 
         return new OAuthTokenService(
             new OAuthTokenEndpointClient(transport, timeProvider),
-            new AccessTokenCache(),
+            cache ?? new AccessTokenCache(),
             new AccessTokenSingleFlight(),
             slots ?? new InMemoryMutableSlotStore(),
             timeProvider,
             onRotated);
     }
+
+    private static OAuthStrategyConfiguration ConfigOf(AuthenticationProfile profile)
+        => OAuthStrategyConfiguration.FromConfiguration(profile.Configuration, authorizationCodeRequired: true);
+
+    private static MutableSlotDecision AuthorizedDecision(
+        AuthenticationProfile profile, long epoch, long revision, string refresh)
+        => new(
+            profile.Id,
+            "refreshToken",
+            profile.ScopeFingerprint,
+            AuthorityBinding.Declaration(profile),
+            AuthorityBinding.Configuration(ConfigOf(profile)),
+            epoch,
+            revision,
+            MutableSlotDecisionKind.Authorized,
+            refresh);
+
+    private static MutableSlotDecision ClearedDecision(AuthenticationProfile profile, long epoch)
+        => new(
+            profile.Id,
+            "refreshToken",
+            profile.ScopeFingerprint,
+            AuthorityBinding.Declaration(profile),
+            AuthorityBinding.Configuration(ConfigOf(profile)),
+            epoch,
+            0,
+            MutableSlotDecisionKind.Cleared,
+            null);
+
+    private static IReadOnlyList<ResolvedCredential> AuthorizationCodeCredentials(string refresh = "declared-refresh") =>
+        [
+            Secret("oauth2-authorization-code", "clientSecret", "client-secret-canary"),
+            Secret("oauth2-authorization-code", "refreshToken", refresh),
+        ];
 
     private static AuthenticationProfile ClientCredentialsProfile(AuthenticationSlot? slot = null) =>
         Profile(
@@ -472,13 +900,14 @@ public sealed class OAuthTokenServiceTests
 
     private static AuthenticationProfile AuthorizationCodeProfile(
         AuthenticationSlot? slot = null,
-        string? scopeFingerprint = null) =>
+        string? scopeFingerprint = null,
+        string clientId = "example-client") =>
         Profile(
             AuthenticationKind.OAuth2AuthorizationCodePkceRefresh,
             $$"""
             {
               "strategyId": "oauth2-authorization-code-pkce-refresh",
-              "clientId": "example-client",
+              "clientId": "{{clientId}}",
               "tokenEndpoint": "{{TokenEndpoint}}",
               "authorizationEndpoint": "https://auth.example.com/oauth2/authorize",
               "tokenAuthMethod": "client_secret_post"

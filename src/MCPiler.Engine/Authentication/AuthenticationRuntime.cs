@@ -80,6 +80,7 @@ public sealed class AuthenticationRuntime : IDisposable
     private readonly ChallengeSessionCache _challenges;
     private readonly TimeProvider _timeProvider;
     private readonly RequestSignerRegistry _registry;
+    private readonly IUpstreamTransport _transport;
 
     /// <summary>Creates a runtime over the transport and runtime-state port.</summary>
     /// <param name="transport">How an authentication endpoint is reached.</param>
@@ -87,9 +88,10 @@ public sealed class AuthenticationRuntime : IDisposable
     /// <param name="slots">Where a rotated refresh token is committed; in-memory when absent.</param>
     /// <param name="rotationSink">
     /// Receives one committed refresh-token rotation so a managed host can reconcile it with the
-    /// deployment that issued the profile. The callback runs after the local commit; a callback
-    /// that throws fails the invocation that rotated, because reporting a rotation that could not
-    /// be queued would lose the only record that the credential changed.
+    /// deployment that issued the profile. The callback runs after the local commit and is
+    /// best-effort: the rotation is already durable, so a callback that throws is recorded as an
+    /// auxiliary failure rather than reported as a refused acquisition, and reconciliation is
+    /// regenerated from the committed record.
     /// </param>
     public AuthenticationRuntime(
         IUpstreamTransport transport,
@@ -101,6 +103,7 @@ public sealed class AuthenticationRuntime : IDisposable
 
         _timeProvider = timeProvider ?? TimeProvider.System;
         _slots = slots ?? new InMemoryMutableSlotStore();
+        _transport = transport;
         _accessTokens = new AccessTokenCache();
         _singleFlight = new AccessTokenSingleFlight();
         _challenges = new ChallengeSessionCache(_timeProvider);
@@ -126,6 +129,17 @@ public sealed class AuthenticationRuntime : IDisposable
 
     /// <summary>Challenge-session state and disposition.</summary>
     public ChallengeSessionService Challenge { get; }
+
+    /// <summary>
+    /// The transport this runtime reaches authentication endpoints through.
+    /// </summary>
+    /// <remarks>
+    /// Exposed so a host's own operator channel can attempt a bounded revocation over exactly the
+    /// connections this mount already uses. A second transport would carry its own address policy,
+    /// and the deployment would then have two answers to which addresses an authentication endpoint
+    /// may live at.
+    /// </remarks>
+    internal IUpstreamTransport Transport => _transport;
 
     /// <summary>
     /// Resolves the credentials, destination and signer for one profile.

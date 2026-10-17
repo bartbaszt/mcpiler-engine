@@ -1,4 +1,6 @@
 using System.Text;
+using System.Security.Cryptography;
+using System.Text.Json;
 using MCPiler.Engine.Execution.RuntimeState;
 using MCPiler.Engine.Execution.Secrets.RuntimeState;
 using Xunit;
@@ -23,12 +25,486 @@ public sealed class RuntimeSecretStoreTests : IDisposable
 
     private readonly List<string> _roots = [];
 
+    [Fact]
+    public async Task Runtime_state_owner_lease_is_exclusive_and_released_without_deleting_lock_file()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "engine-owner-unit-" + Guid.NewGuid().ToString("N"));
+        _roots.Add(root);
+
+        Assert.True(RuntimeStateOwnerLease.TryAcquire(root, out var owner, out var refusal), refusal);
+        using (owner!)
+        {
+            Assert.False(RuntimeStateOwnerLease.TryAcquire(root, out var contender, out var conflict));
+            Assert.Null(contender);
+            Assert.Contains("ownership is unavailable or held", conflict, StringComparison.Ordinal);
+
+            var store = new FileMutableSlotStore(root, "mount", Key);
+            Assert.Null(await store.LoadDecisionAsync("oauth", "refreshToken", TestContext.Current.CancellationToken));
+        }
+
+        Assert.True(RuntimeStateOwnerLease.TryAcquire(root, out var successor, out var recovered), recovered);
+        using (successor!)
+        {
+            Assert.True(File.Exists(Path.Combine(root, ".runtime-state-owner.lock")));
+        }
+    }
+
+    [Fact]
+    public void Runtime_state_owner_lease_refuses_a_network_root_without_probing_it()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        // A UNC spelling is refused by the supported-filesystem boundary itself, before any
+        // directory probe, lock open or path resolution could touch the remote share.
+        string root = @"\\engine-unsupported-host.invalid\state\" + Guid.NewGuid().ToString("N");
+
+        Assert.False(RuntimeStateOwnerLease.TryAcquire(root, out var lease, out var refusal));
+        Assert.Null(lease);
+        Assert.Contains("supported local filesystem", refusal, StringComparison.Ordinal);
+    }
+
     public void Dispose()
     {
         foreach (var root in _roots.Where(Directory.Exists))
         {
             Directory.Delete(root, recursive: true);
         }
+    }
+
+    private static MutableSlotDecision Decision(
+        long epoch, MutableSlotDecisionKind kind = MutableSlotDecisionKind.Authorized,
+        long revision = 0, string? value = PlaintextCanary,
+        string declaration = "manifest-declaration-a", string configuration = "oauth-config-a")
+        => new("oauth", "refreshToken", "scope-a", declaration, configuration,
+            epoch, revision, kind,
+            kind == MutableSlotDecisionKind.Cleared ? null : value);
+
+    [Fact]
+    public async Task Memory_store_legacy_same_revision_replacement_invalidates_observed_cas_version()
+    {
+        var store = new InMemoryMutableSlotStore();
+        var ct = TestContext.Current.CancellationToken;
+        await store.ReplaceAsync(new MutableSlotRecord("oauth", "refreshToken", "scope-a", 2, 7, "v1"), ct);
+        var observed = (await store.LoadDecisionAsync("oauth", "refreshToken", ct))!;
+        await store.ReplaceAsync(new MutableSlotRecord("oauth", "refreshToken", "scope-a", 2, 7, "v2"), ct);
+
+        var current = (await store.LoadDecisionAsync("oauth", "refreshToken", ct))!;
+        Assert.NotEqual(observed.Version, current.Version);
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.CompareAndCommitAsync(
+            Decision(3), observed.Version, 2, ct).AsTask());
+        var committed = await store.CompareAndCommitAsync(Decision(3), current.Version, 2, ct);
+        Assert.Equal(1, store.Count);
+        Assert.Equal(committed, await store.LoadDecisionAsync("oauth", "refreshToken", ct));
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "scope-a", 4, 0, "resurrection"), ct).AsTask());
+    }
+
+    [Fact]
+    public async Task Invalid_legacy_epoch_cannot_be_adopted_as_v2_authority()
+    {
+        var store = Store();
+        var ct = TestContext.Current.CancellationToken;
+        await store.ReplaceAsync(new MutableSlotRecord(
+            "oauth", "refreshToken", "scope-a", -1, 0, PlaintextCanary), ct);
+
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.LoadDecisionAsync(
+            "oauth", "refreshToken", ct).AsTask());
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.CompareAndCommitAsync(
+            Decision(2), null, 1, ct).AsTask());
+    }
+
+    [Fact]
+    public async Task Legacy_v1_writer_preserves_original_header_shape_without_v2_fields()
+    {
+        var store = Store();
+        var ct = TestContext.Current.CancellationToken;
+        await store.ReplaceAsync(new MutableSlotRecord(
+            "oauth", "refreshToken", "scope-a", 1, 2, PlaintextCanary), ct);
+
+        var envelope = File.ReadAllBytes(Assert.Single(Directory.GetFiles(store.Root, "*.rstate")));
+        Assert.Equal(FileMutableSlotStore.FormatVersion, envelope[0]);
+        var length = envelope[1] | envelope[2] << 8;
+        using var header = JsonDocument.Parse(envelope.AsMemory(3, length));
+        Assert.Equal(7, header.RootElement.EnumerateObject().Count());
+        Assert.False(header.RootElement.TryGetProperty("DecisionKind", out _));
+        Assert.False(header.RootElement.TryGetProperty("DeclarationFingerprint", out _));
+        Assert.False(header.RootElement.TryGetProperty("ConfigurationFingerprint", out _));
+        Assert.Equal(PlaintextCanary,
+            (await new FileMutableSlotStore(store.Root, "mount-a", Key)
+                .LoadDecisionAsync("oauth", "refreshToken", ct))!.RefreshToken);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Authenticated_v2_duplicate_binding_or_invalid_cleared_revision_is_refused(bool duplicateField)
+    {
+        var store = Store();
+        var ct = TestContext.Current.CancellationToken;
+        var authorized = await store.CompareAndCommitAsync(
+            Decision(2, MutableSlotDecisionKind.Cleared), null, 1, ct);
+        var path = Assert.Single(Directory.GetFiles(store.Root, "*.rstate"));
+        var original = File.ReadAllBytes(path);
+        byte[] malformed = RewriteAuthenticatedV2Header(original, value => duplicateField
+            ? value.Replace("\"DecisionKind\":\"cleared\"",
+                "\"DecisionKind\":\"cleared\",\"DecisionKind\":\"authorized\"", StringComparison.Ordinal)
+            : value.Replace("\"RuntimeRevision\":0", "\"RuntimeRevision\":1", StringComparison.Ordinal));
+        File.WriteAllBytes(path, malformed);
+
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.LoadDecisionAsync(
+            "oauth", "refreshToken", ct).AsTask());
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.CompareAndCommitAsync(
+            Decision(3), authorized.Version, 1, ct).AsTask());
+        Assert.Equal(malformed, File.ReadAllBytes(path));
+    }
+
+    [Fact]
+    public async Task Oversized_v2_header_refuses_commit_and_preserves_predecessor()
+    {
+        var store = Store();
+        var ct = TestContext.Current.CancellationToken;
+        var original = await store.CompareAndCommitAsync(Decision(2), null, 1, ct);
+        string path = Assert.Single(Directory.GetFiles(store.Root, "*.rstate"));
+        byte[] bytes = File.ReadAllBytes(path);
+
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.CompareAndCommitAsync(
+            Decision(3, declaration: new string('A', 70_000)), original.Version, 1, ct).AsTask());
+
+        Assert.Equal(bytes, File.ReadAllBytes(path));
+        Assert.Single(Directory.GetFiles(store.Root));
+        Assert.Equal(original, await new FileMutableSlotStore(store.Root, "mount-a", Key)
+            .LoadDecisionAsync("oauth", "refreshToken", ct));
+    }
+
+    [Fact]
+    public async Task V2_canceled_precommit_does_not_leave_a_temporary_file_or_replace_clear()
+    {
+        var store = Store();
+        var ct = TestContext.Current.CancellationToken;
+        var original = await store.CompareAndCommitAsync(
+            Decision(2, MutableSlotDecisionKind.Cleared), null, 1, ct);
+        store.TempFlushedBarrier = _ => throw new OperationCanceledException("injected cancellation");
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() => store.CompareAndCommitAsync(
+            Decision(3), original.Version, 1, ct).AsTask());
+
+        Assert.Single(Directory.GetFiles(store.Root));
+        Assert.Equal(original, await new FileMutableSlotStore(store.Root, "mount-a", Key)
+            .LoadDecisionAsync("oauth", "refreshToken", ct));
+    }
+
+    [Fact]
+    public async Task V2_shared_root_keeps_cleared_and_authorized_mounts_isolated()
+    {
+        var first = Store();
+        var second = new FileMutableSlotStore(first.Root, "mount-b", Key);
+        var ct = TestContext.Current.CancellationToken;
+        var cleared = await first.CompareAndCommitAsync(
+            Decision(3, MutableSlotDecisionKind.Cleared), null, 2, ct);
+        var authorized = await second.CompareAndCommitAsync(Decision(5), null, 4, ct);
+
+        Assert.Equal(cleared, await first.LoadDecisionAsync("oauth", "refreshToken", ct));
+        Assert.Equal(authorized, await second.LoadDecisionAsync("oauth", "refreshToken", ct));
+        Assert.Equal(2, Directory.GetFiles(first.Root, "*.rstate").Length);
+        var rotated = await second.CompareAndCommitAsync(Decision(5, revision: 1), authorized.Version, 4, ct);
+        Assert.Equal(cleared, await new FileMutableSlotStore(first.Root, "mount-a", Key)
+            .LoadDecisionAsync("oauth", "refreshToken", ct));
+        Assert.Equal(rotated, await new FileMutableSlotStore(first.Root, "mount-b", Key)
+            .LoadDecisionAsync("oauth", "refreshToken", ct));
+    }
+
+    [Fact]
+    public async Task V2_refuses_delimited_identities_that_alias_other_mount_profile_slot_tuples()
+    {
+        var store = Store();
+        var ct = TestContext.Current.CancellationToken;
+        var malformedProfile = Decision(2) with { ProfileId = "oauth\u001fother" };
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.CompareAndCommitAsync(
+            malformedProfile, null, 1, ct).AsTask());
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.LoadDecisionAsync(
+            "oauth\u001fother", "refreshToken", ct).AsTask());
+
+        var malformedMount = new FileMutableSlotStore(store.Root, "mount-a\u001fother", Key);
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => malformedMount.CompareAndCommitAsync(
+            Decision(2), null, 1, ct).AsTask());
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => malformedMount.LoadDecisionAsync(
+            "oauth", "refreshToken", ct).AsTask());
+        Assert.Empty(Directory.GetFiles(store.Root, "*.rstate"));
+    }
+
+    [Fact]
+    public async Task V2_file_permission_refusal_preserves_existing_authority_and_no_temporary()
+    {
+        var store = Store();
+        var ct = TestContext.Current.CancellationToken;
+        var original = await store.CompareAndCommitAsync(
+            Decision(2, MutableSlotDecisionKind.Cleared), null, 1, ct);
+        string record = Assert.Single(Directory.GetFiles(store.Root, "*.rstate"));
+        byte[] before = File.ReadAllBytes(record);
+        store.PermissionSetter = _ => false;
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.CompareAndCommitAsync(
+            Decision(3), original.Version, 1, ct).AsTask());
+
+        Assert.Equal(before, File.ReadAllBytes(record));
+        Assert.Single(Directory.GetFiles(store.Root));
+        Assert.Equal(original, await new FileMutableSlotStore(store.Root, "mount-a", Key)
+            .LoadDecisionAsync("oauth", "refreshToken", ct));
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.True(FileMutableSlotStore.IsRestrictiveWindowsAcl(record, isDirectory: false));
+        }
+        else
+        {
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(record));
+        }
+    }
+
+    [Fact]
+    public async Task Compaction_never_deletes_a_corrupted_cleared_floor_when_another_slot_commits()
+    {
+        var store = Store();
+        var ct = TestContext.Current.CancellationToken;
+        await store.CompareAndCommitAsync(Decision(2, MutableSlotDecisionKind.Cleared), null, 1, ct);
+        string clearedPath = Assert.Single(Directory.GetFiles(store.Root, "*.rstate"));
+        byte[] tampered = File.ReadAllBytes(clearedPath);
+        int headerLength = tampered[1] | tampered[2] << 8;
+        string original = Encoding.UTF8.GetString(tampered, 3, headerLength);
+        string changed = original.Replace("\"Profile\":\"oauth\"", "\"Profile\":\"aouth\"",
+            StringComparison.Ordinal);
+        Assert.NotEqual(original, changed);
+        Encoding.UTF8.GetBytes(changed).CopyTo(tampered.AsSpan(3, headerLength));
+        File.WriteAllBytes(clearedPath, tampered);
+
+        // Committing a different slot triggers best-effort compaction; a plaintext JSON identity
+        // mismatch must never allow deletion of ciphertext that fails authentication.
+        var unrelated = Decision(2) with { Slot = "otherRefresh" };
+        await store.CompareAndCommitAsync(unrelated, null, 1, ct);
+        Assert.True(File.Exists(clearedPath));
+        Assert.Equal(tampered, File.ReadAllBytes(clearedPath));
+        Assert.Equal(2, Directory.GetFiles(store.Root, "*.rstate").Length);
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => new FileMutableSlotStore(
+            store.Root, "mount-a", Key).LoadDecisionAsync("oauth", "refreshToken", ct).AsTask());
+    }
+
+    private static byte[] RewriteAuthenticatedV2Header(byte[] source, Func<string, string> modify)
+    {
+        int oldLength = source[1] | source[2] << 8;
+        int nonceOffset = 3 + oldLength;
+        var plaintext = new byte[source.Length - nonceOffset - FileMutableSlotStore.NonceLength
+            - FileMutableSlotStore.TagLength];
+        using (var aes = new AesGcm(Key, FileMutableSlotStore.TagLength))
+        {
+            aes.Decrypt(source.AsSpan(nonceOffset, FileMutableSlotStore.NonceLength),
+                source.AsSpan(nonceOffset + FileMutableSlotStore.NonceLength, plaintext.Length),
+                source.AsSpan(source.Length - FileMutableSlotStore.TagLength), plaintext,
+                source.AsSpan(0, nonceOffset));
+        }
+
+        byte[] newHeader = Encoding.UTF8.GetBytes(modify(Encoding.UTF8.GetString(source, 3, oldLength)));
+        var result = new byte[3 + newHeader.Length + FileMutableSlotStore.NonceLength
+            + plaintext.Length + FileMutableSlotStore.TagLength];
+        result[0] = FileMutableSlotStore.AuthorityFormatVersion;
+        result[1] = (byte)newHeader.Length;
+        result[2] = (byte)(newHeader.Length >> 8);
+        newHeader.CopyTo(result.AsSpan(3));
+        int newNonceOffset = 3 + newHeader.Length;
+        RandomNumberGenerator.Fill(result.AsSpan(newNonceOffset, FileMutableSlotStore.NonceLength));
+        using (var aes = new AesGcm(Key, FileMutableSlotStore.TagLength))
+        {
+            aes.Encrypt(result.AsSpan(newNonceOffset, FileMutableSlotStore.NonceLength), plaintext,
+                result.AsSpan(newNonceOffset + FileMutableSlotStore.NonceLength, plaintext.Length),
+                result.AsSpan(result.Length - FileMutableSlotStore.TagLength),
+                result.AsSpan(0, newNonceOffset));
+        }
+
+        return result;
+    }
+
+    [Fact]
+    public async Task Legacy_v1_decision_can_be_superseded_atomically_by_bound_v2_authority()
+    {
+        var store = Store();
+        var ct = TestContext.Current.CancellationToken;
+        await store.ReplaceAsync(new MutableSlotRecord(
+            "oauth", "refreshToken", "scope-a", 2, 7, "CANARY-legacy-v1"), ct);
+
+        MutableSlotDecision legacy = Assert.IsType<MutableSlotDecision>(
+            await store.LoadDecisionAsync("oauth", "refreshToken", ct));
+        Assert.True(legacy.IsLegacy);
+        Assert.Null(legacy.DeclarationFingerprint);
+        Assert.Equal("CANARY-legacy-v1", legacy.RefreshToken);
+
+        MutableSlotDecision written = await store.CompareAndCommitAsync(
+            Decision(3), legacy.Version, declaredEpoch: 2, ct);
+        Assert.False(written.IsLegacy);
+        Assert.NotEmpty(written.Version);
+
+        var fresh = new FileMutableSlotStore(store.Root, "mount-a", Key);
+        Assert.Equal(written, await fresh.LoadDecisionAsync("oauth", "refreshToken", ct));
+        Assert.Equal(FileMutableSlotStore.AuthorityFormatVersion,
+            File.ReadAllBytes(Assert.Single(Directory.GetFiles(store.Root, "*.rstate")))[0]);
+        Assert.DoesNotContain(PlaintextCanary,
+            Encoding.UTF8.GetString(File.ReadAllBytes(Assert.Single(Directory.GetFiles(store.Root, "*.rstate")))),
+            StringComparison.Ordinal);
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => fresh.LoadAsync(
+            "oauth", "refreshToken", ct).AsTask());
+    }
+
+    [Fact]
+    public async Task Cleared_v2_decision_survives_restart_and_changed_manifest_epoch_and_binding()
+    {
+        var store = Store();
+        var ct = TestContext.Current.CancellationToken;
+        MutableSlotDecision authorized = await store.CompareAndCommitAsync(Decision(4), null, 3, ct);
+        MutableSlotDecision cleared = await store.CompareAndCommitAsync(
+            Decision(5, MutableSlotDecisionKind.Cleared), authorized.Version, 3, ct);
+
+        var reopened = new FileMutableSlotStore(store.Root, "mount-a", Key);
+        MutableSlotDecision current = Assert.IsType<MutableSlotDecision>(
+            await reopened.LoadDecisionAsync("oauth", "refreshToken", ct));
+        Assert.Equal(cleared, current);
+        Assert.Equal(MutableSlotDecisionKind.Cleared, current.Kind);
+        Assert.Null(current.RefreshToken);
+
+        // Even a newer Manifest declaration cannot silently overwrite the authenticated floor.
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => reopened.CompareAndCommitAsync(
+            Decision(5, declaration: "changed", configuration: "changed"), current.Version, 10, ct).AsTask());
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => reopened.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "scope-a", 12, 0, "CANARY-resurrection"), ct).AsTask());
+        Assert.Equal(cleared, await reopened.LoadDecisionAsync("oauth", "refreshToken", ct));
+    }
+
+    [Fact]
+    public async Task Competing_authorization_uses_exact_observed_version_and_refuses_stale_commit()
+    {
+        var store = Store();
+        var ct = TestContext.Current.CancellationToken;
+        MutableSlotDecision first = await store.CompareAndCommitAsync(Decision(2), null, 1, ct);
+        var other = new FileMutableSlotStore(store.Root, "mount-a", Key);
+        MutableSlotDecision winner = await other.CompareAndCommitAsync(
+            Decision(3, value: "CANARY-winner"), first.Version, 1, ct);
+        byte[] before = File.ReadAllBytes(Assert.Single(Directory.GetFiles(store.Root, "*.rstate")));
+
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.CompareAndCommitAsync(
+            Decision(4, value: "CANARY-loser"), first.Version, 1, ct).AsTask());
+
+        Assert.Equal(before, File.ReadAllBytes(Assert.Single(Directory.GetFiles(store.Root, "*.rstate"))));
+        Assert.Equal(winner, await store.LoadDecisionAsync("oauth", "refreshToken", ct));
+    }
+
+    [Fact]
+    public async Task Bound_refresh_advances_once_and_refuses_changed_config_and_nonsequential_revision()
+    {
+        var store = Store();
+        var ct = TestContext.Current.CancellationToken;
+        MutableSlotDecision authorized = await store.CompareAndCommitAsync(Decision(2), null, 1, ct);
+        var next = await store.CompareAndCommitAsync(
+            Decision(2, revision: 1, value: "CANARY-rotated"), authorized.Version, 1, ct);
+
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.CompareAndCommitAsync(
+            Decision(2, revision: 2, value: "CANARY-config-change", configuration: "changed"),
+            next.Version, 1, ct).AsTask());
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.CompareAndCommitAsync(
+            Decision(2, revision: 3, value: "CANARY-skipped-revision"), next.Version, 1, ct).AsTask());
+
+        Assert.Equal(next, await new FileMutableSlotStore(store.Root, "mount-a", Key)
+            .LoadDecisionAsync("oauth", "refreshToken", ct));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task V2_corruption_or_wrong_key_refuses_cas_without_mutation(bool wrongKey)
+    {
+        var store = Store();
+        var ct = TestContext.Current.CancellationToken;
+        MutableSlotDecision authorized = await store.CompareAndCommitAsync(Decision(2), null, 1, ct);
+        string path = Assert.Single(Directory.GetFiles(store.Root, "*.rstate"));
+        if (!wrongKey)
+        {
+            byte[] tampered = File.ReadAllBytes(path);
+            tampered[^1] ^= 0x01;
+            File.WriteAllBytes(path, tampered);
+        }
+
+        byte[] before = File.ReadAllBytes(path);
+        var reader = new FileMutableSlotStore(store.Root, "mount-a", wrongKey ? OtherKey() : Key);
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => reader.LoadDecisionAsync(
+            "oauth", "refreshToken", ct).AsTask());
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => reader.CompareAndCommitAsync(
+            Decision(3), authorized.Version, 1, ct).AsTask());
+        Assert.Equal(before, File.ReadAllBytes(path));
+    }
+
+    [Fact]
+    public async Task V2_precommit_failure_retains_floor_and_postcommit_failure_keeps_successor()
+    {
+        var store = Store();
+        var ct = TestContext.Current.CancellationToken;
+        MutableSlotDecision original = await store.CompareAndCommitAsync(
+            Decision(2, MutableSlotDecisionKind.Cleared), null, 1, ct);
+        store.TempFlushedBarrier = _ => throw new IOException("injected pre-commit");
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.CompareAndCommitAsync(
+            Decision(3), original.Version, 1, ct).AsTask());
+        Assert.Equal(original, await new FileMutableSlotStore(store.Root, "mount-a", Key)
+            .LoadDecisionAsync("oauth", "refreshToken", ct));
+
+        store.TempFlushedBarrier = null;
+        store.CompactionBarrier = () => throw new IOException("injected post-commit");
+        MutableSlotDecision succeeded = await store.CompareAndCommitAsync(Decision(3), original.Version, 1, ct);
+        Assert.Equal(succeeded, await new FileMutableSlotStore(store.Root, "mount-a", Key)
+            .LoadDecisionAsync("oauth", "refreshToken", ct));
+    }
+
+    [Fact]
+    public async Task Precommit_flush_failure_preserves_previous_authenticated_record_on_fresh_open()
+    {
+        var store = Store();
+        var ct = TestContext.Current.CancellationToken;
+        await store.ReplaceAsync(new MutableSlotRecord(
+            "oauth", "refreshToken", "fingerprint-a", 3, 4, PlaintextCanary), ct);
+
+        store.TempFlushedBarrier = _ => throw new IOException("injected before atomic replacement");
+
+        await Assert.ThrowsAsync<RuntimeStateStoreException>(() => store.ReplaceAsync(
+            new MutableSlotRecord("oauth", "refreshToken", "fingerprint-a", 3, 5, "CANARY-successor"),
+            ct).AsTask());
+
+        var reopened = new FileMutableSlotStore(store.Root, "mount-a", Key);
+        var committed = await reopened.LoadAsync("oauth", "refreshToken", ct);
+        Assert.NotNull(committed);
+        Assert.Equal(4, committed!.RuntimeRevision);
+        Assert.Equal(PlaintextCanary, committed.Value);
+        Assert.Single(Directory.GetFiles(store.Root, "*" + FileMutableSlotStore.RecordExtension));
+        Assert.DoesNotContain("CANARY-successor", Encoding.UTF8.GetString(
+            File.ReadAllBytes(Assert.Single(Directory.GetFiles(store.Root, "*" + FileMutableSlotStore.RecordExtension)))),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Postcommit_compaction_failure_does_not_undo_commit_or_report_false_failure()
+    {
+        var store = Store();
+        var ct = TestContext.Current.CancellationToken;
+        await store.ReplaceAsync(new MutableSlotRecord(
+            "oauth", "refreshToken", "fingerprint-a", 3, 4, PlaintextCanary), ct);
+        store.CompactionBarrier = () => throw new IOException("injected after atomic replacement");
+
+        await store.ReplaceAsync(new MutableSlotRecord(
+            "oauth", "refreshToken", "fingerprint-a", 3, 5, "CANARY-successor"), ct);
+
+        var reopened = new FileMutableSlotStore(store.Root, "mount-a", Key);
+        var committed = await reopened.LoadAsync("oauth", "refreshToken", ct);
+        Assert.NotNull(committed);
+        Assert.Equal(5, committed!.RuntimeRevision);
+        Assert.Equal("CANARY-successor", committed.Value);
+        Assert.Single(Directory.GetFiles(store.Root, "*" + FileMutableSlotStore.RecordExtension));
+        Assert.DoesNotContain("CANARY-successor", Encoding.UTF8.GetString(
+            File.ReadAllBytes(Assert.Single(Directory.GetFiles(store.Root, "*" + FileMutableSlotStore.RecordExtension)))),
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -911,35 +1387,6 @@ public sealed class RuntimeSecretStoreTests : IDisposable
             .Single();
 
         Assert.True(FileMutableSlotStore.IsRestrictiveWindowsAcl(recordPath, isDirectory: false));
-    }
-
-    [Fact]
-    public void An_unrestricted_directory_is_never_silently_accepted_on_windows()
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            return;
-        }
-
-        // A directory that keeps its inherited (unrestricted) ACEs is detected as non-conformant.
-        var loose = Path.Combine(NewRoot(), "loose");
-        Directory.CreateDirectory(loose);
-        _roots.Add(loose);
-        Assert.False(FileMutableSlotStore.IsRestrictiveWindowsAcl(loose, isDirectory: true));
-
-        // And when the store cannot establish the contract it fails closed rather than opening an
-        // unrestricted runtime-state directory.
-        FileMutableSlotStore.WindowsAclApplierForTesting = (_, _) => false;
-        try
-        {
-            var root = Path.Combine(NewRoot(), "mount-a");
-            _roots.Add(root);
-            Assert.Throws<InvalidOperationException>(() => new FileMutableSlotStore(root, "mount-a", Key));
-        }
-        finally
-        {
-            FileMutableSlotStore.WindowsAclApplierForTesting = null;
-        }
     }
 
     private FileMutableSlotStore Store()

@@ -12,8 +12,10 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 
 using MCPiler.Engine.Authentication;
+using MCPiler.Engine.Authentication.OAuth;
 using MCPiler.Engine.Authentication.OAuth1;
 using MCPiler.Engine.Execution.RuntimeState;
+using MCPiler.Engine.Execution.Secrets.RuntimeState;
 using MCPiler.Engine.Execution;
 using MCPiler.Engine.Execution.Outbound;
 using MCPiler.Engine.Execution.ResponseCaching;
@@ -187,6 +189,104 @@ public sealed class AuthenticationExecutionTests : IDisposable
         var apiCall = Assert.Single(requests, request => request.Path != "/token");
         Assert.Equal($"Bearer {AccessTokenCanary}", apiCall.Authorization);
         Assert.DoesNotContain(RotatedRefreshCanary, apiCall.Authorization ?? string.Empty, StringComparison.Ordinal);
+    }
+
+    // ST-3f/ST-5c: a served call authenticates with the locally committed authority, not the
+    // declared source. The declared credential still resolves here, so the only reason the local
+    // value can win is that the runtime read the committed decision first. The refresh value that
+    // arrives at the token endpoint names which one was used, and the API receives the token that
+    // value bought.
+    [Fact]
+    public async Task A_served_call_uses_a_committed_local_authority_over_the_declared_source()
+    {
+        var requests = new List<Recorded>();
+        await using var host = await LoopbackHost.StartAsync(
+            context => TokenHandlerAsync(context, requests),
+            TestContext.Current.CancellationToken);
+
+        string declaredRefresh = "CANARY-declared-refresh-" + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
+        string localRefresh = "CANARY-local-authority-refresh-" + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
+        var declaredVariable = SetVariable(declaredRefresh);
+        var secret = SetVariable(ClientSecretCanary);
+
+        const string scopeFingerprint = "0000000000000000000000000000000000000000000000000000000000000007";
+
+        AuthenticationProfile profile = Profile(
+            host,
+            AuthorizationCodeProfileId,
+            AuthenticationKind.OAuth2AuthorizationCodePkceRefresh,
+            $$"""
+            {
+              "strategyId": "oauth2-authorization-code-pkce-refresh",
+              "tokenEndpoint": "{{host.Address}}token",
+              "authorizationEndpoint": "{{host.Address}}authorize",
+              "clientId": "example-client",
+              "tokenAuthMethod": "client_secret_post"
+            }
+            """,
+            credentialRef: ["oauth2-authorization-client", "oauth2-authorization-refresh"],
+            slots: [new AuthenticationSlot("refreshToken", AuthorityEpoch: 1, RuntimeRevision: 0)])
+            with
+            {
+                ScopeFingerprint = scopeFingerprint,
+            };
+
+        var manifest = Manifest(
+            host,
+            Credentials(
+                new ManifestCredential(
+                    "oauth2-authorization-client",
+                    CredentialScheme.OAuth2AuthorizationCode,
+                    "clientSecret",
+                    CredentialReference.Env(secret)),
+                new ManifestCredential(
+                    "oauth2-authorization-refresh",
+                    CredentialScheme.OAuth2AuthorizationCode,
+                    "refreshToken",
+                    CredentialReference.Env(declaredVariable))),
+            profile,
+            AuthorizationCodeProfileId);
+
+        string root = Path.Combine(Path.GetTempPath(), "engine-served-authority-" + Guid.NewGuid().ToString("N"));
+        var store = new FileMutableSlotStore(root, "/api", StoreKey());
+
+        try
+        {
+            // The decision a CLI bootstrap commits: authority beyond the declared epoch, no token
+            // rotation yet, and fingerprints that name this exact declaration and configuration.
+            await store.CompareAndCommitAsync(
+                new MutableSlotDecision(
+                    profile.Id,
+                    "refreshToken",
+                    scopeFingerprint,
+                    AuthorityBinding.Declaration(profile),
+                    AuthorityBinding.Configuration(OAuthStrategyConfiguration.FromConfiguration(profile.Configuration, authorizationCodeRequired: true)),
+                    AuthorityEpoch: 2,
+                    RuntimeRevision: 0,
+                    MutableSlotDecisionKind.Authorized,
+                    RefreshToken: localRefresh),
+                expectedVersion: null,
+                declaredEpoch: 1,
+                TestContext.Current.CancellationToken);
+
+            var result = await RunAsync(
+                manifest,
+                new AuthenticationRuntime(new UpstreamSender(PermissiveClients()), slots: store));
+
+            Assert.Equal(ExecutionFailureKind.None, result.Failure);
+
+            var tokenCall = Assert.Single(requests, request => request.Path == "/token");
+            Assert.Contains("grant_type=refresh_token", tokenCall.Form, StringComparison.Ordinal);
+            Assert.Contains($"refresh_token={localRefresh}", tokenCall.Form, StringComparison.Ordinal);
+            Assert.DoesNotContain(declaredRefresh, tokenCall.Form ?? string.Empty, StringComparison.Ordinal);
+
+            var apiCall = Assert.Single(requests, request => request.Path != "/token");
+            Assert.Equal($"Bearer {AccessTokenCanary}", apiCall.Authorization);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
@@ -1953,6 +2053,19 @@ public sealed class AuthenticationExecutionTests : IDisposable
         // The fingerprint is a short readable handle, not the opaque value itself.
         Assert.NotNull(first.CallerPartitionFingerprint);
         Assert.DoesNotContain("partition-one", first.CallerPartitionFingerprint, StringComparison.Ordinal);
+    }
+
+    /// <summary>A deterministic runtime-state key, so a file-mode decision is readable in the test.</summary>
+    private static byte[] StoreKey()
+    {
+        byte[] key = new byte[32];
+
+        for (int index = 0; index < key.Length; index++)
+        {
+            key[index] = (byte)index;
+        }
+
+        return key;
     }
 
     private static OutboundConnectionPolicy PermissivePolicy() => new(_ => false);

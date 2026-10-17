@@ -7,6 +7,7 @@ using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 
 using MCPiler.Engine.Execution.RuntimeState;
 
@@ -47,8 +48,11 @@ namespace MCPiler.Engine.Execution.Secrets.RuntimeState;
 /// </remarks>
 public sealed class FileMutableSlotStore : IMutableSlotStore
 {
-    /// <summary>The format version this adapter writes and the only one it reads.</summary>
+    /// <summary>The existing mutable-secret rotation format, retained for compatibility.</summary>
     public const byte FormatVersion = 1;
+
+    /// <summary>The authenticated local authority decision format.</summary>
+    public const byte AuthorityFormatVersion = 2;
 
     /// <summary>Length of the AES-GCM nonce, in bytes.</summary>
     public const int NonceLength = 12;
@@ -84,6 +88,9 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
     {
         WriteIndented = false,
     };
+
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false,
+        throwOnInvalidBytes: true);
 
     /// <summary>
     /// Roots whose stale temporaries have already been reclaimed by this process. Cleanup runs at
@@ -182,7 +189,7 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
         byte[] envelope;
         try
         {
-            envelope = File.ReadAllBytes(path);
+            envelope = ReadEnvelope(path);
         }
         catch (FileNotFoundException)
         {
@@ -197,7 +204,261 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
             throw Failed(profileId, slot, "the record cannot be read.", ex);
         }
 
+        // This record-only view cannot express a cleared floor: returning the value for a cleared
+        // record, or null for it, would let a caller resurrect a source the operator cleared. The
+        // OAuth acquisition path resolves the effective authority through LoadDecisionAsync
+        // instead, so this guard is the fail-closed boundary for any record-only caller that
+        // remains (for example the managed reconciliation reader).
+        if (envelope.Length > 0 && envelope[0] == AuthorityFormatVersion)
+        {
+            throw Failed(profileId, slot,
+                "the local authority decision requires decision-aware OAuth resolution.");
+        }
+
         return ValueTask.FromResult(Decode(profileId, slot, envelope));
+    }
+
+    /// <inheritdoc />
+    public ValueTask<MutableSlotDecision?> LoadDecisionAsync(
+        string profileId, string slot, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(profileId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(slot);
+        EnsureDecisionIdentity(profileId, slot);
+        return ValueTask.FromResult(ReadDecision(profileId, slot));
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<MutableSlotDecision> CompareAndCommitAsync(
+        MutableSlotDecision successor, string? expectedVersion, long declaredEpoch,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(successor);
+        EnsureDecisionIdentity(successor.ProfileId, successor.Slot);
+        using (await IdentityGates.AcquireAsync(MountGateKey(_root, _mountIdentity), cancellationToken).ConfigureAwait(false))
+        using (await IdentityGates.AcquireAsync(SlotGateKey(_root, _mountIdentity, successor.ProfileId, successor.Slot), cancellationToken).ConfigureAwait(false))
+        {
+            var prior = ReadDecision(successor.ProfileId, successor.Slot);
+            if (!string.Equals(prior?.Version, expectedVersion, StringComparison.Ordinal))
+            {
+                throw Failed(successor.ProfileId, successor.Slot, "the observed authority version has changed.");
+            }
+
+            MutableSlotDecisionRules.Validate(successor, prior, declaredEpoch);
+            var envelope = EncodeDecision(successor);
+            EnsureCapacityFor(new MutableSlotRecord(successor.ProfileId, successor.Slot, successor.ScopeFingerprint,
+                successor.AuthorityEpoch, successor.RuntimeRevision, string.Empty));
+            await CommitEnvelopeAsync(successor.ProfileId, successor.Slot, envelope, cancellationToken).ConfigureAwait(false);
+            return successor with { Version = Convert.ToHexString(SHA256.HashData(envelope)), IsLegacy = false };
+        }
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<MutableSlotDecision> EstablishBaselineAsync(
+        MutableSlotDecision baseline, long declaredEpoch, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(baseline);
+        EnsureDecisionIdentity(baseline.ProfileId, baseline.Slot);
+        MutableSlotDecisionRules.ValidateBaselineShape(baseline, declaredEpoch);
+
+        using (await IdentityGates.AcquireAsync(MountGateKey(_root, _mountIdentity), cancellationToken).ConfigureAwait(false))
+        using (await IdentityGates.AcquireAsync(SlotGateKey(_root, _mountIdentity, baseline.ProfileId, baseline.Slot), cancellationToken).ConfigureAwait(false))
+        {
+            // A predecessor that can still be authenticated bounds the baseline: this operation is
+            // for authority the deployment cannot read, and a readable newer decision must not be
+            // regressed by it. An unreadable predecessor is not compared here; the atomic
+            // replacement below retires it in the same write, so no intermediate state exists in
+            // which the slot is absent and the Manifest-declared credential applies again.
+            MutableSlotDecision? readable = TryReadReadableDecision(baseline.ProfileId, baseline.Slot);
+            if (readable is not null && baseline.AuthorityEpoch <= readable.AuthorityEpoch)
+            {
+                throw Failed(baseline.ProfileId, baseline.Slot,
+                    "the proposed reset baseline does not advance the readable current authority.");
+            }
+
+            var envelope = EncodeDecision(baseline);
+            EnsureCapacityFor(new MutableSlotRecord(baseline.ProfileId, baseline.Slot, baseline.ScopeFingerprint,
+                baseline.AuthorityEpoch, baseline.RuntimeRevision, string.Empty));
+            await CommitEnvelopeAsync(baseline.ProfileId, baseline.Slot, envelope, cancellationToken).ConfigureAwait(false);
+            return baseline with { Version = Convert.ToHexString(SHA256.HashData(envelope)), IsLegacy = false };
+        }
+    }
+
+    /// <summary>
+    /// Reads the decision, or null when it is absent or cannot be authenticated with this key.
+    /// </summary>
+    /// <remarks>
+    /// Used only to bound a destructive reset. Swallowing the unreadable case is the point: the
+    /// reset exists for that case, and reporting it as absent is exactly what the ordinary read
+    /// path must never do.
+    /// </remarks>
+    private MutableSlotDecision? TryReadReadableDecision(string profileId, string slot)
+    {
+        try
+        {
+            return ReadDecision(profileId, slot);
+        }
+        catch (RuntimeStateStoreException)
+        {
+            return null;
+        }
+    }
+
+    private MutableSlotDecision? ReadDecision(string profileId, string slot)
+    {
+        byte[] envelope;
+        try
+        {
+            envelope = ReadEnvelope(RecordPath(_mountIdentity, profileId, slot));
+        }
+        catch (FileNotFoundException)
+        {
+            return null;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw Failed(profileId, slot, "the record cannot be read.", ex);
+        }
+
+        string version = Convert.ToHexString(SHA256.HashData(envelope));
+        if (envelope.Length > 0 && envelope[0] == FormatVersion)
+        {
+            MutableSlotRecord legacy = Decode(profileId, slot, envelope)!;
+            if (legacy.AuthorityEpoch < 0 || legacy.RuntimeRevision < 0
+                || string.IsNullOrEmpty(legacy.Value))
+            {
+                throw Failed(profileId, slot, "the legacy authority record is invalid.");
+            }
+            return new MutableSlotDecision(profileId, slot, legacy.ScopeFingerprint,
+                null, null, legacy.AuthorityEpoch, legacy.RuntimeRevision,
+                MutableSlotDecisionKind.Authorized, legacy.Value, version, IsLegacy: true);
+        }
+
+        if (envelope.Length < MinimumEnvelopeLength || envelope[0] != AuthorityFormatVersion)
+        {
+            throw Failed(profileId, slot, "the authority record is not in a supported format.");
+        }
+
+        int headerLength = envelope[1] | (envelope[2] << 8);
+        if (headerLength <= 0 || envelope.Length < FixedPrefixLength + headerLength + NonceLength + TagLength)
+        {
+            throw Failed(profileId, slot, "the authority record is truncated.");
+        }
+
+        var nonce = envelope.AsSpan(FixedPrefixLength + headerLength, NonceLength);
+        var ciphertext = envelope.AsSpan(FixedPrefixLength + headerLength + NonceLength,
+            envelope.Length - FixedPrefixLength - headerLength - NonceLength - TagLength);
+        var plaintext = new byte[ciphertext.Length];
+        try
+        {
+            using var aes = new AesGcm(_key, TagLength);
+            aes.Decrypt(nonce, ciphertext, envelope.AsSpan(envelope.Length - TagLength),
+                plaintext, AssociatedData(envelope, headerLength));
+        }
+        catch (CryptographicException ex)
+        {
+            throw Failed(profileId, slot, "the authority record cannot be authenticated with the configured key.", ex);
+        }
+
+        RuntimeStateHeader header;
+        try
+        {
+            // A duplicated identity/binding field must not acquire a different meaning under a
+            // different JSON reader. The header is authenticated but may outlive this reader.
+            using (var document = JsonDocument.Parse(envelope.AsMemory(FixedPrefixLength, headerLength)))
+            {
+                if (document.RootElement.ValueKind != JsonValueKind.Object)
+                {
+                    throw new JsonException("The authority header must be an object.");
+                }
+
+                var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var property in document.RootElement.EnumerateObject())
+                {
+                    if (!names.Add(property.Name))
+                    {
+                        throw new JsonException("The authority header contains duplicate fields.");
+                    }
+                }
+            }
+
+            header = JsonSerializer.Deserialize<RuntimeStateHeader>(
+                envelope.AsSpan(FixedPrefixLength, headerLength), HeaderOptions)
+                ?? throw new JsonException("Empty authority header.");
+        }
+        catch (JsonException ex)
+        {
+            throw Failed(profileId, slot, "the authority record header is not readable.", ex);
+        }
+
+        if (header.Format != AuthorityFormatVersion
+            || !string.Equals(header.Mount, _mountIdentity, StringComparison.Ordinal)
+            || !string.Equals(header.Profile, profileId, StringComparison.Ordinal)
+            || !string.Equals(header.Slot, slot, StringComparison.Ordinal))
+        {
+            throw Failed(profileId, slot, "the authority record belongs to a different mount/profile/slot.");
+        }
+
+        var kind = header.DecisionKind switch
+        {
+            "authorized" => MutableSlotDecisionKind.Authorized,
+            "cleared" => MutableSlotDecisionKind.Cleared,
+            _ => throw Failed(profileId, slot, "the authority record kind is unsupported."),
+        };
+        string? refresh;
+        try
+        {
+            refresh = kind == MutableSlotDecisionKind.Authorized
+                ? StrictUtf8.GetString(plaintext)
+                : null;
+        }
+        catch (DecoderFallbackException ex)
+        {
+            throw Failed(profileId, slot, "the authority record contains invalid UTF-8 material.", ex);
+        }
+        if (string.IsNullOrWhiteSpace(header.DeclarationFingerprint)
+            || string.IsNullOrWhiteSpace(header.ConfigurationFingerprint)
+            || header.AuthorityEpoch < 0 || header.RuntimeRevision < 0
+            || (kind == MutableSlotDecisionKind.Cleared && (plaintext.Length != 0 || header.RuntimeRevision != 0))
+            || (kind == MutableSlotDecisionKind.Authorized && string.IsNullOrEmpty(refresh)))
+        {
+            throw Failed(profileId, slot, "the authenticated authority record is invalid.");
+        }
+
+        return new MutableSlotDecision(profileId, slot, header.ScopeFingerprint,
+            header.DeclarationFingerprint, header.ConfigurationFingerprint,
+            header.AuthorityEpoch, header.RuntimeRevision, kind, refresh, version);
+    }
+
+    private void EnsureDecisionIdentity(string profileId, string slot)
+    {
+        MutableSlotDecisionRules.ValidateIdentity(profileId, slot);
+        if (_mountIdentity.Contains('\u001f'))
+        {
+            throw Failed(profileId, slot, "the local authority mount identity is invalid.");
+        }
+    }
+
+    private byte[] EncodeDecision(MutableSlotDecision decision)
+    {
+        var header = new RuntimeStateHeader
+        {
+            Format = AuthorityFormatVersion,
+            Mount = _mountIdentity,
+            Profile = decision.ProfileId,
+            Slot = decision.Slot,
+            ScopeFingerprint = decision.ScopeFingerprint,
+            DeclarationFingerprint = decision.DeclarationFingerprint,
+            ConfigurationFingerprint = decision.ConfigurationFingerprint,
+            AuthorityEpoch = decision.AuthorityEpoch,
+            RuntimeRevision = decision.RuntimeRevision,
+            DecisionKind = decision.Kind == MutableSlotDecisionKind.Authorized ? "authorized" : "cleared",
+        };
+        return EncodeEnvelope(header, AuthorityFormatVersion, decision.RefreshToken ?? string.Empty);
     }
 
     /// <inheritdoc />
@@ -250,6 +511,13 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
         EnsureCapacityFor(record);
 
         var envelope = Encode(record);
+        await CommitEnvelopeAsync(record.ProfileId, record.Slot, envelope, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask CommitEnvelopeAsync(
+        string profileId, string slot, byte[] envelope, CancellationToken cancellationToken)
+    {
+        var target = RecordPath(_mountIdentity, profileId, slot);
         var temporary = target + TemporarySuffix + Convert.ToHexString(RandomNumberGenerator.GetBytes(8));
 
         try
@@ -277,13 +545,14 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
                 await flushed(cancellationToken).ConfigureAwait(false);
             }
 
-            if (!TryRestrict(temporary))
+            if (!TryRestrict(temporary, out string? reason))
             {
                 TryRemove(temporary);
                 throw Failed(
-                    record.ProfileId,
-                    record.Slot,
-                    "the record could not be stored with a restrictive file mode.");
+                    profileId,
+                    slot,
+                    "the record could not be stored with a restrictive file mode"
+                    + Reason(reason));
             }
 
             File.Move(temporary, target, overwrite: true);
@@ -292,10 +561,15 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
         {
             TryRemove(temporary);
             throw Failed(
-                record.ProfileId,
-                record.Slot,
+                profileId,
+                slot,
                 "the replacement could not be committed.",
                 ex);
+        }
+        catch (OperationCanceledException)
+        {
+            TryRemove(temporary);
+            throw;
         }
 
         // Maintenance is best-effort and runs after the commit: a committed write must never be
@@ -405,7 +679,7 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
         byte[] envelope;
         try
         {
-            envelope = File.ReadAllBytes(target);
+            envelope = ReadEnvelope(target);
         }
         catch (FileNotFoundException)
         {
@@ -434,6 +708,24 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
         => incoming.AuthorityEpoch < existing.AuthorityEpoch
             || (incoming.AuthorityEpoch == existing.AuthorityEpoch
                 && incoming.RuntimeRevision < existing.RuntimeRevision);
+
+    /// <summary>
+    /// Reads one record's complete bytes while permitting a concurrent atomic replacement.
+    /// </summary>
+    /// <remarks>
+    /// <c>File.ReadAllBytes</c> shares read only, so on Windows a rename over a record fails
+    /// while any reader holds it open. Production replacement can happen with concurrent
+    /// readers, and a reader must see either the complete predecessor or the complete
+    /// successor, so the read shares read, write and delete instead.
+    /// </remarks>
+    private static byte[] ReadEnvelope(string path)
+    {
+        using var stream = new FileStream(
+            path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        byte[] envelope = new byte[stream.Length];
+        stream.ReadExactly(envelope);
+        return envelope;
+    }
 
     private MutableSlotRecord? Decode(string profileId, string slot, byte[] envelope)
     {
@@ -510,14 +802,23 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
             RuntimeRevision = record.RuntimeRevision,
         };
 
+        return EncodeEnvelope(header, FormatVersion, record.Value);
+    }
+
+    private byte[] EncodeEnvelope(RuntimeStateHeader header, byte format, string value)
+    {
         var headerBytes = JsonSerializer.SerializeToUtf8Bytes(header, HeaderOptions);
-        var valueBytes = Encoding.UTF8.GetBytes(record.Value);
+        if (headerBytes.Length > ushort.MaxValue)
+        {
+            throw Failed(header.Profile, header.Slot, "the authenticated record header exceeds its format limit.");
+        }
+        var valueBytes = Encoding.UTF8.GetBytes(value);
         var nonce = RandomNumberGenerator.GetBytes(NonceLength);
         var ciphertext = new byte[valueBytes.Length];
         var tag = new byte[TagLength];
 
         var envelope = new byte[FixedPrefixLength + headerBytes.Length + NonceLength + ciphertext.Length + TagLength];
-        envelope[0] = FormatVersion;
+        envelope[0] = format;
         envelope[1] = (byte)(headerBytes.Length & 0xFF);
         envelope[2] = (byte)((headerBytes.Length >> 8) & 0xFF);
         headerBytes.CopyTo(envelope.AsSpan(FixedPrefixLength));
@@ -631,23 +932,25 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
                 ex);
         }
 
-        if (!TryRestrictDirectory(_root))
+        if (!TryRestrictDirectory(_root, out string? reason))
         {
             throw new InvalidOperationException(
-                "The runtime-state directory could not be established with a restrictive file mode.");
+                "The runtime-state directory could not be established with a restrictive file mode"
+                + Reason(reason));
         }
     }
 
-    private bool TryRestrictDirectory(string path)
+    private bool TryRestrictDirectory(string path, out string? reason)
     {
         if (PermissionSetter is { } setter)
         {
+            reason = null;
             return setter(path);
         }
 
         if (OperatingSystem.IsWindows())
         {
-            return ApplyWindowsAcl(path, isDirectory: true);
+            return ApplyWindowsAcl(path, isDirectory: true, out reason);
         }
 
         try
@@ -655,14 +958,17 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
             File.SetUnixFileMode(
                 path,
                 UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            reason = null;
             return true;
         }
         catch (PlatformNotSupportedException)
         {
+            reason = null;
             return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            reason = Category(ex);
             return false;
         }
     }
@@ -670,56 +976,81 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
     /// <summary>
     /// Establishes a restrictive mode on a committed path, failing closed. Returns <c>false</c> when
     /// the platform has a mode but it cannot be established, so the caller refuses to publish a
-    /// secret whose file mode could not be tightened.
+    /// secret whose file mode could not be tightened. <paramref name="reason"/> names the category of
+    /// the failure, because a fail-closed refusal an operator cannot diagnose is a refusal an
+    /// operator cannot correct.
     /// </summary>
-    private bool TryRestrict(string path)
+    private bool TryRestrict(string path, out string? reason)
     {
         if (PermissionSetter is { } setter)
         {
+            reason = null;
             return setter(path);
         }
 
-        return DefaultPermissionSetter(path);
+        return DefaultPermissionSetter(path, out reason);
     }
 
-    private static bool DefaultPermissionSetter(string path)
+    private static bool DefaultPermissionSetter(string path, out string? reason)
     {
         if (OperatingSystem.IsWindows())
         {
-            return ApplyWindowsAcl(path, isDirectory: false);
+            return ApplyWindowsAcl(path, isDirectory: false, out reason);
         }
 
         try
         {
             File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            reason = null;
             return true;
         }
         catch (PlatformNotSupportedException)
         {
             // The platform has no file-mode concept; the contract is satisfied vacuously.
+            reason = null;
             return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            reason = Category(ex);
             return false;
         }
     }
 
-    private static bool ApplyWindowsAcl(string path, bool isDirectory)
+    private static bool ApplyWindowsAcl(string path, bool isDirectory, out string? reason)
         => WindowsAclApplierForTesting is { } applier
-            ? applier(path, isDirectory)
-            : TryApplyRestrictiveWindowsAcl(path, isDirectory);
+            ? Apply(applier, path, isDirectory, out reason)
+            : TryApplyRestrictiveWindowsAcl(path, isDirectory, out reason);
+
+    private static bool Apply(Func<string, bool, bool> applier, string path, bool isDirectory, out string? reason)
+    {
+        if (applier(path, isDirectory))
+        {
+            reason = null;
+            return true;
+        }
+
+        reason = "the substituted access-control applier refused it.";
+        return false;
+    }
+
+    /// <summary>Names the category of a mode failure without repeating a path or a secret.</summary>
+    private static string Category(Exception exception) => $" ({exception.GetType().Name}).";
+
+    private static string Reason(string? reason) => reason is null ? "." : $" ({reason})";
 
     /// <summary>
     /// Establishes and verifies a restrictive ACL on Windows: inheritance is disabled and only the
     /// running account, LocalSystem and the built-in Administrators may hold an allow rule. Returns
     /// <c>false</c> when the contract cannot be established or verified, so the caller fails closed
-    /// rather than accepting an unrestricted runtime-state directory.
+    /// rather than accepting an unrestricted runtime-state directory. <paramref name="reason"/> names
+    /// which half of the contract failed.
     /// </summary>
-    private static bool TryApplyRestrictiveWindowsAcl(string path, bool isDirectory)
+    private static bool TryApplyRestrictiveWindowsAcl(string path, bool isDirectory, out string? reason)
     {
         if (!OperatingSystem.IsWindows())
         {
+            reason = "the platform is not Windows.";
             return false;
         }
 
@@ -728,6 +1059,7 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
             var owner = WindowsIdentity.GetCurrent().User;
             if (owner is null)
             {
+                reason = "the running account has no security identifier.";
                 return false;
             }
 
@@ -764,7 +1096,7 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
                 new FileInfo(path).SetAccessControl((FileSecurity)security);
             }
 
-            return IsRestrictiveWindowsAcl(path, isDirectory, owner);
+            return IsRestrictiveWindowsAcl(path, isDirectory, owner, out reason);
         }
         catch (Exception ex) when (ex is IOException
             or UnauthorizedAccessException
@@ -774,6 +1106,7 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
             or ArgumentException
             or InvalidOperationException)
         {
+            reason = $"the file system refused the change ({ex.GetType().Name}).";
             return false;
         }
     }
@@ -790,11 +1123,12 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
         }
 
         var owner = WindowsIdentity.GetCurrent().User;
-        return owner is not null && IsRestrictiveWindowsAcl(path, isDirectory, owner);
+        return owner is not null && IsRestrictiveWindowsAcl(path, isDirectory, owner, out _);
     }
 
     [SupportedOSPlatform("windows")]
-    private static bool IsRestrictiveWindowsAcl(string path, bool isDirectory, SecurityIdentifier owner)
+    private static bool IsRestrictiveWindowsAcl(
+        string path, bool isDirectory, SecurityIdentifier owner, out string? reason)
     {
         try
         {
@@ -810,6 +1144,7 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
 
             if (!security.AreAccessRulesProtected)
             {
+                reason = "the applied access rules are reported as not protected.";
                 return false;
             }
 
@@ -825,6 +1160,7 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
 
                 if (!allowed.Contains(sid))
                 {
+                    reason = "an allow rule names an account outside the permitted set.";
                     return false;
                 }
 
@@ -834,7 +1170,14 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
                 }
             }
 
-            return ownerAllowed;
+            if (!ownerAllowed)
+            {
+                reason = "the running account holds no allow rule.";
+                return false;
+            }
+
+            reason = null;
+            return true;
         }
         catch (Exception ex) when (ex is IOException
             or UnauthorizedAccessException
@@ -843,6 +1186,7 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
             or ArgumentException
             or InvalidOperationException)
         {
+            reason = $"the applied access rules could not be read back ({ex.GetType().Name}).";
             return false;
         }
     }
@@ -938,9 +1282,21 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
                 continue;
             }
 
+            // This store can only maintain its own mount. A foreign mount may use a different key,
+            // and even a syntactically valid header is not authenticated until its tag is checked.
+            if (!string.Equals(identity.Mount, _mountIdentity, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
             if (!PathMatchesIdentity(info, identity))
             {
-                unreachable.Add(info);
+                // Never let a corrupted/tampered header cause deletion of a live cleared floor.
+                // Its JSON can still parse and point to another identity while its GCM tag fails.
+                if (HasAuthenticatedEnvelope(info.FullName))
+                {
+                    unreachable.Add(info);
+                }
                 continue;
             }
 
@@ -975,6 +1331,40 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
         }
     }
 
+    private bool HasAuthenticatedEnvelope(string path)
+    {
+        try
+        {
+            var envelope = ReadEnvelope(path);
+            if (envelope.Length < MinimumEnvelopeLength
+                || envelope[0] is not (FormatVersion or AuthorityFormatVersion))
+            {
+                return false;
+            }
+
+            var headerLength = envelope[1] | envelope[2] << 8;
+            if (headerLength <= 0
+                || envelope.Length < FixedPrefixLength + headerLength + NonceLength + TagLength)
+            {
+                return false;
+            }
+
+            var nonceOffset = FixedPrefixLength + headerLength;
+            var payloadLength = envelope.Length - nonceOffset - NonceLength - TagLength;
+            var plaintext = new byte[payloadLength];
+            using var aes = new AesGcm(_key, TagLength);
+            aes.Decrypt(envelope.AsSpan(nonceOffset, NonceLength),
+                envelope.AsSpan(nonceOffset + NonceLength, payloadLength),
+                envelope.AsSpan(envelope.Length - TagLength), plaintext,
+                envelope.AsSpan(0, nonceOffset));
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or CryptographicException)
+        {
+            return false;
+        }
+    }
+
     private void TryCompactBestEffort()
     {
         try
@@ -993,8 +1383,9 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
         identity = default;
         try
         {
-            var envelope = File.ReadAllBytes(path);
-            if (envelope.Length < MinimumEnvelopeLength || envelope[0] != FormatVersion)
+            var envelope = ReadEnvelope(path);
+            if (envelope.Length < MinimumEnvelopeLength
+                || envelope[0] is not (FormatVersion or AuthorityFormatVersion))
             {
                 return false;
             }
@@ -1070,5 +1461,14 @@ public sealed class FileMutableSlotStore : IMutableSlotStore
         public long AuthorityEpoch { get; init; }
 
         public long RuntimeRevision { get; init; }
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? DeclarationFingerprint { get; init; }
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? ConfigurationFingerprint { get; init; }
+
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? DecisionKind { get; init; }
     }
 }

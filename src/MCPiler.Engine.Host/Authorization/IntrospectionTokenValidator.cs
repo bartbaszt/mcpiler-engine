@@ -61,7 +61,9 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
     private readonly string? _clientId;
     private readonly string? _clientSecret;
     private readonly int _cacheTtlSeconds;
+    private readonly bool _allowOidcFallback;
     private readonly TimeProvider _clock;
+    private readonly IssuerAvailabilityObservations? _observations;
 
     private string? _endpoint;
     private int _admittedInFlight;
@@ -79,7 +81,9 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
         string? clientId = null,
         string? clientSecret = null,
         int cacheTtlSeconds = 30,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        bool allowOidcFallback = false,
+        IssuerAvailabilityObservations? observations = null)
     {
         _client = client;
         _issuer = issuer;
@@ -90,6 +94,8 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
             ? throw new ArgumentOutOfRangeException(nameof(cacheTtlSeconds))
             : cacheTtlSeconds;
         _clock = clock ?? TimeProvider.System;
+        _allowOidcFallback = allowOidcFallback;
+        _observations = observations;
     }
 
     public async Task<TokenVerification> ValidateAsync(string token, CancellationToken cancellationToken)
@@ -226,13 +232,17 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
         {
             // Transport/protocol failures are fail-closed and never reusable. The underlying
             // issuer operation is independent from a request waiter so one cancelled waiter does
-            // not alter validation observed by another request.
+            // not alter validation observed by another request. Failures that reach this outer
+            // net come from resolving the trust endpoint rather than from asking it, so they are
+            // recorded as the metadata half of the decision.
+            Observe(IssuerAvailabilityCategory.MetadataUnavailable);
             return TokenVerification.Inactive;
         }
         catch
         {
             // Validation is an authorization boundary: unexpected parser/client failures also
             // fail closed and remain non-cacheable.
+            Observe(IssuerAvailabilityCategory.IntrospectionUnavailable);
             return TokenVerification.Inactive;
         }
     }
@@ -243,6 +253,7 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
 
         if (endpoint is null)
         {
+            Observe(IssuerAvailabilityCategory.MetadataUnavailable);
             return TokenVerification.Inactive;
         }
 
@@ -275,12 +286,14 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
 
             if (response.StatusCode != HttpStatusCode.OK)
             {
+                Observe(IssuerAvailabilityCategory.IntrospectionUnavailable);
                 return TokenVerification.Inactive;
             }
 
             byte[]? body = await ReadBoundedAsync(response, cancellationToken).ConfigureAwait(false);
             if (body is null)
             {
+                Observe(IssuerAvailabilityCategory.IntrospectionUnavailable);
                 return TokenVerification.Inactive;
             }
 
@@ -292,13 +305,20 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
                 || !root.TryGetProperty("active", out JsonElement active)
                 || active.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
             {
+                // A 200 without a boolean active member is not an authoritative statement about the
+                // token; it is an unusable answer, recorded as an endpoint problem rather than as
+                // the issuer declaring the token inactive.
+                Observe(IssuerAvailabilityCategory.IntrospectionUnavailable);
                 return TokenVerification.Inactive;
             }
 
             if (active.ValueKind is JsonValueKind.False)
             {
+                Observe(IssuerAvailabilityCategory.TokenInactive);
                 return TokenVerification.Inactive with { IsAuthoritativeInactive = true };
             }
+
+            Observe(IssuerAvailabilityCategory.IssuerAnswered);
 
             return new TokenVerification(
                 Active: true,
@@ -316,10 +336,15 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
         catch (Exception failure) when (failure is HttpRequestException or JsonException or TaskCanceledException)
         {
             // Unreachable issuer, slow issuer, malformed body: all of them mean "this token
-            // is not known to be active", which is the only safe answer.
+            // is not known to be active", which is the only safe answer. The category records the
+            // endpoint outage so an operator can tell it apart from the issuer saying inactive.
+            Observe(IssuerAvailabilityCategory.IntrospectionUnavailable);
             return TokenVerification.Inactive;
         }
     }
+
+    private void Observe(IssuerAvailabilityCategory category)
+        => _observations?.Record(_clock.GetUtcNow(), IssuerAvailabilityMode.Introspection, category);
 
     private void CacheIfAllowed(string key, TokenVerification verification)
     {
@@ -411,6 +436,13 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
     /// per request would add a round trip an operator never agreed to, and one that fails
     /// whenever the issuer is slow rather than whenever the token is wrong.
     /// </summary>
+    /// <remarks>
+    /// Discovery goes through the one shared resolver, so this runtime path observes exactly the
+    /// startup path's route policy: RFC 8414 first, and the issuer-derived OIDC route only when the
+    /// host enabled fallback and RFC 8414 answered a definitive 404/410. Every other outcome —
+    /// including a valid document that names a disallowed endpoint — fails closed before any token
+    /// is introspected.
+    /// </remarks>
     private async Task<string?> ResolveEndpointAsync(CancellationToken cancellationToken)
     {
         if (_endpoint is not null)
@@ -426,25 +458,15 @@ internal sealed class IntrospectionTokenValidator : ITokenValidator
                 : null;
         }
 
-        IssuerMetadataDiscovery metadata;
-
-        try
-        {
-            metadata = await IssuerMetadata.DiscoverAsync(
-                _client,
-                _issuer,
-                cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception failure) when (failure is HttpRequestException or TaskCanceledException or UriFormatException)
-        {
-            return null;
-        }
+        IssuerMetadataDiscovery metadata = await IssuerMetadata.ResolveAsync(
+            _client,
+            _issuer,
+            _allowOidcFallback,
+            cancellationToken).ConfigureAwait(false);
 
         if (metadata.InvalidReason is not null
             || metadata.Document is not { } discovered
-            || !discovered.TryGetProperty("introspection_endpoint", out JsonElement endpoint)
-            || endpoint.ValueKind is not JsonValueKind.String
-            || endpoint.GetString() is not { } address
+            || !IssuerMetadata.TryReadEndpoint(discovered, "introspection_endpoint", out string address)
             || !Uri.TryCreate(address, UriKind.Absolute, out Uri? resolved)
             || resolved.Scheme is not ("http" or "https")
             || !AuthorizationEndpointPolicy.IsAllowed(resolved))

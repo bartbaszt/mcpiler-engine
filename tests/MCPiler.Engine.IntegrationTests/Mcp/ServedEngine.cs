@@ -107,6 +107,10 @@ internal sealed class ServedEngine : IAsyncDisposable
     /// The dedicated response-cache operator secret. Null leaves the operator channel unmapped, which
     /// is the safe default; a test that exercises read/clear supplies one.
     /// </param>
+    /// <param name="oauthOperatorSecret">
+    /// The dedicated standalone-authorization operator secret. Null leaves that channel unmapped, which
+    /// is the safe default; a test that exercises its read-only or destructive routes supplies one.
+    /// </param>
     /// <param name="allowedHosts">
     /// Explicit public authorities for protected-resource identity. Null derives the concrete
     /// loopback listener authority when authorization is configured.
@@ -122,7 +126,8 @@ internal sealed class ServedEngine : IAsyncDisposable
         IReadOnlyList<string>? allowedOrigins = null,
         string? operatorSecret = null,
         IReadOnlyDictionary<string, string>? externalResources = null,
-        IReadOnlyList<string>? allowedHosts = null)
+        IReadOnlyList<string>? allowedHosts = null,
+        string? oauthOperatorSecret = null)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -155,6 +160,7 @@ internal sealed class ServedEngine : IAsyncDisposable
                 AllowedOrigins = allowedOrigins ?? [],
                 AllowedHosts = allowedHosts ?? (authorization is null ? [] : [authority]),
                 ResponseCacheOperatorSecret = operatorSecret,
+                OAuthOperatorSecret = oauthOperatorSecret,
                 ExternalResources = externalResources
                     ?? new Dictionary<string, string>(StringComparer.Ordinal),
             },

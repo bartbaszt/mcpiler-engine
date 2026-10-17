@@ -1,6 +1,4 @@
 using System.Net;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -78,13 +76,13 @@ internal static class ResponseCacheOperatorEndpoints
         // One authenticator instance for the process. The secret is already resident because
         // startup read and kept it; copying it per request would put a second copy of a live
         // credential in memory for the lifetime of the request.
-        ResponseCacheOperatorGuard guard = new(secret);
+        OperatorChannelCredential guard = new(secret);
 
         app.MapGet(ReadPath, (HttpContext context) => HandleAsync(context, guard, clear: false));
         app.MapPost(ClearPath, (HttpContext context) => HandleAsync(context, guard, clear: true));
     }
 
-    private static async Task HandleAsync(HttpContext context, ResponseCacheOperatorGuard guard, bool clear)
+    private static async Task HandleAsync(HttpContext context, OperatorChannelCredential guard, bool clear)
     {
         // Authentication first, before a mount prefix is even read. A refused caller must not be
         // able to distinguish an unknown prefix from a mounted one, and a clear must not begin
@@ -274,7 +272,7 @@ internal static class ResponseCacheOperatorEndpoints
     /// </para>
     /// </remarks>
     internal static bool IsTransportAcceptable(bool isHttps, IPAddress? remote)
-        => isHttps || (remote is not null && IPAddress.IsLoopback(remote));
+        => OperatorChannel.IsTransportAcceptable(isHttps, remote);
 
     private static bool TryQuery(
         IQueryCollection query,
@@ -323,45 +321,5 @@ internal static class ResponseCacheOperatorEndpoints
         await context.Response
             .WriteAsync(JsonSerializer.Serialize(payload, Json), context.RequestAborted)
             .ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Compares a presented bearer value against the configured operator secret.
-    /// </summary>
-    /// <remarks>
-    /// The comparison hashes both sides before comparing, so it is constant-time with respect to
-    /// content and does not leak the secret's length through the comparison itself. The secret is
-    /// never written to a log or a response.
-    /// </remarks>
-    private sealed class ResponseCacheOperatorGuard
-    {
-        private readonly byte[] _expected;
-
-        internal ResponseCacheOperatorGuard(string secret)
-        {
-            ArgumentException.ThrowIfNullOrEmpty(secret);
-            _expected = SHA256.HashData(Encoding.UTF8.GetBytes(secret));
-        }
-
-        internal bool IsAuthorized(HttpRequest request)
-        {
-            string? header = request.Headers.Authorization;
-
-            if (string.IsNullOrEmpty(header)
-                || !header.StartsWith("Bearer ", StringComparison.Ordinal))
-            {
-                return false;
-            }
-
-            string presented = header["Bearer ".Length..].Trim();
-
-            if (presented.Length == 0)
-            {
-                return false;
-            }
-
-            byte[] candidate = SHA256.HashData(Encoding.UTF8.GetBytes(presented));
-            return CryptographicOperations.FixedTimeEquals(_expected, candidate);
-        }
     }
 }
