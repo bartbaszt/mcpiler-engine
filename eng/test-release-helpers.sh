@@ -165,7 +165,6 @@ expect_failure "visibility cannot bypass verification" visibility_checkpoint tru
 expect_success "candidate/stable/latest identical" assert_promoted_identity "sha256:abc" "sha256:abc" "sha256:abc"
 expect_failure "stable differs from candidate" assert_promoted_identity "sha256:abc" "sha256:def" "sha256:abc"
 expect_failure "latest differs from candidate" assert_promoted_identity "sha256:abc" "sha256:abc" "sha256:def"
-
 # State-transition recovery matrix. Before immutable Git publication every failure restarts from
 # current main. Once the exact release tag exists, recovery is resume-only and must re-prove the
 # candidate/release identity before creating missing registry/GitHub Release artifacts.
@@ -178,6 +177,228 @@ expect_eq "RESUME" "$(release_recovery_mode abc abc abc)" "stable promotion fail
 expect_eq "RESUME" "$(release_recovery_mode abc abc abc)" "latest promotion failure resumes"
 expect_eq "RESUME" "$(release_recovery_mode abc abc abc)" "GitHub Release failure resumes"
 expect_failure "resume refuses candidate identity drift" release_recovery_mode abc abc def
+
+# ---------------------------------------------------------------------------------------------------
+# Release payload transport. GitHub Actions artifact storage is unavailable for this account, so the
+# prepared release commit and the candidate SBOM travel as base64 job outputs (same run) and as a
+# marked job-log block (resume of a run that already failed). The contracts below are the ones the
+# release and resume workflows depend on: an incremental bundle that is restorable only from the
+# reviewed base commit, SHA-256 authentication of every payload, a single well-formed log block, and
+# a bounded encoded size.
+# ---------------------------------------------------------------------------------------------------
+bundle_script="$ROOT/eng/release-bundle.sh"
+expect_success "release payload transport helper exists" test -f "$bundle_script"
+expect_success "release payload transport helper is executable" test -x "$bundle_script"
+
+bundle_work="$tmp/payload"
+mkdir -p "$bundle_work"
+git_identity=( -c user.name='Engine Release Test' -c user.email='release-test@example.invalid' )
+
+git init -q -b main "$bundle_work/origin"
+git -C "$bundle_work/origin" config core.autocrlf false
+printf 'reviewed base content\n' >"$bundle_work/origin/manifest.json"
+git -C "$bundle_work/origin" add manifest.json
+git -C "$bundle_work/origin" "${git_identity[@]}" commit -q -m 'base commit'
+base_commit="$(git -C "$bundle_work/origin" rev-parse HEAD)"
+
+git clone -q -c core.autocrlf=false "$bundle_work/origin" "$bundle_work/prepare"
+printf 'release content\n' >"$bundle_work/prepare/manifest.json"
+git -C "$bundle_work/prepare" add manifest.json
+git -C "$bundle_work/prepare" "${git_identity[@]}" commit -q -m 'chore(release): test release'
+release_commit_sha="$(git -C "$bundle_work/prepare" rev-parse HEAD)"
+release_bundle="$bundle_work/release.bundle"
+
+clone_consumer() { # name -> repository path with only the reviewed base
+  git clone -q -c core.autocrlf=false "$bundle_work/origin" "$bundle_work/$1"
+  printf '%s\n' "$bundle_work/$1"
+}
+
+write_output="$(bash "$bundle_script" write --repo "$bundle_work/prepare" --bundle "$release_bundle" --base-sha "$base_commit" --release-commit "$release_commit_sha")"
+expect_eq "RESULT: RELEASE_BUNDLE_WRITTEN" "$(printf '%s\n' "$write_output" | tail -n1)" "bundle write result"
+bundle_digest="$(printf '%s\n' "$write_output" | sed -n 's/^RELEASE_BUNDLE_SHA256=//p')"
+expect_eq "$release_commit_sha refs/heads/main" \
+  "$(git -C "$bundle_work/origin" bundle list-heads "$release_bundle")" \
+  "bundle carries exactly the release commit on refs/heads/main"
+
+encoded_bundle="$(bash "$bundle_script" encode --bundle "$release_bundle")"
+expect_eq "1" "$(printf '%s\n' "$encoded_bundle" | wc -l | tr -d '[:space:]')" "encoded bundle is one job-output line"
+
+consumer="$(clone_consumer consumer)"
+printf '%s\n' "$encoded_bundle" | bash "$bundle_script" restore --repo "$consumer" --base64-stdin \
+  --sha256 "$bundle_digest" --base-sha "$base_commit" --release-commit "$release_commit_sha" >/dev/null
+expect_eq "$release_commit_sha" "$(git -C "$consumer" rev-parse HEAD)" "restored checkout is the release commit"
+expect_eq "$base_commit" "$(git -C "$consumer" rev-parse HEAD^)" "restored release commit sits on the reviewed base"
+expect_eq "release content" "$(tr -d '\r' <"$consumer/manifest.json")" "restored tree carries the release content"
+
+zero_digest="$(printf '0%.0s' {1..64})"
+mismatch_consumer="$(clone_consumer mismatch)"
+expect_failure "bundle whose SHA-256 does not match the output is refused" \
+  bash -c "printf '%s\n' '$encoded_bundle' | bash '$bundle_script' restore --repo '$mismatch_consumer' --base64-stdin --sha256 '$zero_digest' --base-sha '$base_commit' --release-commit '$release_commit_sha'"
+expect_eq "$base_commit" "$(git -C "$mismatch_consumer" rev-parse HEAD)" "refused restore leaves the checkout on the reviewed base"
+
+wrong_commit_consumer="$(clone_consumer wrong-commit)"
+expect_failure "bundle restored for the wrong release commit is refused" \
+  bash -c "printf '%s\n' '$encoded_bundle' | bash '$bundle_script' restore --repo '$wrong_commit_consumer' --base64-stdin --sha256 '$bundle_digest' --base-sha '$base_commit' --release-commit '$base_commit'"
+expect_failure "bundle restored for the wrong base commit is refused" \
+  bash -c "printf '%s\n' '$encoded_bundle' | bash '$bundle_script' restore --repo '$wrong_commit_consumer' --base64-stdin --sha256 '$bundle_digest' --base-sha '$release_commit_sha' --release-commit '$release_commit_sha'"
+
+# A release commit whose parent is not the reviewed base must never be bundled: the release contract
+# is one commit on top of base, and a bundle would otherwise accept a longer range.
+git clone -q -c core.autocrlf=false "$bundle_work/origin" "$bundle_work/drift"
+git -C "$bundle_work/drift" "${git_identity[@]}" commit -q --allow-empty -m 'unrelated intermediate commit'
+intermediate_commit="$(git -C "$bundle_work/drift" rev-parse HEAD)"
+git -C "$bundle_work/drift" "${git_identity[@]}" commit -q --allow-empty -m 'chore(release): two commits ahead'
+drift_release="$(git -C "$bundle_work/drift" rev-parse HEAD)"
+expect_failure "release commit whose parent is not the base is not bundled" \
+  bash "$bundle_script" write --repo "$bundle_work/drift" --bundle "$bundle_work/drift.bundle" \
+    --base-sha "$base_commit" --release-commit "$drift_release"
+
+# A consumer that does not already hold the reviewed base cannot restore the incremental bundle.
+git init -q -b main "$bundle_work/unrelated"
+git -C "$bundle_work/unrelated" "${git_identity[@]}" commit -q --allow-empty -m 'unrelated history'
+unrelated_commit="$(git -C "$bundle_work/unrelated" rev-parse HEAD)"
+expect_failure "restore without the reviewed base commit is refused" \
+  bash "$bundle_script" restore --repo "$bundle_work/unrelated" --bundle "$release_bundle" \
+    --sha256 "$bundle_digest" --base-sha "$base_commit" --release-commit "$release_commit_sha"
+expect_eq "$unrelated_commit" "$(git -C "$bundle_work/unrelated" rev-parse HEAD)" "refused restore does not move an unrelated checkout"
+
+# The strongest identity check is FETCH_HEAD^ == base_sha. Build the case where both the wrongly
+# recorded base and the release commit's true parent are present in the checkout: only that check
+# can reject the restore, so removing it silently moves the wrong base into the release tree.
+intermediate_bundle="$bundle_work/intermediate.bundle"
+intermediate_write="$(bash "$bundle_script" write --repo "$bundle_work/drift" --bundle "$intermediate_bundle" \
+  --base-sha "$intermediate_commit" --release-commit "$drift_release")"
+intermediate_digest="$(printf '%s\n' "$intermediate_write" | sed -n 's/^RELEASE_BUNDLE_SHA256=//p')"
+wrong_base_consumer="$bundle_work/wrong-base"
+git clone -q -c core.autocrlf=false "$bundle_work/drift" "$wrong_base_consumer"
+git -C "$wrong_base_consumer" reset -q --hard "$intermediate_commit"
+expect_eq "$intermediate_commit" "$(git -C "$wrong_base_consumer" rev-parse HEAD)" "fixture starts on the true parent of the release commit"
+expect_failure "restore whose recorded base differs from the release commit parent is refused" \
+  bash "$bundle_script" restore --repo "$wrong_base_consumer" --bundle "$intermediate_bundle" \
+    --sha256 "$intermediate_digest" --base-sha "$base_commit" --release-commit "$drift_release"
+expect_eq "$intermediate_commit" "$(git -C "$wrong_base_consumer" rev-parse HEAD)" "refused restore leaves HEAD at the recorded base"
+expect_eq "$base_commit" "$(git -C "$wrong_base_consumer" rev-parse HEAD^)" "refused restore leaves the earlier history untouched"
+
+# Job-log transport. GitHub prefixes every log line with an RFC 3339 timestamp; the resume workflow
+# reads the block back from that log and authenticates it by SHA-256 and release commit.
+bash "$bundle_script" print-log --bundle "$release_bundle" --release-commit "$release_commit_sha" --sha256 "$bundle_digest" >"$bundle_work/printed.log"
+expect_eq "76" \
+  "$(awk '/^ENGINE_RELEASE_BUNDLE_BEGIN/{inside=1;next} /^ENGINE_RELEASE_BUNDLE_END/{inside=0} inside{if (length($0)>longest) longest=length($0)} END{print longest+0}' "$bundle_work/printed.log")" \
+  "logged bundle base64 is wrapped at 76 columns"
+
+sed 's/^/2026-10-23T10:00:00.1234567Z /' "$bundle_work/printed.log" >"$bundle_work/prepare.log"
+log_consumer="$(clone_consumer log-consumer)"
+extracted="$(bash "$bundle_script" extract-log --repo "$log_consumer" --log "$bundle_work/prepare.log" --bundle "$bundle_work/extracted.bundle")"
+expect_eq "$release_commit_sha" "$(printf '%s\n' "$extracted" | sed -n 's/^RELEASE_COMMIT=//p')" "log block reports the release commit"
+expect_eq "$bundle_digest" "$(printf '%s\n' "$extracted" | sed -n 's/^RELEASE_BUNDLE_SHA256=//p')" "log block reports the bundle digest"
+expect_eq "$base_commit" "$(printf '%s\n' "$extracted" | sed -n 's/^RELEASE_BASE_SHA=//p')" "log block reports its prerequisite base"
+expect_eq "$bundle_digest" "$(sha256sum "$bundle_work/extracted.bundle" | cut -d' ' -f1)" "extracted log block reproduces the bundle bytes"
+
+sed 's/$/\r/' "$bundle_work/prepare.log" >"$bundle_work/prepare-crlf.log"
+expect_success "log block with CRLF line endings is extracted" \
+  bash "$bundle_script" extract-log --repo "$log_consumer" --log "$bundle_work/prepare-crlf.log" --bundle "$bundle_work/extracted-crlf.bundle"
+
+# GitHub records ANSI colour escapes around `##[group]` and echoed-command headers. A decorated
+# non-block or marker line must still parse, while a decorated payload line must be refused: the
+# block payload stays strict plain base64.
+ansi_escape="$(printf '\033')"
+{
+  printf '2026-10-23T10:00:00.1000000Z %s[36;1m##[group]Run bash eng/release-bundle.sh print-log%s[0m\n' "$ansi_escape" "$ansi_escape"
+  printf '%s[32;1m2026-10-23T10:00:01.1000000Z ##[endgroup]%s[0m\n' "$ansi_escape" "$ansi_escape"
+  sed 's/^/2026-10-23T10:00:02.1000000Z /' "$bundle_work/printed.log" \
+    | sed -E "s#^(.*Z )(ENGINE_RELEASE_BUNDLE_(BEGIN|END).*)\$#\\1${ansi_escape}[36;1m\\2${ansi_escape}[0m#"
+} >"$bundle_work/ansi.log"
+ansi_extracted="$(bash "$bundle_script" extract-log --repo "$log_consumer" --log "$bundle_work/ansi.log" --bundle "$bundle_work/ansi.bundle" 2>/dev/null || true)"
+expect_eq "$release_commit_sha" "$(printf '%s\n' "$ansi_extracted" | sed -n 's/^RELEASE_COMMIT=//p')" "ANSI-coloured headers and markers do not disturb extraction"
+expect_eq "$bundle_digest" "$(sha256sum "$bundle_work/ansi.bundle" | cut -d' ' -f1)" "ANSI-coloured log yields the same bundle bytes"
+
+sed 's/^/2026-10-23T10:00:02.1000000Z /' "$bundle_work/printed.log" \
+  | sed -E "s#^(.*Z )([A-Za-z0-9+/=]+)\$#\\1${ansi_escape}[33;1m\\2${ansi_escape}[0m#" >"$bundle_work/ansi-payload.log"
+expect_failure "ANSI escapes inside the base64 payload are refused" \
+  bash "$bundle_script" extract-log --repo "$log_consumer" --log "$bundle_work/ansi-payload.log" --bundle "$bundle_work/ansi-payload.bundle"
+
+sed '/ENGINE_RELEASE_BUNDLE_END/d' "$bundle_work/prepare.log" >"$bundle_work/truncated.log"
+expect_failure "log block without its end marker is refused" \
+  bash "$bundle_script" extract-log --repo "$log_consumer" --log "$bundle_work/truncated.log" --bundle "$bundle_work/truncated.bundle"
+sed '/ENGINE_RELEASE_BUNDLE_BEGIN/d' "$bundle_work/prepare.log" >"$bundle_work/missing.log"
+expect_failure "log without a release bundle block is refused" \
+  bash "$bundle_script" extract-log --repo "$log_consumer" --log "$bundle_work/missing.log" --bundle "$bundle_work/missing.bundle"
+cat "$bundle_work/prepare.log" "$bundle_work/prepare.log" >"$bundle_work/duplicated.log"
+expect_failure "log with a duplicated release bundle block is refused" \
+  bash "$bundle_script" extract-log --repo "$log_consumer" --log "$bundle_work/duplicated.log" --bundle "$bundle_work/duplicated.bundle"
+sed '/^2026-10-23T10:00:00.1234567Z [A-Za-z0-9+/]/d' "$bundle_work/prepare.log" >"$bundle_work/short.log"
+expect_failure "log block whose base64 is truncated is refused" \
+  bash "$bundle_script" extract-log --repo "$log_consumer" --log "$bundle_work/short.log" --bundle "$bundle_work/short.bundle"
+sed 's/release_commit=/commit=/' "$bundle_work/prepare.log" >"$bundle_work/malformed.log"
+expect_failure "log block with a malformed begin marker is refused" \
+  bash "$bundle_script" extract-log --repo "$log_consumer" --log "$bundle_work/malformed.log" --bundle "$bundle_work/malformed.bundle"
+
+# Resume selection. A re-run attempt can leave a newer prepare job whose log carries no usable
+# block, so the workflow hands every candidate over newest first and the helper accepts the first
+# valid one. Each individual log must still contain exactly one well-formed block.
+printf '2026-10-24T08:00:00Z\t9001\t%s\n2026-10-23T10:00:00Z\t9002\t%s\n' \
+  "$bundle_work/absent.log" "$bundle_work/prepare.log" >"$bundle_work/manifest.tsv"
+best="$(bash "$bundle_script" extract-best-block --repo "$log_consumer" --input "$bundle_work/manifest.tsv" --bundle "$bundle_work/best.bundle" 2>/dev/null)"
+expect_eq "9002" "$(printf '%s\n' "$best" | sed -n 's/^JOB_ID=//p')" "a missing candidate log is skipped in favour of a valid one"
+expect_eq "$release_commit_sha" "$(printf '%s\n' "$best" | sed -n 's/^RELEASE_COMMIT=//p')" "selected candidate reports the release commit"
+expect_eq "$bundle_digest" "$(printf '%s\n' "$best" | sed -n 's/^RELEASE_BUNDLE_SHA256=//p')" "selected candidate reports the bundle digest"
+
+printf '2026-10-24T08:00:00Z\t9101\t%s\n2026-10-23T10:00:00Z\t9102\t%s\n' \
+  "$bundle_work/duplicated.log" "$bundle_work/prepare.log" >"$bundle_work/manifest-duplicated.tsv"
+expect_eq "9102" \
+  "$(bash "$bundle_script" extract-best-block --repo "$log_consumer" --input "$bundle_work/manifest-duplicated.tsv" --bundle "$bundle_work/best-dup.bundle" 2>/dev/null | sed -n 's/^JOB_ID=//p')" \
+  "a candidate log with a duplicated block is skipped"
+
+printf '2026-10-24T08:00:00Z\t9201\t%s\n' "$bundle_work/prepare.log" >"$bundle_work/manifest-first.tsv"
+expect_eq "9201" \
+  "$(bash "$bundle_script" extract-best-block --repo "$log_consumer" --input "$bundle_work/manifest-first.tsv" --bundle "$bundle_work/best-first.bundle" 2>/dev/null | sed -n 's/^JOB_ID=//p')" \
+  "the newest candidate is used when its block is valid"
+
+printf '2026-10-24T08:00:00Z\t9301\t%s\n2026-10-23T10:00:00Z\t9302\t%s\n' \
+  "$bundle_work/absent.log" "$bundle_work/truncated.log" >"$bundle_work/manifest-invalid.tsv"
+expect_failure "resume with no valid candidate block fails closed" \
+  bash "$bundle_script" extract-best-block --repo "$log_consumer" --input "$bundle_work/manifest-invalid.tsv" --bundle "$bundle_work/best-none.bundle"
+
+# Job-output and environment-string budget. Consumers receive the payload as one step environment
+# string, and Linux rejects a single such string above MAX_ARG_STRLEN = 131072 bytes (NAME + '=' +
+# value + NUL), long before the 1 MB per-job output cap applies.
+payload_cap="$(sed -n 's/^PAYLOAD_MAX_ENCODED_BYTES=//p' "$bundle_script")"
+expect_eq "120000" "$payload_cap" "shared payload cap is the single source of truth"
+longest_env_name="$(grep -rhoE '\b(RELEASE_BUNDLE|SBOM_GZ_BASE64)[A-Z0-9_]*' "$ROOT/.github/workflows" \
+  | sort -u | awk '{ if (length($0) > longest) { longest = length($0); name = $0 } } END { print name }')"
+expect_eq "RELEASE_BUNDLE_SHA256" "$longest_env_name" "longest payload environment variable name in the workflows"
+expect_success "shared cap plus the longest environment name leaves room under MAX_ARG_STRLEN" \
+  test $(( 131072 - payload_cap - ${#longest_env_name} - 2 )) -ge 1024
+
+# 90000 raw bytes encode to exactly the shared cap; one more raw byte crosses it.
+head -c 90000 /dev/zero >"$bundle_work/cap-exact.bin"
+head -c 90001 /dev/zero >"$bundle_work/cap-over.bin"
+expect_success "payload of exactly the shared cap is accepted" \
+  bash "$bundle_script" encode --bundle "$bundle_work/cap-exact.bin"
+expect_failure "payload just above the shared cap is refused by default" \
+  bash "$bundle_script" encode --bundle "$bundle_work/cap-over.bin"
+expect_failure "payload above an explicit budget is refused" \
+  bash "$bundle_script" encode --bundle "$release_bundle" --max-bytes 32
+
+# SBOM transport: gzip -9n makes the payload a deterministic function of the JSON bytes, and the
+# digest is taken over the uncompressed document so supply_chain verifies the SBOM it signs.
+sbom_json="$bundle_work/sbom.spdx.json"
+printf '{"spdxVersion":"SPDX-2.3","name":"mcpiler-engine"}\n' >"$sbom_json"
+sbom_output="$(bash "$bundle_script" sbom-encode --input "$sbom_json" --output "$bundle_work/sbom.b64")"
+sbom_digest="$(printf '%s\n' "$sbom_output" | sed -n 's/^SBOM_SHA256=//p')"
+expect_eq "$(sha256sum "$sbom_json" | cut -d' ' -f1)" "$sbom_digest" "SBOM digest covers the uncompressed document"
+bash "$bundle_script" sbom-encode --input "$sbom_json" --output "$bundle_work/sbom-second.b64" >/dev/null
+expect_success "SBOM encoding is deterministic" cmp -s "$bundle_work/sbom.b64" "$bundle_work/sbom-second.b64"
+bash "$bundle_script" sbom-restore --input "$bundle_work/sbom.b64" --output "$bundle_work/sbom-restored.json" --sha256 "$sbom_digest" >/dev/null
+expect_success "restored SBOM is byte-identical" cmp -s "$sbom_json" "$bundle_work/sbom-restored.json"
+expect_failure "SBOM digest mismatch is refused" \
+  bash "$bundle_script" sbom-restore --input "$bundle_work/sbom.b64" --output "$bundle_work/sbom-wrong.json" --sha256 "$zero_digest"
+expect_failure "encoded SBOM above an explicit budget is refused" \
+  bash "$bundle_script" sbom-encode --input "$sbom_json" --output "$bundle_work/sbom-capped.b64" --max-bytes 16
+# Incompressible JSON of 91000 bytes stays above the shared cap after gzip -9n.
+head -c 91000 /dev/urandom >"$bundle_work/sbom-large.json"
+expect_failure "encoded SBOM above the shared cap is refused by default" \
+  bash "$bundle_script" sbom-encode --input "$bundle_work/sbom-large.json" --output "$bundle_work/sbom-large.b64"
 
 if (( failures > 0 )); then
   printf 'RESULT: FAIL - %d release helper test(s) failed.\n' "$failures" >&2

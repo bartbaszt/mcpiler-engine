@@ -8,7 +8,7 @@ on:
         required: false
         type: string
       release_run_id:
-        description: Failed release workflow run ID containing engine-release-bundle for the first-public visibility checkpoint.
+        description: Failed release workflow run ID whose prepare job log carries the first-public release bundle.
         required: false
         type: string
 
@@ -32,6 +32,8 @@ jobs:
       base_sha: ${{ steps.resolve.outputs.base_sha }}
       candidate_ref: ${{ steps.resolve.outputs.candidate_ref }}
       mode: ${{ steps.resolve.outputs.mode }}
+      release_bundle: ${{ steps.resolve.outputs.release_bundle }}
+      release_bundle_sha256: ${{ steps.resolve.outputs.release_bundle_sha256 }}
     steps:
       - name: Validate resume selector
         env:
@@ -43,24 +45,103 @@ jobs:
             echo 'Provide exactly one of release_tag or release_run_id.' >&2
             exit 64
           fi
-      - name: Restore pre-Git first-public bundle
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         if: ${{ inputs.release_run_id != '' }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: engine-release-bundle
-          run-id: ${{ inputs.release_run_id }}
-          github-token: ${{ github.token }}
-      - name: Resolve first-public identity
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+          path: source
+      - name: Validate the failed release run
+        if: ${{ inputs.release_run_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ inputs.release_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || { echo 'FAIL: release_run_id must be a numeric workflow run ID.' >&2; exit 64; }
+          # A resume must never trust an arbitrary run ID: only a stable release entry workflow,
+          # dispatched manually from this repository's own main branch, may supply a prepared commit.
+          run_identity="$(gh api "repos/$REPOSITORY/actions/runs/$RUN_ID" --jq '[.path, .event, .head_branch, (.head_repository.full_name // "")] | @tsv')"
+          IFS=$'\t' read -r workflow_path run_event head_branch head_repository <<<"$run_identity"
+          case "$workflow_path" in
+            .github/workflows/release-patch.yml|.github/workflows/release-minor.yml|.github/workflows/release-major.yml) ;;
+            *) echo "FAIL: run $RUN_ID was not started by a stable release entry workflow (path: ${workflow_path:-<none>})." >&2; exit 1 ;;
+          esac
+          [[ "$run_event" == 'workflow_dispatch' ]] || { echo "FAIL: run $RUN_ID was not dispatched manually (event: ${run_event:-<none>})." >&2; exit 1; }
+          [[ "$head_branch" == 'main' ]] || { echo "FAIL: run $RUN_ID was not dispatched from main (branch: ${head_branch:-<none>})." >&2; exit 1; }
+          [[ "$head_repository" == "$REPOSITORY" ]] || { echo "FAIL: run $RUN_ID belongs to repository ${head_repository:-<none>}, not $REPOSITORY." >&2; exit 1; }
+          echo "RESULT: RELEASE_RUN_VALIDATED path=$workflow_path event=$run_event branch=$head_branch"
+      - name: Collect the prepare job logs newest first
+        if: ${{ inputs.release_run_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ inputs.release_run_id }}
+        run: |
+          set -euo pipefail
+          # `filter=all` is required: a re-run attempt whose prepare job failed early must not hide a
+          # valid block produced by an earlier attempt of the same run.
+          gh api --paginate "repos/$REPOSITORY/actions/runs/$RUN_ID/jobs?filter=all&per_page=100" \
+            --jq '.jobs[] | select(.name | endswith("METADATA_PREPARED / RELEASE_COMMITTED")) | [(.started_at // ""), (.id | tostring)] | @tsv' \
+            > prepare-jobs-raw.tsv
+          sed '/^[[:space:]]*$/d' prepare-jobs-raw.tsv | sort -t$'\t' -k1,1r -k2,2nr > prepare-jobs.tsv
+          [[ -s prepare-jobs.tsv ]] || { echo "FAIL: run $RUN_ID has no prepare job." >&2; exit 1; }
+          : > prepare-log-manifest.tsv
+          while IFS=$'\t' read -r started_at job_id; do
+            [[ "$job_id" =~ ^[0-9]+$ ]] || { echo "FAIL: prepare job id '$job_id' is not numeric." >&2; exit 1; }
+            log="prepare-${job_id}.log"
+            # gh api refuses job logs that contain terminal escape sequences (every log has ANSI in
+            # its echoed `run:` headers) unless --allow-escape-sequences is passed, and the runner's
+            # preinstalled gh version is not pinned. curl follows the redirect to the signed blob URL
+            # and drops the Authorization header on the cross-host hop; do not use --location-trusted.
+            if ! curl --fail --silent --show-error --location --retry 3 \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${REPOSITORY}/actions/jobs/${job_id}/logs" \
+              -o "$log"; then
+              echo "Prepare job $job_id log download failed; treating it as an invalid candidate." >&2
+              : > "$log"
+            elif [[ ! -s "$log" ]]; then
+              echo "Prepare job $job_id returned an empty log; treating it as an invalid candidate." >&2
+            fi
+            printf '%s\t%s\t%s\n' "$started_at" "$job_id" "$log" >> prepare-log-manifest.tsv
+          done < prepare-jobs.tsv
+          echo "RESULT: PREPARE_LOGS_COLLECTED count=$(wc -l < prepare-log-manifest.tsv | tr -d '[:space:]')"
+      - name: Restore the first-public release bundle from the prepare logs
         id: visibility
         if: ${{ inputs.release_run_id != '' }}
         run: |
           set -euo pipefail
-          git clone release.bundle source
-          release_commit="$(git -C source rev-parse HEAD)"
+          # The failed run's artifacts and job outputs are gone, so its prepare job logs are the only
+          # carrier of the prepared commit. The helper tries every candidate newest first and accepts
+          # only a log with exactly one well-formed block whose SHA-256 and release commit both match.
+          output="$(bash source/eng/release-bundle.sh extract-best-block --repo source --input prepare-log-manifest.tsv --bundle release.bundle)"
+          printf '%s\n' "$output"
+          release_commit="$(printf '%s\n' "$output" | sed -n 's/^RELEASE_COMMIT=//p')"
+          bundle_sha="$(printf '%s\n' "$output" | sed -n 's/^RELEASE_BUNDLE_SHA256=//p')"
+          bundle_base="$(printf '%s\n' "$output" | sed -n 's/^RELEASE_BASE_SHA=//p')"
+          origin_main="$(git -C source rev-parse --verify --quiet 'origin/main^{commit}')" || {
+            echo 'FAIL: the release checkout has no origin/main to compare the prepared base against.' >&2
+            exit 1
+          }
+          # eng/release.sh --publish-git refuses any base that is not live origin/main, so a resume
+          # must reject that mismatch before it verifies or publishes a candidate.
+          [[ "$bundle_base" == "$origin_main" ]] || {
+            echo "FAIL: prepared release base $bundle_base is not current origin/main $origin_main." >&2
+            exit 1
+          }
+          bash source/eng/release-bundle.sh restore --repo source --bundle release.bundle --sha256 "$bundle_sha" --base-sha "$bundle_base" --release-commit "$release_commit"
+          [[ "$(git -C source rev-parse HEAD)" == "$release_commit" ]] || { echo 'FAIL: restored checkout is not the prepared release commit.' >&2; exit 1; }
           base_sha="$(git -C source rev-parse HEAD^)"
+          [[ "$base_sha" == "$origin_main" ]] || { echo "FAIL: restored release base $base_sha is not current origin/main $origin_main." >&2; exit 1; }
           version="$(sed -n 's:.*<Version>\([^<]*\)</Version>.*:\1:p' source/src/MCPiler.Engine.Host/MCPiler.Engine.Host.csproj | head -n1)"
           tag="v$version"
-          printf 'mode=visibility\nrelease_tag=%s\nrelease_version=%s\nrelease_commit=%s\nbase_sha=%s\ncandidate_ref=ghcr.io/bartbaszt/mcpiler-engine:%s\n' "$tag" "$version" "$release_commit" "$base_sha" "$release_commit" >>"$GITHUB_OUTPUT"
+          printf 'mode=visibility\nrelease_tag=%s\nrelease_version=%s\nrelease_commit=%s\nbase_sha=%s\ncandidate_ref=ghcr.io/bartbaszt/mcpiler-engine:%s\nrelease_bundle_sha256=%s\n' "$tag" "$version" "$release_commit" "$base_sha" "$release_commit" "$bundle_sha" >>"$GITHUB_OUTPUT"
+          bundle_base64="$(bash source/eng/release-bundle.sh encode --bundle release.bundle)"
+          printf 'release_bundle=%s\n' "$bundle_base64" >>"$GITHUB_OUTPUT"
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         if: ${{ inputs.release_tag != '' }}
         with:
@@ -89,6 +170,8 @@ jobs:
           VIS_COMMIT: ${{ steps.visibility.outputs.release_commit }}
           VIS_BASE: ${{ steps.visibility.outputs.base_sha }}
           VIS_CANDIDATE: ${{ steps.visibility.outputs.candidate_ref }}
+          VIS_BUNDLE: ${{ steps.visibility.outputs.release_bundle }}
+          VIS_BUNDLE_SHA: ${{ steps.visibility.outputs.release_bundle_sha256 }}
           POST_MODE: ${{ steps.postgit.outputs.mode }}
           POST_TAG: ${{ steps.postgit.outputs.release_tag }}
           POST_VERSION: ${{ steps.postgit.outputs.release_version }}
@@ -97,10 +180,14 @@ jobs:
           POST_CANDIDATE: ${{ steps.postgit.outputs.candidate_ref }}
         run: |
           set -euo pipefail
+          # The bundle outputs are only meaningful for the visibility mode; the post-Git mode resolves
+          # its source from the immutable tag and leaves them empty.
           if [[ -n "$VIS_MODE" ]]; then
             printf 'mode=%s\nrelease_tag=%s\nrelease_version=%s\nrelease_commit=%s\nbase_sha=%s\ncandidate_ref=%s\n' "$VIS_MODE" "$VIS_TAG" "$VIS_VERSION" "$VIS_COMMIT" "$VIS_BASE" "$VIS_CANDIDATE" >>"$GITHUB_OUTPUT"
+            printf 'release_bundle=%s\nrelease_bundle_sha256=%s\n' "$VIS_BUNDLE" "$VIS_BUNDLE_SHA" >>"$GITHUB_OUTPUT"
           else
             printf 'mode=%s\nrelease_tag=%s\nrelease_version=%s\nrelease_commit=%s\nbase_sha=%s\ncandidate_ref=%s\n' "$POST_MODE" "$POST_TAG" "$POST_VERSION" "$POST_COMMIT" "$POST_BASE" "$POST_CANDIDATE" >>"$GITHUB_OUTPUT"
+            printf 'release_bundle=\nrelease_bundle_sha256=\n' >>"$GITHUB_OUTPUT"
           fi
 
   verify_candidate:
@@ -110,15 +197,24 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         if: ${{ needs.resolve.outputs.mode == 'visibility' }}
         with:
-          name: engine-release-bundle
-          run-id: ${{ inputs.release_run_id }}
-          github-token: ${{ github.token }}
+          ref: ${{ needs.resolve.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: source
       - name: Restore first-public release source
         if: ${{ needs.resolve.outputs.mode == 'visibility' }}
-        run: git clone release.bundle source
+        working-directory: source
+        env:
+          RELEASE_BUNDLE: ${{ needs.resolve.outputs.release_bundle }}
+          RELEASE_BUNDLE_SHA256: ${{ needs.resolve.outputs.release_bundle_sha256 }}
+          BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
+          RELEASE_COMMIT: ${{ needs.resolve.outputs.release_commit }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$RELEASE_BUNDLE" | bash eng/release-bundle.sh restore --repo . --base64-stdin --sha256 "$RELEASE_BUNDLE_SHA256" --base-sha "$BASE_SHA" --release-commit "$RELEASE_COMMIT"
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         if: ${{ needs.resolve.outputs.mode == 'postgit' }}
         with:
@@ -154,21 +250,16 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
           path: source
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: engine-release-bundle
-          run-id: ${{ inputs.release_run_id }}
-          github-token: ${{ github.token }}
-          path: artifact
       - name: Restore the exact first-public release commit into the authenticated checkout
         working-directory: source
         env:
+          RELEASE_BUNDLE: ${{ needs.resolve.outputs.release_bundle }}
+          RELEASE_BUNDLE_SHA256: ${{ needs.resolve.outputs.release_bundle_sha256 }}
+          BASE_SHA: ${{ needs.resolve.outputs.base_sha }}
           RELEASE_COMMIT: ${{ needs.resolve.outputs.release_commit }}
         run: |
           set -euo pipefail
-          git fetch ../artifact/release.bundle main
-          [[ "$(git rev-parse FETCH_HEAD)" == "$RELEASE_COMMIT" ]] || { echo 'Prepared release bundle identity mismatch.' >&2; exit 1; }
-          git reset --hard FETCH_HEAD
+          printf '%s\n' "$RELEASE_BUNDLE" | bash eng/release-bundle.sh restore --repo . --base64-stdin --sha256 "$RELEASE_BUNDLE_SHA256" --base-sha "$BASE_SHA" --release-commit "$RELEASE_COMMIT"
       - name: Validate first-public resume and publish Git refs
         working-directory: source
         env:
