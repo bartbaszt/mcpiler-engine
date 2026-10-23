@@ -48,6 +48,8 @@ jobs:
       release_version: ${{ steps.prepare.outputs.release_version }}
       release_tag: ${{ steps.prepare.outputs.release_tag }}
       release_commit: ${{ steps.prepare.outputs.release_commit }}
+      release_bundle: ${{ steps.bundle.outputs.release_bundle }}
+      release_bundle_sha256: ${{ steps.bundle.outputs.release_bundle_sha256 }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -65,21 +67,43 @@ jobs:
           set -euo pipefail
           output="$(bash eng/release.sh --prepare --bump "$BUMP")"
           printf '%s\n' "$output"
-          printf 'base_sha=%s\n' "$(printf '%s\n' "$output" | sed -n 's/^BASE_SHA=//p')" >>"$GITHUB_OUTPUT"
-          printf 'release_version=%s\n' "$(printf '%s\n' "$output" | sed -n 's/^RELEASE_VERSION=//p')" >>"$GITHUB_OUTPUT"
-          printf 'release_tag=%s\n' "$(printf '%s\n' "$output" | sed -n 's/^RELEASE_TAG=//p')" >>"$GITHUB_OUTPUT"
-          printf 'release_commit=%s\n' "$(printf '%s\n' "$output" | sed -n 's/^RELEASE_COMMIT=//p')" >>"$GITHUB_OUTPUT"
-          # Bundle the branch AND HEAD: a bundle carrying only `main` leaves a plain clone with
-          # "remote HEAD refers to nonexistent ref, unable to checkout", so every consumer job gets
-          # an empty working tree and nothing to run.
-          git bundle create release.bundle main HEAD
-      - name: Preserve prepared commit without publishing Git refs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: engine-release-bundle
-          path: release.bundle
-          if-no-files-found: error
-          retention-days: 14
+          # Capture each value before writing it: a failing command substitution in argument position
+          # does not trigger errexit, so an inline "$(...)" could silently publish an empty output.
+          base_sha="$(printf '%s\n' "$output" | sed -n 's/^BASE_SHA=//p')"
+          release_version="$(printf '%s\n' "$output" | sed -n 's/^RELEASE_VERSION=//p')"
+          release_tag="$(printf '%s\n' "$output" | sed -n 's/^RELEASE_TAG=//p')"
+          release_commit="$(printf '%s\n' "$output" | sed -n 's/^RELEASE_COMMIT=//p')"
+          [[ -n "$base_sha" && -n "$release_version" && -n "$release_tag" && -n "$release_commit" ]] || {
+            echo 'FAIL: eng/release.sh --prepare did not report complete release metadata.' >&2
+            exit 1
+          }
+          printf 'base_sha=%s\n' "$base_sha" >>"$GITHUB_OUTPUT"
+          printf 'release_version=%s\n' "$release_version" >>"$GITHUB_OUTPUT"
+          printf 'release_tag=%s\n' "$release_tag" >>"$GITHUB_OUTPUT"
+          printf 'release_commit=%s\n' "$release_commit" >>"$GITHUB_OUTPUT"
+      - name: Package the prepared commit without publishing Git refs
+        id: bundle
+        env:
+          BASE_SHA: ${{ steps.prepare.outputs.base_sha }}
+          RELEASE_COMMIT: ${{ steps.prepare.outputs.release_commit }}
+        run: |
+          set -euo pipefail
+          # GitHub Actions artifact storage is unavailable for this account, so the prepared commit
+          # travels as a base64 job output (same run) and as a marked log block (resume of a run that
+          # already failed). The bundle is incremental over base_sha and carries exactly one head,
+          # refs/heads/main, at the release commit; it publishes no Git ref and needs no write scope.
+          # The helper's shared PAYLOAD_MAX_ENCODED_BYTES cap keeps the payload below the Linux
+          # single-environment-string limit, so an oversized bundle fails here, not at consumer start.
+          output="$(bash eng/release-bundle.sh write --repo . --bundle release.bundle --base-sha "$BASE_SHA" --release-commit "$RELEASE_COMMIT")"
+          printf '%s\n' "$output"
+          sha256="$(printf '%s\n' "$output" | sed -n 's/^RELEASE_BUNDLE_SHA256=//p')"
+          [[ "$sha256" =~ ^[0-9a-f]{64}$ ]] || { echo 'FAIL: release bundle digest is missing or malformed.' >&2; exit 1; }
+          bundle_base64="$(bash eng/release-bundle.sh encode --bundle release.bundle)"
+          printf 'release_bundle=%s\n' "$bundle_base64" >>"$GITHUB_OUTPUT"
+          printf 'release_bundle_sha256=%s\n' "$sha256" >>"$GITHUB_OUTPUT"
+          # A failed run exposes neither artifacts nor job outputs to a later run, so the resume
+          # workflow reads this block back from the prepare job log and authenticates it by SHA-256.
+          bash eng/release-bundle.sh print-log --bundle release.bundle --release-commit "$RELEASE_COMMIT" --sha256 "$sha256"
 
   candidate_publish:
     name: CANDIDATE_PUBLISHED
@@ -92,11 +116,22 @@ jobs:
       candidate_ref: ${{ steps.publish.outputs.candidate_ref }}
       candidate_digest: ${{ steps.publish.outputs.candidate_digest }}
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          name: engine-release-bundle
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: source
       - name: Restore prepared source
-        run: git clone release.bundle source
+        working-directory: source
+        env:
+          RELEASE_BUNDLE: ${{ needs.prepare.outputs.release_bundle }}
+          RELEASE_BUNDLE_SHA256: ${{ needs.prepare.outputs.release_bundle_sha256 }}
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.release_commit }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$RELEASE_BUNDLE" | bash eng/release-bundle.sh restore --repo . --base64-stdin --sha256 "$RELEASE_BUNDLE_SHA256" --base-sha "$BASE_SHA" --release-commit "$RELEASE_COMMIT"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -114,8 +149,10 @@ jobs:
           # Candidate build contract: linux/amd64,linux/arm64; provenance: false; sbom: false.
           output="$(bash eng/publish-release.sh --candidate --sha "$RELEASE_COMMIT")"
           printf '%s\n' "$output"
-          printf 'candidate_ref=%s\n' "$(printf '%s\n' "$output" | sed -n 's/^CANDIDATE_REF=//p')" >>"$GITHUB_OUTPUT"
-          printf 'candidate_digest=%s\n' "$(printf '%s\n' "$output" | sed -n 's/^CANDIDATE_DIGEST=//p')" >>"$GITHUB_OUTPUT"
+          candidate_ref="$(printf '%s\n' "$output" | sed -n 's/^CANDIDATE_REF=//p')"
+          candidate_digest="$(printf '%s\n' "$output" | sed -n 's/^CANDIDATE_DIGEST=//p')"
+          printf 'candidate_ref=%s\n' "$candidate_ref" >>"$GITHUB_OUTPUT"
+          printf 'candidate_digest=%s\n' "$candidate_digest" >>"$GITHUB_OUTPUT"
 
   smoke_amd64:
     name: CANDIDATE_SMOKED linux/amd64
@@ -125,10 +162,22 @@ jobs:
       contents: read
       packages: read
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          name: engine-release-bundle
-      - run: git clone release.bundle source
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: source
+      - name: Restore prepared source
+        working-directory: source
+        env:
+          RELEASE_BUNDLE: ${{ needs.prepare.outputs.release_bundle }}
+          RELEASE_BUNDLE_SHA256: ${{ needs.prepare.outputs.release_bundle_sha256 }}
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.release_commit }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$RELEASE_BUNDLE" | bash eng/release-bundle.sh restore --repo . --base64-stdin --sha256 "$RELEASE_BUNDLE_SHA256" --base-sha "$BASE_SHA" --release-commit "$RELEASE_COMMIT"
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -146,10 +195,22 @@ jobs:
       contents: read
       packages: read
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          name: engine-release-bundle
-      - run: git clone release.bundle source
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: source
+      - name: Restore prepared source
+        working-directory: source
+        env:
+          RELEASE_BUNDLE: ${{ needs.prepare.outputs.release_bundle }}
+          RELEASE_BUNDLE_SHA256: ${{ needs.prepare.outputs.release_bundle_sha256 }}
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.release_commit }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$RELEASE_BUNDLE" | bash eng/release-bundle.sh restore --repo . --base64-stdin --sha256 "$RELEASE_BUNDLE_SHA256" --base-sha "$BASE_SHA" --release-commit "$RELEASE_COMMIT"
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -161,12 +222,21 @@ jobs:
 
   sbom:
     name: Generate candidate SBOM
-    needs: [smoke_amd64, smoke_arm64, candidate_publish]
+    needs: [prepare, smoke_amd64, smoke_arm64, candidate_publish]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: read
+    outputs:
+      sbom_gz_base64: ${{ steps.encode.outputs.sbom_gz_base64 }}
+      sbom_sha256: ${{ steps.encode.outputs.sbom_sha256 }}
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: source
       - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           image: ghcr.io/bartbaszt/mcpiler-engine@${{ needs.candidate_publish.outputs.candidate_digest }}
@@ -177,12 +247,18 @@ jobs:
           syft-version: v1.52.0
           upload-artifact: false
           upload-release-assets: false
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: engine-release-sbom
-          path: sbom.spdx.json
-          if-no-files-found: error
-          retention-days: 14
+      - name: Encode the SBOM for the supply-chain job without artifact storage
+        id: encode
+        run: |
+          set -euo pipefail
+          # gzip -9n drops the name and mtime fields, so the encoded payload is a deterministic
+          # function of the SBOM bytes; the SHA-256 is taken over the uncompressed JSON.
+          output="$(bash source/eng/release-bundle.sh sbom-encode --input sbom.spdx.json --output sbom.spdx.json.gz.b64)"
+          printf '%s\n' "$output"
+          sha256="$(printf '%s\n' "$output" | sed -n 's/^SBOM_SHA256=//p')"
+          printf 'sbom_sha256=%s\n' "$sha256" >>"$GITHUB_OUTPUT"
+          sbom_base64="$(tr -d '\n' < sbom.spdx.json.gz.b64)"
+          printf 'sbom_gz_base64=%s\n' "$sbom_base64" >>"$GITHUB_OUTPUT"
 
   supply_chain:
     name: SUPPLY_CHAIN_VERIFIED
@@ -193,13 +269,30 @@ jobs:
       packages: write
       id-token: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          name: engine-release-bundle
-      - run: git clone release.bundle source
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: engine-release-sbom
+          ref: ${{ needs.prepare.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: source
+      - name: Restore prepared source
+        working-directory: source
+        env:
+          RELEASE_BUNDLE: ${{ needs.prepare.outputs.release_bundle }}
+          RELEASE_BUNDLE_SHA256: ${{ needs.prepare.outputs.release_bundle_sha256 }}
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.release_commit }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$RELEASE_BUNDLE" | bash eng/release-bundle.sh restore --repo . --base64-stdin --sha256 "$RELEASE_BUNDLE_SHA256" --base-sha "$BASE_SHA" --release-commit "$RELEASE_COMMIT"
+      - name: Restore the verified SBOM without artifact storage
+        env:
+          SBOM_GZ_BASE64: ${{ needs.sbom.outputs.sbom_gz_base64 }}
+          SBOM_SHA256: ${{ needs.sbom.outputs.sbom_sha256 }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$SBOM_GZ_BASE64" > sbom.spdx.json.gz.b64
+          bash source/eng/release-bundle.sh sbom-restore --input sbom.spdx.json.gz.b64 --output sbom.spdx.json --sha256 "$SBOM_SHA256"
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -285,19 +378,19 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
           path: source
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: engine-release-bundle
-          path: artifact
       - name: Restore the exact prepared release commit into the authenticated checkout
         working-directory: source
         env:
+          RELEASE_BUNDLE: ${{ needs.prepare.outputs.release_bundle }}
+          RELEASE_BUNDLE_SHA256: ${{ needs.prepare.outputs.release_bundle_sha256 }}
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
           RELEASE_COMMIT: ${{ needs.prepare.outputs.release_commit }}
         run: |
           set -euo pipefail
-          git fetch ../artifact/release.bundle main
-          [[ "$(git rev-parse FETCH_HEAD)" == "$RELEASE_COMMIT" ]] || { echo 'Prepared release bundle identity mismatch.' >&2; exit 1; }
-          git reset --hard FETCH_HEAD
+          # The authenticated checkout stays on main; the verified release commit is only moved into
+          # the working tree. Nothing pushes the prepared commit as a ref before eng/release.sh
+          # --publish-git performs the atomic main+tag push.
+          printf '%s\n' "$RELEASE_BUNDLE" | bash eng/release-bundle.sh restore --repo . --base64-stdin --sha256 "$RELEASE_BUNDLE_SHA256" --base-sha "$BASE_SHA" --release-commit "$RELEASE_COMMIT"
       - name: Publish main and annotated stable tag atomically after fresh race check
         working-directory: source
         env:

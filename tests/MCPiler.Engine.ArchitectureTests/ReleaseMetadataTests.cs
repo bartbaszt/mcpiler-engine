@@ -54,6 +54,7 @@ public sealed class ReleaseMetadataTests
             "eng/check-licenses.sh",
             "eng/test-release-helpers.sh",
             "eng/release.sh",
+            "eng/release-bundle.sh",
             "eng/publish-release.sh",
             "eng/verify-container.sh",
             ".github/workflows/release-patch.yml",
@@ -115,28 +116,331 @@ public sealed class ReleaseMetadataTests
         Assert.Contains("spdxjson", verifier, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// GitHub Actions artifact storage is unavailable for the release account (owner decision
+    /// 2026-10-23), so no Engine workflow may upload or download an artifact. The prepared release
+    /// commit travels as a base64 job output and as a marked prepare-job log block; the candidate
+    /// SBOM travels as a base64 job output. This guard parses every <c>uses:</c> value in every
+    /// workflow, and the fixture self-test proves the parser actually sees artifact actions.
+    /// </summary>
     [Fact]
-    public void Release_bundle_carries_head_so_consumer_jobs_get_a_working_tree()
+    public void No_engine_workflow_uses_artifact_storage()
     {
-        // Normalize line endings: this file is read on Windows and in Linux CI alike, and the
-        // assertions below are about the Git command, not about the checkout's line endings.
+        var workflows = Directory
+            .EnumerateFiles(EngineRepository.Absolute(".github/workflows"))
+            .Where(path => path.EndsWith(".yml", StringComparison.OrdinalIgnoreCase)
+                || path.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.True(workflows.Length >= 6, $"Expected the Engine workflow set, found {workflows.Length} files.");
+
+        var uses = workflows
+            .SelectMany(path => UsesValues(File.ReadAllText(path)).Select(value => (File: Path.GetFileName(path), Value: value)))
+            .ToArray();
+
+        // Without this the two assertions below could pass because the parser returned nothing.
+        Assert.Contains(uses, entry => entry.Value.StartsWith("actions/checkout@", StringComparison.Ordinal));
+
+        var artifactActions = uses
+            .Where(entry => entry.Value.StartsWith("actions/upload-artifact", StringComparison.Ordinal)
+                || entry.Value.StartsWith("actions/download-artifact", StringComparison.Ordinal))
+            .Select(entry => $"{entry.File}: {entry.Value}")
+            .ToArray();
+        Assert.True(
+            artifactActions.Length == 0,
+            $"Engine workflows must not use GitHub Actions artifact storage: {string.Join(", ", artifactActions)}");
+
+        // Fixture self-test: the same detector must report artifact actions when they are present.
+        const string fixture = """
+            jobs:
+              probe:
+                steps:
+                  - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+                  - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+                  - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+            """;
+        var fixtureUses = UsesValues(fixture).ToArray();
+        Assert.Equal(3, fixtureUses.Length);
+        Assert.Contains(fixtureUses, value => value.StartsWith("actions/upload-artifact@", StringComparison.Ordinal));
+        Assert.Contains(fixtureUses, value => value.StartsWith("actions/download-artifact@", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Every job that consumes the prepared release commit restores it through
+    /// <c>eng/release-bundle.sh</c> from the reviewed base commit, and the restore proves the release
+    /// commit identity before moving the working tree. Duplicating that logic in each job is what
+    /// this guard exists to prevent.
+    /// </summary>
+    [Fact]
+    public void Release_bundle_consumers_restore_through_the_release_bundle_helper()
+    {
         var workflow = Read(".github/workflows/release.yml").Replace("\r\n", "\n");
 
-        // A bundle created with only the branch ref leaves a plain `git clone` with
-        // "remote HEAD refers to nonexistent ref, unable to checkout": the clone succeeds, the
-        // working tree is empty, and every consumer job then fails with a missing-script error.
-        var bundleCommands = workflow
-            .Split('\n')
-            .Select(line => line.Trim())
-            .Where(line => line.StartsWith("git bundle create", StringComparison.Ordinal))
-            .ToArray();
-        Assert.NotEmpty(bundleCommands);
-        Assert.All(bundleCommands, command =>
-            Assert.EndsWith("main HEAD", command, StringComparison.Ordinal));
+        var prepareJob = Job(workflow, "prepare");
+        Assert.Contains("release_bundle: ${{ steps.bundle.outputs.release_bundle }}", prepareJob, StringComparison.Ordinal);
+        Assert.Contains("release_bundle_sha256: ${{ steps.bundle.outputs.release_bundle_sha256 }}", prepareJob, StringComparison.Ordinal);
+        Assert.Contains("eng/release-bundle.sh write", prepareJob, StringComparison.Ordinal);
+        Assert.Contains("--base-sha \"$BASE_SHA\"", prepareJob, StringComparison.Ordinal);
+        Assert.Contains("--release-commit \"$RELEASE_COMMIT\"", prepareJob, StringComparison.Ordinal);
+        // Consumers receive the payload as one step environment string, so the cap that matters is
+        // the Linux MAX_ARG_STRLEN limit (131072 bytes for NAME + '=' + value + NUL), not the 1 MB
+        // job-output limit. The producer must use the helper's single shared cap, not a local number.
+        Assert.DoesNotContain("--max-bytes", prepareJob, StringComparison.Ordinal);
+        // The failed-run resume path reads the marked block back from this job's log.
+        Assert.Contains("eng/release-bundle.sh print-log", prepareJob, StringComparison.Ordinal);
 
-        // Every consumer must actually clone the bundle; if that changes, the bundle contract changes too.
-        Assert.Contains("git clone release.bundle source", workflow, StringComparison.Ordinal);
+        foreach (var name in new[] { "candidate_publish", "smoke_amd64", "smoke_arm64", "supply_chain" })
+        {
+            var job = Job(workflow, name);
+            Assert.Contains("ref: ${{ needs.prepare.outputs.base_sha }}", job, StringComparison.Ordinal);
+            Assert.Contains("persist-credentials: false", job, StringComparison.Ordinal);
+            Assert.Contains("eng/release-bundle.sh restore", job, StringComparison.Ordinal);
+            Assert.Contains("--base64-stdin", job, StringComparison.Ordinal);
+            Assert.Contains("--sha256 \"$RELEASE_BUNDLE_SHA256\"", job, StringComparison.Ordinal);
+            Assert.Contains("--base-sha \"$BASE_SHA\"", job, StringComparison.Ordinal);
+            Assert.Contains("--release-commit \"$RELEASE_COMMIT\"", job, StringComparison.Ordinal);
+        }
+
+        // git_publish keeps the authenticated main checkout and only moves the working tree.
+        var gitPublishJob = Job(workflow, "git_publish");
+        Assert.Contains("ref: main", gitPublishJob, StringComparison.Ordinal);
+        Assert.Contains("persist-credentials: true", gitPublishJob, StringComparison.Ordinal);
+        Assert.Contains("eng/release-bundle.sh restore", gitPublishJob, StringComparison.Ordinal);
+        Assert.Contains("--release-commit \"$RELEASE_COMMIT\"", gitPublishJob, StringComparison.Ordinal);
+
+        // The SBOM generator stays in its own job and hands the document over as a base64 output.
+        var sbomJob = Job(workflow, "sbom");
+        Assert.Contains("sbom_gz_base64:", sbomJob, StringComparison.Ordinal);
+        Assert.Contains("sbom_sha256:", sbomJob, StringComparison.Ordinal);
+        Assert.Contains("eng/release-bundle.sh sbom-encode", sbomJob, StringComparison.Ordinal);
+        Assert.DoesNotContain("--max-bytes", sbomJob, StringComparison.Ordinal);
+        Assert.Contains("upload-artifact: false", sbomJob, StringComparison.Ordinal);
+
+        var supplyChainJob = Job(workflow, "supply_chain");
+        Assert.Contains("eng/release-bundle.sh sbom-restore", supplyChainJob, StringComparison.Ordinal);
+        Assert.Contains("--sha256 \"$SBOM_SHA256\"", supplyChainJob, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// Both payload producers share one encoded-size cap in <c>eng/release-bundle.sh</c>. The cap
+    /// exists because a consumer receives the payload as a single step environment string, and Linux
+    /// rejects any one such string above MAX_ARG_STRLEN = 131072 bytes with E2BIG at step start. A cap
+    /// derived only from the 1 MB job-output limit would let prepare succeed and every consumer fail.
+    /// </summary>
+    [Fact]
+    public void Payload_cap_is_one_shared_constant_below_the_linux_argument_limit()
+    {
+        var script = Read("eng/release-bundle.sh");
+        var linuxArgumentLimit = 131072;
+        var longEnvironmentName = "RELEASE_BUNDLE_SHA256"; // longest payload variable used by the workflows
+
+        Assert.Contains("PAYLOAD_MAX_ENCODED_BYTES=120000", script, StringComparison.Ordinal);
+        var constant = Regex.Match(
+            script,
+            @"(?m)^PAYLOAD_MAX_ENCODED_BYTES=(?<value>\d+)$",
+            RegexOptions.CultureInvariant,
+            TimeSpan.FromSeconds(5));
+        Assert.True(constant.Success, "The shared payload cap constant is missing.");
+        var cap = int.Parse(constant.Groups["value"].Value, System.Globalization.CultureInfo.InvariantCulture);
+
+        // NAME + '=' + value + NUL must stay below the per-string ceiling with real headroom.
+        Assert.True(
+            cap + longEnvironmentName.Length + 2 < linuxArgumentLimit,
+            $"PAYLOAD_MAX_ENCODED_BYTES={cap} plus the '{longEnvironmentName}' name does not fit under {linuxArgumentLimit} bytes.");
+
+        // Neither producer may reintroduce a local number that only respects the 1 MB output cap.
+        Assert.DoesNotContain("700000", script, StringComparison.Ordinal);
+        Assert.DoesNotContain("900000", script, StringComparison.Ordinal);
+
+        // The cap must be a real guard: a payload just above it is refused, not truncated.
+        Assert.Contains("above the $max_bytes-byte payload budget", script, StringComparison.Ordinal);
+        Assert.Contains("131072", script, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Moving the release payload out of artifact storage must not widen any job's token. The
+    /// prepare job still needs read credentials for its origin-race and immutable-tag checks, and the
+    /// SBOM job still only reads the package it scans.
+    /// </summary>
+    [Fact]
+    public void Prepare_and_sbom_jobs_keep_their_read_only_permissions()
+    {
+        var workflow = Read(".github/workflows/release.yml");
+
+        var prepareJob = Job(workflow, "prepare");
+        Assert.Contains("contents: read", prepareJob, StringComparison.Ordinal);
+        Assert.DoesNotContain("contents: write", prepareJob, StringComparison.Ordinal);
+        Assert.DoesNotContain("packages: write", prepareJob, StringComparison.Ordinal);
+        Assert.DoesNotContain("id-token: write", prepareJob, StringComparison.Ordinal);
+        Assert.DoesNotContain("actions: write", prepareJob, StringComparison.Ordinal);
+
+        var sbomJob = Job(workflow, "sbom");
+        Assert.Contains("contents: read", sbomJob, StringComparison.Ordinal);
+        Assert.Contains("packages: read", sbomJob, StringComparison.Ordinal);
+        Assert.DoesNotContain("packages: write", sbomJob, StringComparison.Ordinal);
+        Assert.DoesNotContain("contents: write", sbomJob, StringComparison.Ordinal);
+        Assert.DoesNotContain("id-token: write", sbomJob, StringComparison.Ordinal);
+        Assert.DoesNotContain("actions: write", sbomJob, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A failed run exposes neither artifacts nor job outputs to the resume run, so the visibility
+    /// resume finds the prepare job logs through the Actions API, restores the bundle from the marked
+    /// block, and republishes the same outputs so the downstream jobs restore exactly as they do
+    /// inside a single run.
+    /// </summary>
+    [Fact]
+    public void Resume_extracts_the_release_bundle_from_the_prepare_job_log()
+    {
+        var workflow = Read(".github/workflows/release-resume.yml").Replace("\r\n", "\n");
+
+        var resolveJob = Job(workflow, "resolve");
+        Assert.Contains("actions: read", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("GH_TOKEN: ${{ github.token }}", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("repos/$REPOSITORY/actions/runs/$RUN_ID/jobs", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("endswith(\"METADATA_PREPARED / RELEASE_COMMITTED\")", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("eng/release-bundle.sh extract-best-block", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("--input prepare-log-manifest.tsv", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("eng/release-bundle.sh restore", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("release_bundle:", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("release_bundle_sha256:", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("eng/release-bundle.sh encode", resolveJob, StringComparison.Ordinal);
+        Assert.DoesNotContain("--max-bytes", resolveJob, StringComparison.Ordinal);
+
+        // A re-run attempt can hide the valid block behind a prepare job that failed early, so the
+        // query must include every attempt and the selection must walk candidates newest first.
+        Assert.Contains("filter=all&per_page=100", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("sort -t$'\\t' -k1,1r -k2,2nr", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("while IFS=$'\\t' read -r started_at job_id", resolveJob, StringComparison.Ordinal);
+
+        // The restored base must be live origin/main: that is the precondition --publish-git later
+        // enforces, and comparing HEAD^ with the bundle prerequisite would only repeat the restore.
+        Assert.Contains("git -C source rev-parse --verify --quiet 'origin/main^{commit}'", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("\"$bundle_base\" == \"$origin_main\"", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("\"$base_sha\" == \"$origin_main\"", resolveJob, StringComparison.Ordinal);
+        Assert.DoesNotContain("drifted from the bundle prerequisite", resolveJob, StringComparison.Ordinal);
+
+        var verifyJob = Job(workflow, "verify_candidate");
+        Assert.Contains("eng/release-bundle.sh restore", verifyJob, StringComparison.Ordinal);
+        Assert.Contains("--release-commit \"$RELEASE_COMMIT\"", verifyJob, StringComparison.Ordinal);
+
+        var gitPublishJob = Job(workflow, "git_publish");
+        Assert.Contains("eng/release-bundle.sh restore", gitPublishJob, StringComparison.Ordinal);
+        Assert.Contains("ref: main", gitPublishJob, StringComparison.Ordinal);
+        Assert.Contains("contents: write", gitPublishJob, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A resume takes a run ID from a manual input, so it must refuse any run that is not this
+    /// repository's own stable release entry workflow dispatched from <c>main</c>. Without these
+    /// checks a run from a fork, a feature branch, another workflow, or another trigger could supply
+    /// the prepared commit the resume then verifies and publishes.
+    /// </summary>
+    [Fact]
+    public void Resume_accepts_only_a_dispatched_stable_release_run_from_this_repository()
+    {
+        var workflow = Read(".github/workflows/release-resume.yml").Replace("\r\n", "\n");
+        var resolveJob = Job(workflow, "resolve");
+
+        Assert.Contains("repos/$REPOSITORY/actions/runs/$RUN_ID", resolveJob, StringComparison.Ordinal);
+        Assert.Contains(".github/workflows/release-patch.yml|.github/workflows/release-minor.yml|.github/workflows/release-major.yml", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("[[ \"$run_event\" == 'workflow_dispatch' ]]", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("[[ \"$head_branch\" == 'main' ]]", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("(.head_repository.full_name // \"\")", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("[[ \"$head_repository\" == \"$REPOSITORY\" ]]", resolveJob, StringComparison.Ordinal);
+
+        // Each dimension has its own fail-closed message; a silent fallback would hide the reject.
+        foreach (var message in new[]
+                 {
+                     "was not started by a stable release entry workflow",
+                     "was not dispatched manually",
+                     "was not dispatched from main",
+                     "belongs to repository"
+                 })
+        {
+            Assert.Contains(message, resolveJob, StringComparison.Ordinal);
+        }
+
+        Assert.Contains("exit 1", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("exit 64", resolveJob, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Job logs contain terminal escape sequences in their echoed <c>run:</c> headers, and <c>gh api</c>
+    /// refuses such a log unless the runner's gh supports <c>--allow-escape-sequences</c> — a version
+    /// that is not pinned and whose flag an older preinstalled gh rejects. The resume therefore reads
+    /// the log with curl: curl follows the redirect to the signed blob URL and drops the Authorization
+    /// header on the cross-host hop, which is why <c>--location-trusted</c> must never appear.
+    /// </summary>
+    [Fact]
+    public void Resume_downloads_job_logs_with_curl_and_never_with_gh_api()
+    {
+        var workflow = Read(".github/workflows/release-resume.yml").Replace("\r\n", "\n");
+        var resolveJob = Job(workflow, "resolve");
+
+        Assert.Contains("curl --fail --silent --show-error --location --retry 3", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("-H \"Authorization: Bearer ${GH_TOKEN}\"", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("-H \"Accept: application/vnd.github+json\"", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("-H \"X-GitHub-Api-Version: 2022-11-28\"", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("https://api.github.com/repos/${REPOSITORY}/actions/jobs/${job_id}/logs", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("-o \"$log\"", resolveJob, StringComparison.Ordinal);
+
+        // No job-log download through the gh CLI, in either spelling, and no token forwarding.
+        Assert.DoesNotContain("gh api \"repos/$REPOSITORY/actions/jobs", resolveJob, StringComparison.Ordinal);
+        Assert.DoesNotContain("actions/jobs/$job_id/logs", resolveJob, StringComparison.Ordinal);
+        Assert.DoesNotContain("actions/jobs/$JOB_ID/logs", resolveJob, StringComparison.Ordinal);
+        var executableLocationTrusted = workflow
+            .Split('\n')
+            .Any(line => !line.TrimStart().StartsWith('#')
+                && line.Contains("--location-trusted", StringComparison.Ordinal));
+        Assert.False(executableLocationTrusted, "curl must not forward Authorization across hosts with --location-trusted.");
+
+        // A failed or empty download stays visible and still lets an older attempt win.
+        Assert.Contains("log download failed; treating it as an invalid candidate", resolveJob, StringComparison.Ordinal);
+        Assert.Contains("returned an empty log; treating it as an invalid candidate", resolveJob, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// <c>printf 'name=%s' "$(helper)" &gt;&gt;"$GITHUB_OUTPUT"</c> hides a helper failure: a failing
+    /// command substitution in argument position does not trigger <c>set -e</c>, so the job publishes
+    /// an empty or truncated output and fails much later. Every output write therefore consumes an
+    /// already-captured variable.
+    /// </summary>
+    [Fact]
+    public void Workflow_outputs_never_embed_a_command_substitution()
+    {
+        var writes = 0;
+        foreach (var path in Directory.EnumerateFiles(EngineRepository.Absolute(".github/workflows")).Where(IsWorkflow))
+        {
+            var lines = File.ReadAllLines(path);
+            for (var index = 0; index < lines.Length; index++)
+            {
+                if (!lines[index].Contains("$GITHUB_OUTPUT", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                writes++;
+                Assert.False(
+                    lines[index].Contains("$(", StringComparison.Ordinal),
+                    $"{Path.GetFileName(path)}:{index + 1} writes an output through an inline command substitution, which hides the failure from errexit.");
+            }
+        }
+
+        Assert.True(writes >= 8, $"Expected the release output writes, found {writes}.");
+
+        // Fixture self-test: the detector must report an inline substitution when one is present.
+        const string fixture = "run: |\n  printf 'x=%s\\n' \"$(false)\" >>\"$GITHUB_OUTPUT\"\n";
+        var offending = fixture
+            .Split('\n')
+            .Count(line => line.Contains("$GITHUB_OUTPUT", StringComparison.Ordinal) && line.Contains("$(", StringComparison.Ordinal));
+        Assert.Equal(1, offending);
+    }
+
+    private static bool IsWorkflow(string path) =>
+        path.EndsWith(".yml", StringComparison.OrdinalIgnoreCase)
+        || path.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase);
 
     [Fact]
     public void Prepare_job_can_read_the_private_remote_without_gaining_repository_write()
@@ -475,5 +779,24 @@ public sealed class ReleaseMetadataTests
             TimeSpan.FromSeconds(5));
         Assert.True(match.Success, $"Workflow job '{name}' was not found.");
         return match.Groups["body"].Value;
+    }
+
+    /// <summary>
+    /// Every <c>uses:</c> value in a workflow: action references and reusable-workflow calls, with
+    /// trailing comments removed. Quote and whitespace variants are tolerated so the guard cannot be
+    /// bypassed by re-formatting a step.
+    /// </summary>
+    private static IEnumerable<string> UsesValues(string workflow)
+    {
+        var matches = Regex.Matches(
+            workflow.Replace("\r\n", "\n"),
+            @"(?m)^\s*(?:-\s*)?uses:\s*(?<value>[^\s#]+)",
+            RegexOptions.CultureInvariant,
+            TimeSpan.FromSeconds(5));
+
+        foreach (Match match in matches)
+        {
+            yield return match.Groups["value"].Value.Trim('\'', '"');
+        }
     }
 }
