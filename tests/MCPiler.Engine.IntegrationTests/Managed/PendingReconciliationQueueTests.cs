@@ -368,7 +368,7 @@ public sealed class PendingReconciliationQueueTests
         queue.Acknowledge("/mcp/connector", "profile", "refreshToken", authorityEpoch: 11, runtimeRevision: 1);
         Assert.Equal(0, queue.Count);
     }
-    
+
     [Fact]
     public void An_overflow_trim_raced_by_a_newer_replacement_keeps_the_newer_entry()
     {
