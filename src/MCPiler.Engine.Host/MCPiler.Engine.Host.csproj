@@ -11,7 +11,7 @@
     <OutputType>Exe</OutputType>
     <RootNamespace>MCPiler.Engine.Host</RootNamespace>
     <AssemblyName>mcpiler-engine</AssemblyName>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
 
     <!--
       Never packed. Engine's public contract is this executable's command line and the
