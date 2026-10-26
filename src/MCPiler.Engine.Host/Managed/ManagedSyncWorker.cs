@@ -37,7 +37,7 @@ internal sealed class ManagedSyncWorker : IDisposable
     private readonly ManagedSyncBackoff _backoff;
     private readonly Action<string>? _diagnostics;
     private readonly string _engineVersion;
-    private readonly PendingReconciliationQueue _reconciliations = new();
+    private readonly PendingReconciliationQueue _reconciliations;
 
     /// <summary>
     /// Minted once per process. The Platform stores it with every report so it can order the
@@ -46,11 +46,42 @@ internal sealed class ManagedSyncWorker : IDisposable
     /// </summary>
     private readonly string _instanceId = Guid.NewGuid().ToString("N");
 
+    private bool _journalDegradedReported;
+    private DateTime _lastJournalDegradedReportUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// How often a persistent confirmation-journal degraded state is re-emitted, so a long-lived stalled
+    /// Engine stays observable without flooding the diagnostic stream (R16.5).
+    /// </summary>
+    private static readonly TimeSpan JournalDegradedReemitInterval = TimeSpan.FromMinutes(5);
+
     private long _reportSequence;
     private long? _sessionEpoch;
 
     private string? _activeGenerationId;
     private string? _deliveredGenerationId;
+
+    /// <summary>
+    /// The active generation's mounts, retained so a recovery replay can re-derive an evicted pending
+    /// rotation from its durable record on the regular reconciliation cadence rather than only at a
+    /// generation activation (R8.5). The mounts are immutable manifest data; the generation wrapper is
+    /// never disposed after a successful activation.
+    /// </summary>
+    private IReadOnlyList<MountedManifest>? _activeMounts;
+
+    /// <summary>
+    /// Resume index of the bounded recovery replay, so a replay over more unreconciled identities than
+    /// the queue capacity covers all of them across passes rather than re-overflowing on the same head
+    /// (R9.2).
+    /// </summary>
+    private int _recoveryReplayCursor;
+
+    /// <summary>
+    /// Whether the current recovery replay cycle hit a slot whose durable record could not be read.
+    /// A read failure is remembered for the whole cycle, not just one batch, so a clean final batch
+    /// cannot acknowledge a recovery that skipped an earlier record (R11.1).
+    /// </summary>
+    private bool _recoveryReplayReadFailure;
     private string? _lastCandidateOutcome;
     private string? _lastCandidateCode;
     private string? _lastCandidateMessage;
@@ -78,7 +109,8 @@ internal sealed class ManagedSyncWorker : IDisposable
         string engineVersion,
         Action<string>? diagnostics = null,
         ManagedSyncClient? client = null,
-        ManagedSyncBackoff? backoff = null)
+        ManagedSyncBackoff? backoff = null,
+        int reconciliationQueueCapacity = PendingReconciliationQueue.DefaultMaximumEntries)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(loader);
@@ -92,6 +124,7 @@ internal sealed class ManagedSyncWorker : IDisposable
         _binding = binding;
         _engineVersion = engineVersion;
         _diagnostics = diagnostics;
+        _reconciliations = new PendingReconciliationQueue(reconciliationQueueCapacity, diagnostics);
         _client = client ?? new ManagedSyncClient(options);
 
         // One second doubling to thirty seconds: the first retry is quick enough that a
@@ -135,6 +168,9 @@ internal sealed class ManagedSyncWorker : IDisposable
     /// <summary>The number of rotations still awaiting Platform acknowledgement.</summary>
     public int PendingReconciliations => _reconciliations.Count;
 
+    /// <summary>Test seam: whether a recovery replay is still owed.</summary>
+    internal bool RecoveryRequested => _reconciliations.RecoveryRequested;
+
     /// <summary>
     /// Sends every queued rotation, regenerating each report from the authoritative record.
     /// </summary>
@@ -172,12 +208,15 @@ internal sealed class ManagedSyncWorker : IDisposable
             {
                 // Nothing durable backs the rotation: either the slot is not stored here or the
                 // store is not configured. Reporting a value this process does not hold would be
-                // inventing state, and the record cannot come back, so the entry is dropped.
+                // inventing state, and the record cannot come back, so the entry is dropped. The
+                // acknowledgement names the snapshot's full version, so a newer rotation admitted
+                // during the read is never removed (R7.1).
                 _reconciliations.Acknowledge(
                     pending.Mount,
                     pending.ProfileId,
                     pending.Slot,
-                    long.MaxValue);
+                    pending.AuthorityEpoch,
+                    pending.RuntimeRevision);
                 continue;
             }
 
@@ -194,16 +233,38 @@ internal sealed class ManagedSyncWorker : IDisposable
                         ScopeFingerprint = record.ScopeFingerprint,
                         Value = record.Value,
                     },
+                    _sessionEpoch,
                     cancellationToken)
                 .ConfigureAwait(false);
 
             switch (outcome)
             {
                 case ReconciliationOutcome.Recorded:
+                    // Durably remember what the Platform now holds for this slot, so a recovery report
+                    // after a restart bases on it rather than on the served generation's declared
+                    // revision (R10.6). The confirmation is not best-effort: if the journal cannot be
+                    // written the report stays queued and is retried, because a reconciliation the
+                    // Platform accepted but Engine cannot durably remember would still be stranded by a
+                    // later revision mismatch (R11.2).
+                    if (!_loader.RecordConfirmedRevision(
+                            pending.Mount,
+                            pending.ProfileId,
+                            pending.Slot,
+                            record.AuthorityEpoch,
+                            record.RuntimeRevision))
+                    {
+                        _diagnostics?.Invoke(
+                            $"managed: the Platform recorded the reconciliation for '{pending.ProfileId}' "
+                            + $"slot '{pending.Slot}' but the local confirmation could not be written; it "
+                            + "stays queued and will be retried.");
+                        break;
+                    }
+
                     _reconciliations.Acknowledge(
                         pending.Mount,
                         pending.ProfileId,
                         pending.Slot,
+                        record.AuthorityEpoch,
                         record.RuntimeRevision);
                     break;
 
@@ -218,7 +279,8 @@ internal sealed class ManagedSyncWorker : IDisposable
                         pending.Mount,
                         pending.ProfileId,
                         pending.Slot,
-                        long.MaxValue);
+                        pending.AuthorityEpoch,
+                        pending.RuntimeRevision);
                     break;
 
                 default:
@@ -228,6 +290,10 @@ internal sealed class ManagedSyncWorker : IDisposable
                     break;
             }
         }
+
+        // A reconciliation is a path that can observe the journal: a Record refused because the journal is
+        // integrity-failed must surface the degraded state without waiting for a new activation (R16.5).
+        EvaluateJournalDegraded();
     }
 
     /// <summary>
@@ -354,6 +420,70 @@ internal sealed class ManagedSyncWorker : IDisposable
                     await ReconcilePendingAsync(cancellationToken).ConfigureAwait(false);
                 }
 
+                // An overflow eviction drops a committed, unreconciled rotation from the in-memory
+                // queue. Re-derive it from the durable record on this pass rather than waiting for a
+                // generation activation that may never arrive; the acknowledged-version memory keeps an
+                // already-decided rotation from being resent (R8.5).
+                if (_activeMounts is { } activeMounts && _reconciliations.RecoveryRequested)
+                {
+                    var recoveryVersion = _reconciliations.RecoveryVersion;
+                    try
+                    {
+                        DurableReplayBatch batch = await _loader.ReplayDurableRotationsBatchAsync(
+                            activeMounts,
+                            (mount, profile, slot, epoch, previous, revision, _) =>
+                            {
+                                RotationCommitted(mount, profile, slot, epoch, previous, revision);
+                                return ValueTask.CompletedTask;
+                            },
+                            _recoveryReplayCursor,
+                            _reconciliations.Capacity,
+                            cancellationToken).ConfigureAwait(false);
+
+                        // Advance the resume position. It restarts only once the whole candidate list has
+                        // been traversed (NextCursor is null).
+                        _recoveryReplayCursor = batch.NextCursor ?? 0;
+
+                        // A read failure is a property of the whole replay cycle, not one batch: a slot
+                        // that could not be read in an early batch sits behind the advanced cursor and
+                        // would never be revisited by a later clean batch (R11.1).
+                        if (batch.Incomplete)
+                        {
+                            _recoveryReplayReadFailure = true;
+                        }
+
+                        // Only a fully traversed cycle in which every durable record was readable completes
+                        // recovery. While a resume cursor remains, the bounded batch left unreconciled
+                        // candidates unvisited. At the end of a cycle that skipped any record, start a fresh
+                        // full pass and stay requested, so the skipped slots are actually re-read before
+                        // recovery is acknowledged (R10.1, R10.2, R11.1).
+                        if (batch.NextCursor is null)
+                        {
+                            if (_recoveryReplayReadFailure)
+                            {
+                                _recoveryReplayReadFailure = false;
+                                _diagnostics?.Invoke(
+                                    "managed: recovery replay could not read one or more durable records; "
+                                    + "recovery remains pending and the candidate list will be replayed again.");
+                            }
+                            else
+                            {
+                                _reconciliations.AcknowledgeRecovery(recoveryVersion);
+                            }
+                        }
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        // Leave the request in place so a later pass retries the recovery.
+                        _diagnostics?.Invoke($"managed: recovery replay failed: {exception.Message}");
+                    }
+                }
+
+                // The journal's integrity is observable on any path: re-evaluate it every pass so a failure
+                // first seen by the cyclic recovery replay or a reconciliation is reported without waiting
+                // for a new activation, and a long-lived stalled Engine keeps a bounded re-emit (R16.5).
+                EvaluateJournalDegraded();
+
                 ManagedPollResult result = await _client
                     .PollAsync(BuildRequest(), _sessionEpoch, cancellationToken)
                     .ConfigureAwait(false);
@@ -430,6 +560,47 @@ internal sealed class ManagedSyncWorker : IDisposable
                 await Task.Delay(_backoff.Next(), cancellationToken).ConfigureAwait(false);
             }
         }
+    }
+
+    /// <summary>
+    /// Evaluates and reports the confirmation journal's integrity on any path that can observe it: a
+    /// generation activation, the cyclic recovery replay and a reconciliation write. The state is surfaced
+    /// precisely on the <c>managed:</c> diagnostic stream (this message) and by <c>/health/managed</c>
+    /// returning 503; <c>/health/ready</c> and <c>/health/live</c> are deliberately unaffected (R16.7). An
+    /// integrity-failed journal is operator-visible and stalls managed recovery until an explicit reset; it
+    /// is re-emitted at a bounded interval so a long-lived stalled Engine stays observable, and a return to
+    /// health emits one recovery message. A transient read failure is never reported as degraded, and a
+    /// failure after a clear is reported again (R15.12/R16.5). The journal path and slot values are never
+    /// printed.
+    /// </summary>
+    private void EvaluateJournalDegraded()
+    {
+        if (!_loader.IsConfirmedJournalDegraded())
+        {
+            if (_journalDegradedReported)
+            {
+                _journalDegradedReported = false;
+                _diagnostics?.Invoke(
+                    "managed: the durable confirmation journal reads as valid again; managed reconciliation "
+                    + "can resume.");
+            }
+
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        if (_journalDegradedReported && now - _lastJournalDegradedReportUtc < JournalDegradedReemitInterval)
+        {
+            return;
+        }
+
+        _journalDegradedReported = true;
+        _lastJournalDegradedReportUtc = now;
+        _diagnostics?.Invoke(
+            "managed: the durable confirmation journal failed its integrity check, so no reconciliation can be "
+            + "confirmed from it and managed recovery is stalled. Run the operator action "
+            + "'confirmed-revisions reset' to move the corrupt journal aside (its bytes are never deleted); "
+            + "nothing recovers it automatically.");
     }
 
     /// <summary>
@@ -549,6 +720,13 @@ if (_binding.Listener.Transport is HostTransport.Http
         Task retirement = _generations.Activate(candidate);
 
         _activeGenerationId = delivery.GenerationId;
+        _activeMounts = generation.Mounts;
+
+        // Only now that the candidate is the active generation may the durable confirmation journal be
+        // bounded to its mounts. A candidate that host validation refused above returned before this
+        // point, so it never mutated the running generation's durable state (R12.2).
+        _loader.PruneConfirmedRevisions(generation.Mounts);
+
         _lastCandidateOutcome = ManagedProtocol.Active;
         _lastCandidateCode = null;
         _lastCandidateMessage = null;
@@ -556,10 +734,44 @@ if (_binding.Listener.Transport is HostTransport.Http
         _diagnostics?.Invoke(
             $"managed: activated generation {delivery.GenerationId} at address number {number}.");
 
+        EvaluateJournalDegraded();
+
         // Retirement is observed in the background: a superseded generation finishes its leased
         // requests on its own schedule, and blocking activation on that would stop new admissions
         // for as long as the oldest in-flight call took.
         Observe(retirement);
+
+        // The in-memory reconciliation queue does not survive a restart, so any rotation this
+        // process committed locally and still owes the Platform is re-derived from the durable
+        // encrypted records the active generation declares (MTH-ENG-9). Failure to replay never
+        // fails activation: the records remain durable and a later pass retries.
+        try
+        {
+            DurableReplayBatch replay = await _loader.ReplayDurableRotationsAsync(
+                generation,
+                (mount, profile, slot, epoch, previous, revision, _) =>
+                {
+                    RotationCommitted(mount, profile, slot, epoch, previous, revision);
+                    return ValueTask.CompletedTask;
+                },
+                cancellationToken).ConfigureAwait(false);
+
+            // A pass that could not read a durable record or confirmation has not recovered everything this
+            // process still owes. Keep recovery requested so the cyclic replay retries the unread slot;
+            // activation itself still succeeds, because the records are durable and a later pass reconciles
+            // them (R13.2).
+            if (replay.Incomplete)
+            {
+                _reconciliations.RequestRecovery();
+                _diagnostics?.Invoke(
+                    "managed: initial durable rotation replay could not read one or more records; "
+                    + "recovery remains pending.");
+            }
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            _diagnostics?.Invoke($"managed: durable rotation replay failed: {exception.Message}");
+        }
 
         return true;
     }

@@ -1,0 +1,123 @@
+{
+  "realm": "mcpiler-smoke",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "accessTokenLifespan": 300,
+  "clientScopes": [
+    {
+      "name": "tools.invoke",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    },
+    {
+      "name": "mcp-audience",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "mcp-resource-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "__SMOKE_AUDIENCE__",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "name": "other-audience",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "other-resource-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.custom.audience": "__OTHER_AUDIENCE__",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "mcp-smoke",
+      "name": "MCPiler smoke positive client (also the introspection resource server)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "__SMOKE_CLIENT_SECRET__",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": ["tools.invoke", "mcp-audience"],
+      "optionalClientScopes": []
+    },
+    {
+      "clientId": "mcp-smoke-wrong-audience",
+      "name": "MCPiler smoke negative client with a different audience",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": ["tools.invoke", "other-audience"],
+      "optionalClientScopes": []
+    },
+    {
+      "clientId": "mcp-smoke-wrong-scope",
+      "name": "MCPiler smoke negative client without the surface scope",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "defaultClientScopes": ["mcp-audience"],
+      "optionalClientScopes": []
+    }
+  ],
+  "users": [
+    {
+      "username": "smoke",
+      "enabled": true,
+      "email": "smoke@provider-smoke.test",
+      "firstName": "Smoke",
+      "lastName": "Tester",
+      "emailVerified": true,
+      "requiredActions": [],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "__SMOKE_PASSWORD__",
+          "temporary": false
+        }
+      ]
+    }
+  ]
+}

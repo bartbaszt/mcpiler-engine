@@ -234,6 +234,7 @@ internal sealed class ManagedSyncClient : IDisposable
     /// <param name="cancellationToken">Cancellation.</param>
     public async Task<ReconciliationOutcome> ReconcileAsync(
         RuntimeSecretReconciliationMessage report,
+        long? sessionEpoch,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(report);
@@ -280,6 +281,15 @@ internal sealed class ManagedSyncClient : IDisposable
         };
 
         message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", secret);
+
+        if (sessionEpoch is { } epoch)
+        {
+            // The Platform validates the durable session epoch before any secret mutation, so the
+            // same fence the poll carries must accompany the reconciliation.
+            message.Headers.TryAddWithoutValidation(
+                ManagedProtocol.SessionEpochHeader,
+                epoch.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
 
         using HttpResponseMessage response = await SendAsync(message, cancellationToken).ConfigureAwait(false);
 

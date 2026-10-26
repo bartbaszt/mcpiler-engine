@@ -52,10 +52,10 @@ internal static class AuthorizationEndpointCheck
             return ValidateExplicit(options, explicitEndpoint, HostConfiguration.IntrospectionEndpointKey, "introspection");
         }
 
-        IssuerMetadataDiscovery metadata = await DiscoverAsync(options.Issuer, proxy, cancellationToken).ConfigureAwait(false);
+        IssuerMetadataDiscovery metadata = await DiscoverAsync(options, proxy, cancellationToken).ConfigureAwait(false);
         if (metadata.InvalidReason is { } invalid)
         {
-            return InvalidMetadataRefusal(options, invalid);
+            return InvalidMetadataRefusal(options, metadata, invalid);
         }
 
         if (DiscoveryStatusRefusal(metadata, options) is { } statusRefusal)
@@ -78,10 +78,10 @@ internal static class AuthorizationEndpointCheck
             return ValidateExplicit(options, explicitUri, HostConfiguration.JwksUriKey, "JWKS");
         }
 
-        IssuerMetadataDiscovery metadata = await DiscoverAsync(options.Issuer, proxy, cancellationToken).ConfigureAwait(false);
+        IssuerMetadataDiscovery metadata = await DiscoverAsync(options, proxy, cancellationToken).ConfigureAwait(false);
         if (metadata.InvalidReason is { } invalid)
         {
-            return InvalidMetadataRefusal(options, invalid);
+            return InvalidMetadataRefusal(options, metadata, invalid);
         }
 
         if (DiscoveryStatusRefusal(metadata, options) is { } statusRefusal)
@@ -116,10 +116,17 @@ internal static class AuthorizationEndpointCheck
         string setting,
         string kind)
     {
-        if (metadata.ValueKind is not JsonValueKind.Object
-            || !metadata.TryGetProperty(member, out JsonElement value)
-            || value.ValueKind is not JsonValueKind.String
-            || value.GetString() is not { Length: > 0 } address
+        if (metadata.ValueKind is not JsonValueKind.Object)
+        {
+            return MissingRefusal(options, setting, kind);
+        }
+
+        if (IssuerMetadata.TryReadUniqueMember(metadata, member, out _, out bool duplicated) && duplicated)
+        {
+            return AmbiguousRefusal(options, setting, kind);
+        }
+
+        if (!IssuerMetadata.TryReadEndpoint(metadata, member, out string address)
             || !Uri.TryCreate(address, UriKind.Absolute, out Uri? endpoint)
             || (!string.Equals(endpoint.Scheme, Uri.UriSchemeHttp, StringComparison.Ordinal)
                 && !string.Equals(endpoint.Scheme, Uri.UriSchemeHttps, StringComparison.Ordinal)))
@@ -133,22 +140,19 @@ internal static class AuthorizationEndpointCheck
     }
 
     private static async Task<IssuerMetadataDiscovery> DiscoverAsync(
-        string issuer,
+        HostAuthorizationOptions options,
         IWebProxy? proxy,
         CancellationToken cancellationToken)
     {
         using HttpClient client = AuthorizationHttpClientFactory.Create(DiscoveryTimeout, proxy);
 
-        try
-        {
-            return await IssuerMetadata.DiscoverAsync(client, issuer, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception failure) when (failure is HttpRequestException or TaskCanceledException or UriFormatException)
-        {
-            // An unavailable issuer is an outage. Runtime validation remains fail-closed, but
-            // startup must not claim a valid issuer publishes no endpoint without a document.
-            return new IssuerMetadataDiscovery(null, null);
-        }
+        // The one shared resolver: startup, JWKS and introspection all read the same route policy,
+        // so no half of the process can fall back when the other half would not.
+        return await IssuerMetadata.ResolveAsync(
+            client,
+            options.Issuer,
+            options.OidcDiscoveryFallbackEnabled,
+            cancellationToken).ConfigureAwait(false);
     }
 
     private static StartupRefusal? DiscoveryStatusRefusal(
@@ -168,10 +172,14 @@ internal static class AuthorizationEndpointCheck
             return null;
         }
 
+        string attempt = metadata.Route is IssuerMetadataRoute.OidcFallback
+            ? "RFC 8414 discovery was definitively absent and the enabled OIDC discovery fallback returned"
+            : "RFC 8414 discovery returned";
+
         return new StartupRefusal(
             string.Empty,
             "auth/issuer-discovery-unusable",
-            $"'{HostConfiguration.IssuerKey}' is '{options.Issuer}', but RFC 8414 discovery returned HTTP {code} ({status}). "
+            $"'{HostConfiguration.IssuerKey}' is '{options.Issuer}', but {attempt} HTTP {code} ({status}). "
             + "The configured issuer endpoint is definitively unusable by this Engine configuration.")
         {
             Setting = HostConfiguration.IssuerKey,
@@ -180,14 +188,21 @@ internal static class AuthorizationEndpointCheck
 
     private static StartupRefusal InvalidMetadataRefusal(
         HostAuthorizationOptions options,
+        IssuerMetadataDiscovery metadata,
         string reason)
-        => new(
+    {
+        string attempt = metadata.Route is IssuerMetadataRoute.OidcFallback
+            ? "RFC 8414 discovery was definitively absent and the enabled OIDC discovery fallback returned metadata that cannot be trusted. "
+            : "RFC 8414 discovery returned metadata that cannot be trusted. ";
+
+        return new(
             string.Empty,
             "auth/issuer-metadata-invalid",
-            $"'{HostConfiguration.IssuerKey}' is '{options.Issuer}', but RFC 8414 discovery returned metadata that cannot be trusted. {reason}")
+            $"'{HostConfiguration.IssuerKey}' is '{options.Issuer}', but {attempt}{reason}")
         {
             Setting = HostConfiguration.IssuerKey,
         };
+    }
 
     private static StartupRefusal MissingRefusal(
         HostAuthorizationOptions options,
@@ -201,6 +216,22 @@ internal static class AuthorizationEndpointCheck
             + $"usable '{(kind is "JWKS" ? "jwks_uri" : "introspection_endpoint")}'. Configure "
             + $"'{setting}' explicitly, or point '{HostConfiguration.IssuerKey}' at an authorization server "
             + "that publishes the endpoint.")
+        {
+            Setting = setting,
+        };
+
+    private static StartupRefusal AmbiguousRefusal(
+        HostAuthorizationOptions options,
+        string setting,
+        string kind)
+        => new(
+            string.Empty,
+            $"auth/{(kind is "JWKS" ? "jwks-uri" : "introspection-endpoint")}-ambiguous",
+            $"'{HostConfiguration.TokenValidationKey}' is configured for {kind} validation and "
+            + $"'{HostConfiguration.IssuerKey}' is '{options.Issuer}', but the discovered metadata declares "
+            + $"'{(kind is "JWKS" ? "jwks_uri" : "introspection_endpoint")}' more than once. A duplicated "
+            + "endpoint member is ambiguous and is not trusted; publish exactly one, or configure "
+            + $"'{setting}' explicitly.")
         {
             Setting = setting,
         };

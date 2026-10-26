@@ -42,6 +42,9 @@ Read:
 3. [Client compatibility](clients.md)
 4. [Hosting](hosting.md)
 5. [Troubleshooting](troubleshooting.md)
+6. [Keycloak setup](authorization/keycloak.md) or [authentik setup](authorization/authentik.md) when Engine
+   validates caller tokens against an external issuer (documented guidance; provider compatibility stays
+   unverified until the smoke harness passes against a real provider)
 
 The usual deployment keeps the application's REST endpoint private and exposes/tunnels only the
 Engine MCP endpoint.
@@ -125,6 +128,8 @@ public-repository boundaries.
 | [authoring.md](authoring.md) | hand-authoring workflow |
 | [manifest.md](manifest.md) | normative persisted-contract/reference documentation |
 | [hosting.md](hosting.md) | operator and deployment reference |
+| [authorization/keycloak.md](authorization/keycloak.md) | documented Keycloak issuer/client/audience setup; compatibility unverified until the smoke harness passes |
+| [authorization/authentik.md](authorization/authentik.md) | documented authentik issuer/client/audience setup and its explicit audience limitations; compatibility unverified |
 | [troubleshooting.md](troubleshooting.md) | symptom-driven operator guide |
 | [compatibility.md](compatibility.md) | release/root/section/sub-format compatibility |
 | [architecture.md](architecture.md) | runtime architecture and trust boundaries |

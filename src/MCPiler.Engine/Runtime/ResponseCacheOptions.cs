@@ -31,6 +31,9 @@ public sealed record ResponseCacheOptions
     /// <summary>The maximum registered producer flights per mount.</summary>
     public const int HardMaxFlightsPerMount = 256;
 
+    /// <summary>The maximum admitted waiters across one mount's producer flights.</summary>
+    public const int HardMaxWaitersPerMount = 1024;
+
     /// <summary>Hard ceilings used when host configuration supplies no narrowing.</summary>
     public static ResponseCacheOptions Default { get; } = new();
 
@@ -45,6 +48,12 @@ public sealed record ResponseCacheOptions
 
     /// <summary>The largest effective TTL in seconds. Zero disables response caching.</summary>
     public int MaxTtlSeconds { get; init; } = HardMaxTtlSeconds;
+
+    /// <summary>The largest number of independent producer flights one mount may register.</summary>
+    public int MaxFlightsPerMount { get; init; } = HardMaxFlightsPerMount;
+
+    /// <summary>The largest number of admitted waiters across one mount's producer flights.</summary>
+    public int MaxWaitersPerMount { get; init; } = HardMaxWaitersPerMount;
 
     /// <summary>Whether one or more effective capacity/TTL ceilings disables caching.</summary>
     public bool IsDisabled => MaxBodyBytes <= 0
@@ -67,5 +76,7 @@ public sealed record ResponseCacheOptions
             MaxRetainedBytesPerMount = Math.Clamp(MaxRetainedBytesPerMount, 0, HardMaxRetainedBytesPerMount),
             MaxEntriesPerMount = Math.Clamp(MaxEntriesPerMount, 0, HardMaxEntriesPerMount),
             MaxTtlSeconds = Math.Clamp(MaxTtlSeconds, 0, HardMaxTtlSeconds),
+            MaxFlightsPerMount = Math.Clamp(MaxFlightsPerMount, 0, HardMaxFlightsPerMount),
+            MaxWaitersPerMount = Math.Clamp(MaxWaitersPerMount, 0, HardMaxWaitersPerMount),
         };
 }

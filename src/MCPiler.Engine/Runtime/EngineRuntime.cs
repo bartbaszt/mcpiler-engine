@@ -29,6 +29,27 @@ namespace MCPiler.Engine.Runtime;
 /// </remarks>
 public static class EngineRuntime
 {
+    /// <summary>Claims the durable runtime-state root for the lifetime of a serving process.</summary>
+    /// <remarks>Unconfigured/in-memory state needs no cross-process owner.</remarks>
+    public static bool TryAcquireRuntimeStateOwner(
+        string? root, out IDisposable? owner, out string? refusal)
+    {
+        owner = null;
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            refusal = null;
+            return true;
+        }
+
+        if (!RuntimeStateOwnerLease.TryAcquire(root, out RuntimeStateOwnerLease? lease, out refusal))
+        {
+            return false;
+        }
+
+        owner = lease;
+        return true;
+    }
+
     /// <summary>The Manifest format range this build serves.</summary>
     /// <remarks>
     /// Exposed here so a host can state its own identity without naming a manifest type. It

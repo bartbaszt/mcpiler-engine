@@ -79,8 +79,10 @@ public sealed class OAuthTokenEndpointClient(IUpstreamTransport transport, TimeP
                 break;
 
             case "client_secret_basic":
+                // RFC 6749 section 2.3.1 / Appendix B: each component is form-urlencoded before
+                // joining with ":" and Base64 encoding, so a space is "+" and a literal "+" is "%2B".
                 var basic = Convert.ToBase64String(Encoding.UTF8.GetBytes(
-                    $"{configuration.ClientId}:{RequireClientSecret(clientSecret, "token")}"));
+                    $"{FormEncode(configuration.ClientId)}:{FormEncode(RequireClientSecret(clientSecret, "token"))}"));
                 headers["Authorization"] = ["Basic " + basic];
                 sensitive.Add("Authorization");
                 break;
@@ -203,7 +205,7 @@ public sealed class OAuthTokenEndpointClient(IUpstreamTransport transport, TimeP
 
             case "client_secret_basic":
                 var basic = Convert.ToBase64String(Encoding.UTF8.GetBytes(
-                    $"{configuration.ClientId}:{RequireClientSecret(clientSecret, "revocation")}"));
+                    $"{FormEncode(configuration.ClientId)}:{FormEncode(RequireClientSecret(clientSecret, "revocation"))}"));
                 headers["Authorization"] = ["Basic " + basic];
                 sensitive.Add("Authorization");
                 break;
@@ -278,6 +280,22 @@ public sealed class OAuthTokenEndpointClient(IUpstreamTransport transport, TimeP
     private static string SerializeForm(IReadOnlyDictionary<string, string> values)
         => string.Join('&', values.Select(static pair =>
             $"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(pair.Value)}"));
+
+    /// <summary>
+    /// RFC 6749 Appendix B form-urlencoding for a single HTTP Basic credential component: a space is
+    /// <c>+</c>, and <c>+</c>, <c>*</c> and <c>%</c> are percent-encoded. Mirrors the form-body
+    /// encoding the same client applies to <c>client_secret_post</c> values.
+    /// </summary>
+    /// <remarks>
+    /// The whole string is percent-encoded in one call so UTF-16 surrogate pairs are handled as
+    /// characters, not code units: iterating <c>char</c>-by-<c>char</c> would split a non-BMP
+    /// character (for example an emoji) into two lone surrogates and encode each as the replacement
+    /// character, corrupting the credential. <see cref="Uri.EscapeDataString(string)"/> already
+    /// emits <c>%20</c> for a space, <c>%2B</c> for <c>+</c>, <c>%2A</c> for <c>*</c> and
+    /// <c>%25</c> for <c>%</c>; only the space-to-<c>+</c> form rule needs an extra replacement.
+    /// </remarks>
+    private static string FormEncode(string value)
+        => Uri.EscapeDataString(value).Replace("%20", "+", StringComparison.Ordinal);
 
     private static async Task<byte[]> ReadBoundedAsync(UpstreamResponse response, CancellationToken cancellationToken)
     {

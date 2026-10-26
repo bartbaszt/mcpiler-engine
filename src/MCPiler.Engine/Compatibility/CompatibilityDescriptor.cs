@@ -14,6 +14,21 @@ public static class CompatibilitySchema
     public const string ManagedGeneration = "managed-generation";
     public const string ResponseCacheOperator = "response-cache-operator";
     public const string ResponseCacheOperatorGeneration = "1";
+
+    /// <summary>
+    /// The contract identifier of the standalone-authorization operator channel.
+    /// </summary>
+    /// <remarks>
+    /// A distinct identifier from <see cref="ResponseCacheOperator"/> because it is a distinct
+    /// channel with a distinct credential, a distinct route prefix and different powers: clearing a
+    /// local authorization is not clearing a warm response cache. One identifier for both would let a
+    /// client that negotiated one be answered by the other.
+    /// </remarks>
+    public const string OAuthOperator = "oauth-operator";
+
+    /// <summary>The generation of the standalone-authorization operator channel this build serves.</summary>
+    public const string OAuthOperatorGeneration = "1";
+
     public const string ContractGenerationHeader = "X-MCPiler-Contract-Generation";
 
     public static readonly JsonSerializerOptions JsonOptions = new()
@@ -147,6 +162,7 @@ public sealed record CompatibilityDescriptor(
         {
             [CompatibilitySchema.ManagedGeneration] = new("2", "2"),
             [CompatibilitySchema.ResponseCacheOperator] = new("1", "1"),
+            [CompatibilitySchema.OAuthOperator] = new("1", "1"),
         });
 
     public CompatibilityDescriptor Canonicalize() => new(

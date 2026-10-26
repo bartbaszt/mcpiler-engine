@@ -94,7 +94,8 @@ public static class EngineWebHost
             execution,
             drain,
             generations,
-            managed: false);
+            managed: false,
+            started: started);
     }
 
     /// <summary>Builds a listener whose served mounts an activation may replace.</summary>
@@ -106,7 +107,8 @@ public static class EngineWebHost
     internal static WebApplication BuildManaged(
         HostBinding binding,
         DrainCoordinator drain,
-        EngineGenerationManager generations)
+        EngineGenerationManager generations,
+        Func<bool>? managedJournalDegraded = null)
     {
         ArgumentNullException.ThrowIfNull(binding);
         ArgumentNullException.ThrowIfNull(drain);
@@ -132,7 +134,8 @@ public static class EngineWebHost
             active.Execution,
             drain,
             generations,
-            managed: true);
+            managed: true,
+            managedJournalDegraded: managedJournalDegraded);
     }
 
     private static WebApplication BuildCore(
@@ -140,7 +143,9 @@ public static class EngineWebHost
         EngineExecution execution,
         DrainCoordinator drain,
         EngineGenerationManager generations,
-        bool managed)
+        bool managed,
+        RuntimeStartResult? started = null,
+        Func<bool>? managedJournalDegraded = null)
     {
         if (generations.Current is not { } activeGeneration)
         {
@@ -226,6 +231,15 @@ if (binding.Listener.Transport is HostTransport.Http
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddSingleton<EngineRequestGenerationAdmissionAccessor>();
 
+        if (started is not null)
+        {
+            // The file-mode operator channel reports standalone authorization state through the same
+            // started runtime the process serves, so it is told which one that is rather than
+            // re-deriving it. A managed listener has no such object: its mounts arrive with a
+            // generation, and its channel is read-only by construction.
+            builder.Services.AddSingleton(started);
+        }
+
         McpRegistration.AddEngineMcp(builder.Services);
 
         if (MountAuthorizationSetup.IsConfigured(binding.Authorization))
@@ -234,7 +248,13 @@ if (binding.Listener.Transport is HostTransport.Http
             // type activation would let a later resolution produce a second key under which the
             // same callers would derive different partitions.
             builder.Services.AddSingleton(new CallerPartitionKey());
-            builder.Services.AddSingleton(MountAuthorizationSetup.Validator(binding.Authorization!));
+
+            // One bounded observation buffer per process: the trust validator records what it saw
+            // and the authenticated status route reads it back. Registered only alongside the
+            // validator, so a process with no configured issuer has no trust outcomes to report.
+            IssuerAvailabilityObservations availability = new();
+            builder.Services.AddSingleton(availability);
+            builder.Services.AddSingleton(MountAuthorizationSetup.Validator(binding.Authorization!, availability));
 
             builder.Services
                 .AddAuthentication(MountAuthorizationSetup.BearerScheme)
@@ -341,12 +361,17 @@ if (binding.Listener.Transport is HostTransport.Http
             McpRegistration.MapMounts(app, generations.Current!.Mounts);
         }
 
-        HealthEndpoints.Map(app, binding.Runtime.FileStoreRoot, drain);
+        HealthEndpoints.Map(app, binding.Runtime.FileStoreRoot, drain, managedJournalDegraded);
 
-        // The operator channel is mapped last and only when a dedicated secret was configured.
-        // Its routes are not MCP addresses, so neither the origin check nor generation admission
-        // above applies to them; the endpoints authenticate and lease a generation themselves.
+        // The operator channels are mapped last and only when their dedicated secret was configured.
+        // Their routes are not MCP addresses, so neither the origin check nor generation admission
+        // above applies to them; each endpoints file authenticates and leases a generation itself.
         ResponseCacheOperatorEndpoints.Map(app, binding);
+
+        // The authorization channel is a different channel with a different credential: a managed
+        // process maps only its read-only routes, so a local mutation cannot be advertised where the
+        // Platform owns the authority.
+        OAuthOperatorEndpoints.Map(app, binding, managed);
 
         return app;
     }

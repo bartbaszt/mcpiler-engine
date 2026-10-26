@@ -237,6 +237,42 @@ public sealed class HostConfigurationTests
     }
 
     [Fact]
+    public void The_loopback_authorization_allowance_is_off_unless_the_operator_states_it()
+    {
+        Dictionary<string, string> absent = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+        };
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. absent], out HostBinding? byDefault, out _));
+        Assert.False(byDefault!.AllowLoopbackAuthorization);
+
+        Dictionary<string, string> stated = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.AllowLoopbackAuthorizationKey] = "true",
+        };
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. stated], out HostBinding? allowed, out _));
+        Assert.True(allowed!.AllowLoopbackAuthorization);
+    }
+
+    [Fact]
+    public void An_unreadable_loopback_authorization_allowance_is_refused_rather_than_assumed()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.AllowLoopbackAuthorizationKey] = "maybe",
+        };
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
+        Assert.Contains(
+            refusals,
+            refusal => refusal.Contains(HostConfiguration.AllowLoopbackAuthorizationKey, StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void File_mode_binds_repeatable_external_resources_by_exact_surface_route()
     {
         List<KeyValuePair<string, string>> settings =
@@ -874,6 +910,99 @@ public sealed class HostConfigurationTests
         Assert.Contains(HostConfiguration.JwksModeName, refusal, StringComparison.Ordinal);
     }
 
+    /// <summary>The restricted OIDC discovery fallback is opt-in and absent by default.</summary>
+    [Fact]
+    public void The_oidc_discovery_fallback_defaults_to_disabled()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.IssuerKey] = "https://issuer.example.test",
+            [HostConfiguration.TokenValidationKey] = HostConfiguration.JwksModeName,
+        };
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. settings], out HostBinding? binding, out _));
+        Assert.False(binding!.Authorization!.OidcDiscoveryFallbackEnabled);
+    }
+
+    [Theory]
+    [InlineData(HostConfiguration.JwksModeName)]
+    [InlineData(HostConfiguration.IntrospectionModeName)]
+    public void The_oidc_discovery_fallback_binds_with_either_validation_mode(string validation)
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.IssuerKey] = "https://issuer.example.test",
+            [HostConfiguration.TokenValidationKey] = validation,
+            [HostConfiguration.OidcDiscoveryFallbackKey] = "true",
+        };
+
+        Assert.True(HostConfiguration.TryBind(Mounts(), [.. settings], out HostBinding? binding, out IReadOnlyList<string> refusals));
+        Assert.Empty(refusals);
+        Assert.True(binding!.Authorization!.OidcDiscoveryFallbackEnabled);
+    }
+
+    [Theory]
+    [InlineData("yes")]
+    [InlineData("1")]
+    public void The_oidc_discovery_fallback_refuses_a_non_boolean_value(string value)
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.IssuerKey] = "https://issuer.example.test",
+            [HostConfiguration.TokenValidationKey] = HostConfiguration.JwksModeName,
+            [HostConfiguration.OidcDiscoveryFallbackKey] = value,
+        };
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
+        string refusal = Assert.Single(refusals);
+        Assert.Contains(HostConfiguration.OidcDiscoveryFallbackKey, refusal, StringComparison.Ordinal);
+        Assert.Contains("not true or false", refusal, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void The_oidc_discovery_fallback_without_an_issuer_is_refused()
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.OidcDiscoveryFallbackKey] = "true",
+        };
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
+        string refusal = Assert.Single(refusals);
+        Assert.Contains(HostConfiguration.OidcDiscoveryFallbackKey, refusal, StringComparison.Ordinal);
+        Assert.Contains(HostConfiguration.IssuerKey, refusal, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// An explicit endpoint override replaces discovery, so an enabled fallback would be dead
+    /// configuration; it is refused instead of silently ignored.
+    /// </summary>
+    [Theory]
+    [InlineData(HostConfiguration.JwksModeName, HostConfiguration.JwksUriKey, "https://issuer.example.test/jwks")]
+    [InlineData(HostConfiguration.IntrospectionModeName, HostConfiguration.IntrospectionEndpointKey, "https://issuer.example.test/introspect")]
+    public void The_oidc_discovery_fallback_with_an_explicit_endpoint_override_is_refused(
+        string validation,
+        string key,
+        string address)
+    {
+        Dictionary<string, string> settings = new(StringComparer.Ordinal)
+        {
+            [HostConfiguration.FileStoreRootKey] = "/var/lib/mcpiler",
+            [HostConfiguration.IssuerKey] = "https://issuer.example.test",
+            [HostConfiguration.TokenValidationKey] = validation,
+            [key] = address,
+            [HostConfiguration.OidcDiscoveryFallbackKey] = "true",
+        };
+
+        Assert.False(HostConfiguration.TryBind(Mounts(), [.. settings], out _, out IReadOnlyList<string> refusals));
+        string refusal = Assert.Single(refusals);
+        Assert.Contains(HostConfiguration.OidcDiscoveryFallbackKey, refusal, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(HostConfiguration.IssuerKey, "http://issuer.example.test", HostConfiguration.IntrospectionModeName)]
     [InlineData(HostConfiguration.IntrospectionEndpointKey, "http://issuer.example.test/introspect", HostConfiguration.IntrospectionModeName)]
@@ -928,6 +1057,10 @@ public sealed class HostConfigurationTests
     }
 
     [Fact]
+    public void The_oidc_discovery_fallback_is_an_accepted_key()
+        => Assert.Contains(HostConfiguration.OidcDiscoveryFallbackKey, HostConfiguration.AcceptedKeys);
+
+    [Fact]
     public void Response_cache_host_settings_narrow_each_hard_ceiling()
     {
         Dictionary<string, string> settings = new(StringComparer.Ordinal)
@@ -937,6 +1070,8 @@ public sealed class HostConfigurationTests
             [HostConfiguration.ResponseCacheMaxRetainedBytesKey] = "33554432",
             [HostConfiguration.ResponseCacheMaxEntriesKey] = "128",
             [HostConfiguration.ResponseCacheMaxTtlSecondsKey] = "3600",
+            [HostConfiguration.ResponseCacheMaxFlightsKey] = "64",
+            [HostConfiguration.ResponseCacheMaxWaitersKey] = "128",
         };
 
         Assert.True(HostConfiguration.TryBind(Mounts(), [.. settings], out HostBinding? binding, out IReadOnlyList<string> refusals));
@@ -945,6 +1080,8 @@ public sealed class HostConfigurationTests
         Assert.Equal(33_554_432, binding.Runtime.ResponseCache.MaxRetainedBytesPerMount);
         Assert.Equal(128, binding.Runtime.ResponseCache.MaxEntriesPerMount);
         Assert.Equal(3600, binding.Runtime.ResponseCache.MaxTtlSeconds);
+        Assert.Equal(64, binding.Runtime.ResponseCache.MaxFlightsPerMount);
+        Assert.Equal(128, binding.Runtime.ResponseCache.MaxWaitersPerMount);
     }
 
     [Fact]
@@ -965,6 +1102,8 @@ public sealed class HostConfigurationTests
     [InlineData(HostConfiguration.ResponseCacheMaxRetainedBytesKey, "268435457", "268435456")]
     [InlineData(HostConfiguration.ResponseCacheMaxEntriesKey, "4097", "4096")]
     [InlineData(HostConfiguration.ResponseCacheMaxTtlSecondsKey, "86401", "86400")]
+    [InlineData(HostConfiguration.ResponseCacheMaxFlightsKey, "257", "256")]
+    [InlineData(HostConfiguration.ResponseCacheMaxWaitersKey, "1025", "1024")]
     public void A_response_cache_widening_is_refused_with_the_hard_ceiling_named(
         string key,
         string attempted,

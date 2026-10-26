@@ -240,6 +240,43 @@ public sealed class OutboundConnectionPolicy
     /// <summary>The shipped judgement: the published reservation table.</summary>
     public static OutboundAddressGuard DefaultGuard { get; } = OutboundAddressPolicy.IsDenied;
 
+    /// <summary>
+    /// The shipped table widened for loopback alone, for an operator bootstrap that must reach an
+    /// authorization server on the operator's own machine.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A named judgement rather than a caller-supplied delegate, so what it widens is readable
+    /// beside the table it widens and the whole difference is one line: loopback is permitted,
+    /// every other answer is judged by the table.
+    /// </para>
+    /// <para>
+    /// It is deliberately narrower than the framework's own loopback test, which also answers
+    /// true for the unspecified addresses <c>::</c> and <c>0.0.0.0</c>. Those are denied ranges
+    /// here, and a connection to an unspecified address means whatever the local stack decides
+    /// it means, so they stay refused with this judgement too. Exactly the loopback range
+    /// <c>127.0.0.0/8</c>, the address <c>::1</c>, and their IPv4-mapped spellings are permitted.
+    /// </para>
+    /// <para>
+    /// Tool execution never takes this judgement: it takes <see cref="DefaultGuard"/>, so no
+    /// upstream can use an operator's bootstrap allowance to reach a service on the host.
+    /// </para>
+    /// </remarks>
+    internal static OutboundAddressGuard LoopbackAllowedGuard { get; } =
+        static address => !IsLoopbackAddress(address) && DefaultGuard(address);
+
+    private static bool IsLoopbackAddress(IPAddress address)
+    {
+        if (address.IsIPv4MappedToIPv6)
+        {
+            address = address.MapToIPv4();
+        }
+
+        return address.AddressFamily == AddressFamily.InterNetwork
+            ? address.GetAddressBytes()[0] == 127
+            : address.Equals(IPAddress.IPv6Loopback);
+    }
+
     private readonly OutboundAddressGuard _isDenied;
 
     /// <summary>Creates a policy using the shipped address table.</summary>

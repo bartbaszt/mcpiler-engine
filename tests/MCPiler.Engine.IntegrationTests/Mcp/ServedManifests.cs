@@ -173,6 +173,72 @@ internal static class ServedManifests
             """;
     }
 
+    /// <summary>
+    /// A single protected surface whose authentication declares one durable mutable slot
+    /// (refresh token) at authority epoch 1. The managed restart tests use it to prove a rotation
+    /// committed before a restart is re-derived from the durable record.
+    /// </summary>
+    public static string RotatableRefreshSurface(Uri upstream)
+    {
+        ArgumentNullException.ThrowIfNull(upstream);
+
+        string origin = upstream.Scheme + "://" + upstream.Host + ":" + upstream.Port;
+
+        return $$"""
+            {
+              "manifestFormatVersion": "0.3",
+              "sections": {
+                "server": { "inline": {
+                  "name": "Rotating API",
+                  "authenticationRequired": false,
+                  "surfaces": [
+                    { "slug": "full", "isDefault": true,
+                      "operations": [ { "operation": "list-pets" } ] }
+                  ]
+                } },
+                "policy": { "inline": {
+                  "baseUrl": "{{upstream.AbsoluteUri}}",
+                  "allowedOrigins": ["{{origin}}"]
+                } },
+                "operations": { "inline": { "operations": [
+                  { "key": "GET /pets", "method": "GET", "path": "/pets" }
+                ] } },
+                "agentSurface": { "inline": { "operations": [
+                  { "slug": "list-pets", "name": "List pets",
+                    "binding": { "type": "http", "operation": "GET /pets",
+                      "authenticationRef": "oauth2-authorization-code-pkce-refresh" } }
+                ] } },
+                "credentials": { "inline": { "formatVersion": 4, "credentials": [
+                  { "id": "oauth2-authorization-client", "scheme": "oauth2-authorization-code",
+                    "slot": "clientSecret", "value": { "fromEnv": "MANAGED_CLIENT_SECRET" } },
+                  { "id": "oauth2-authorization-refresh", "scheme": "oauth2-authorization-code",
+                    "slot": "refreshToken", "value": { "fromEnv": "MANAGED_REFRESH_TOKEN" } }
+                ] } },
+                "authentication": { "inline": { "formatVersion": 2, "profiles": [
+                  {
+                    "id": "oauth2-authorization-code-pkce-refresh",
+                    "kind": "oauth2-authorization-code-pkce-refresh",
+                    "configuration": {
+                      "strategyId": "oauth2-authorization-code-pkce-refresh",
+                      "inputs": { "clientId": "example-client" },
+                      "clientId": "example-client",
+                      "tokenEndpoint": "{{upstream.AbsoluteUri}}token",
+                      "authorizationEndpoint": "{{upstream.AbsoluteUri}}authorize",
+                      "scopes": ["pets.read"]
+                    },
+                    "authenticationOrigins": ["{{origin}}"],
+                    "destinationOrigins": ["{{origin}}"],
+                    "credentialRef": ["oauth2-authorization-client", "oauth2-authorization-refresh"],
+                    "slots": [
+                      { "slot": "refreshToken", "authorityEpoch": 1, "runtimeRevision": 0 }
+                    ]
+                  }
+                ] } }
+              }
+            }
+            """;
+    }
+
     /// <summary>Three surfaces over one operation set, the middle one default.</summary>
     public const string ThreeSurfaces = """
         {

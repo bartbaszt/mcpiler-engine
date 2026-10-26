@@ -48,6 +48,7 @@ internal sealed class ResponseCache : IDisposable
     private readonly string _mountPrefix;
     private readonly string? _generationLabel;
     private readonly string _activation;
+    private readonly IReadOnlySet<string> _operations;
     private long _mountEpoch;
     private long _accountedBytes;
     private bool _disposed;
@@ -57,7 +58,8 @@ internal sealed class ResponseCache : IDisposable
         string? generationLabel,
         ResponseCacheOptions options,
         byte[] identityKey,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        IReadOnlySet<string>? operations = null)
     {
         ArgumentException.ThrowIfNullOrEmpty(mountPrefix);
         ArgumentNullException.ThrowIfNull(options);
@@ -68,10 +70,17 @@ internal sealed class ResponseCache : IDisposable
         _identityKey = [.. identityKey];
         _clock = clock ?? TimeProvider.System;
         _options = options.ClampToHardMaxima();
+        _operations = operations ?? new HashSet<string>(StringComparer.Ordinal);
         string activationNonce = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
         _activation = CacheIdentity.Derive(_identityKey, "mount-activation-1", mountPrefix, generationLabel, activationNonce);
-        _flights = new ResponseFlightRegistry(ResponseCacheOptions.HardMaxFlightsPerMount);
+        _flights = new ResponseFlightRegistry(
+            _options.MaxFlightsPerMount,
+            _options.MaxWaitersPerMount);
     }
+
+    /// <summary>Whether the mount declares an operation with this slug.</summary>
+    internal bool IsKnownOperation(string operationSlug)
+        => _operations.Contains(operationSlug);
 
     internal int EntryCount
     {
@@ -333,6 +342,48 @@ internal sealed class ResponseCache : IDisposable
     internal ResponseCacheObservation Observe()
         => _observations.Snapshot(_mountPrefix, _clock);
 
+    /// <summary>
+    /// Snapshots the retained decisions this mount records, optionally narrowed to one operation.
+    /// </summary>
+    /// <remarks>
+    /// An operation-scoped read returns only decisions whose recorded slug equals
+    /// <paramref name="operationSlug"/>; the counts are recomputed over the same narrowed set, so a
+    /// scoped answer can never include or count a whole-mount decision for a sibling operation.
+    /// </remarks>
+    internal ResponseCacheObservation Observe(string? operationSlug)
+    {
+        ResponseCacheObservation all = _observations.Snapshot(_mountPrefix, _clock);
+
+        if (string.IsNullOrEmpty(operationSlug))
+        {
+            return all;
+        }
+
+        List<ResponseCacheDecision> scoped = [];
+        long consulted = 0;
+        long upstream = 0;
+        foreach (ResponseCacheDecision decision in all.Recent)
+        {
+            if (!string.Equals(decision.OperationSlug, operationSlug, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            scoped.Add(decision);
+            if (decision.Kind != ResponseCacheDecisionKind.Bypass)
+            {
+                consulted++;
+            }
+
+            if (decision.Execution == ResponseCacheExecution.Upstream)
+            {
+                upstream++;
+            }
+        }
+
+        return new ResponseCacheObservation(_mountPrefix, consulted, upstream, scoped);
+    }
+
     /// <summary>Clears the mount's cache and advances its clear epoch, or one operation's.</summary>
     internal ResponseCacheClearOutcome ClearScope(string? operationSlug)
     {
@@ -349,6 +400,31 @@ internal sealed class ResponseCache : IDisposable
             result.RemovedEntries,
             result.MountEpoch,
             result.OperationEpoch);
+    }
+
+    /// <summary>
+    /// Clears one operation only when the mount declares that slug.
+    /// </summary>
+    /// <remarks>
+    /// An unknown slug is refused without advancing any epoch, so an arbitrary caller-supplied
+    /// value cannot grow the operation-epoch map; the returned outcome carries the current epochs
+    /// unchanged and the caller reports a refusal.
+    /// </remarks>
+    internal bool TryClearOperation(string operationSlug, out ResponseCacheClearOutcome outcome)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(operationSlug);
+
+        lock (_gate)
+        {
+            if (!_operations.Contains(operationSlug))
+            {
+                outcome = new ResponseCacheClearOutcome(_mountPrefix, operationSlug, 0, _mountEpoch, 0);
+                return false;
+            }
+        }
+
+        outcome = ClearScope(operationSlug);
+        return true;
     }
 
     public void Dispose()

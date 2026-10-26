@@ -274,6 +274,60 @@ public sealed class AuthorizationEndpointCheckTests
         Assert.Contains("does not exactly match", refusal.Message, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A document that names two issuers is ambiguity, not a normalization problem.
+    /// </summary>
+    /// <remarks>
+    /// Whichever occurrence a JSON reader returns first would decide which trust authority answers,
+    /// so the document is refused whole instead of being resolved by member order.
+    /// </remarks>
+    [Fact]
+    public async Task Metadata_with_a_duplicate_issuer_member_is_refused()
+    {
+        await using FakeServer server = await FakeServer.StartAsync(
+            "{\"issuer\":\"{issuer}\",\"issuer\":\"{issuer}\",\"jwks_uri\":\"{0}/jwks\"}");
+
+        StartupRefusal? refusal = await AuthorizationEndpointCheck.FindAsync(
+            new HostAuthorizationOptions(server.Address.AbsoluteUri, HostTokenValidation.Jwks),
+            TestContext.Current.CancellationToken);
+
+        Assert.NotNull(refusal);
+        Assert.Equal("auth/issuer-metadata-invalid", refusal!.Code);
+        Assert.Contains("more than once", refusal.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>A document that names two JWKS endpoints cannot pick one of them.</summary>
+    [Fact]
+    public async Task A_duplicate_jwks_uri_member_is_an_ambiguous_refusal()
+    {
+        await using FakeServer server = await FakeServer.StartAsync(
+            "{\"issuer\":\"{issuer}\",\"jwks_uri\":\"{0}/jwks\",\"jwks_uri\":\"{0}/other-jwks\"}");
+
+        StartupRefusal? refusal = await AuthorizationEndpointCheck.FindAsync(
+            new HostAuthorizationOptions(server.Address.AbsoluteUri, HostTokenValidation.Jwks),
+            TestContext.Current.CancellationToken);
+
+        Assert.NotNull(refusal);
+        Assert.Equal("auth/jwks-uri-ambiguous", refusal!.Code);
+        Assert.Equal(HostConfiguration.JwksUriKey, refusal.Setting);
+    }
+
+    /// <summary>A document that names two introspection endpoints cannot pick one of them.</summary>
+    [Fact]
+    public async Task A_duplicate_introspection_endpoint_member_is_an_ambiguous_refusal()
+    {
+        await using FakeServer server = await FakeServer.StartAsync(
+            "{\"issuer\":\"{issuer}\",\"introspection_endpoint\":\"{0}/introspect\",\"introspection_endpoint\":\"{0}/other\"}");
+
+        StartupRefusal? refusal = await AuthorizationEndpointCheck.FindAsync(
+            Introspection(server.Address),
+            TestContext.Current.CancellationToken);
+
+        Assert.NotNull(refusal);
+        Assert.Equal("auth/introspection-endpoint-ambiguous", refusal!.Code);
+        Assert.Equal(HostConfiguration.IntrospectionEndpointKey, refusal.Setting);
+    }
+
     [Fact]
     public async Task No_authorization_configuration_has_no_endpoint_to_check()
     {

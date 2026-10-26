@@ -228,8 +228,17 @@ internal static class MountAuthorizationSetup
     /// in that case is already known: the token cannot be established, so it is inactive. The
     /// validator's own catch turns the timeout into that inactive answer.
     /// </para>
+    /// <para>
+    /// The optional observation buffer is how the authenticated operator status route reports trust
+    /// outcomes. It is a recording side effect only: a validator built without one makes identical
+    /// decisions, and no decision ever reads it back.
+    /// </para>
     /// </remarks>
-    internal static ITokenValidator Validator(HostAuthorizationOptions options)
+    /// <param name="options">The bound authorization configuration.</param>
+    /// <param name="observations">Where trust observations are recorded, or none.</param>
+    internal static ITokenValidator Validator(
+        HostAuthorizationOptions options,
+        IssuerAvailabilityObservations? observations = null)
     {
         string? secret = ReadIntrospectionSecret(options);
         HttpClient client = AuthorizationHttpClientFactory.Create(ValidationTimeout);
@@ -242,11 +251,15 @@ internal static class MountAuthorizationSetup
                 options.IntrospectionEndpoint,
                 options.IntrospectionClientId,
                 secret,
-                options.IntrospectionCacheTtlSeconds),
+                options.IntrospectionCacheTtlSeconds,
+                allowOidcFallback: options.OidcDiscoveryFallbackEnabled,
+                observations: observations),
             HostTokenValidation.Jwks => new JwksTokenValidator(
                 client,
                 options.Issuer,
-                options.JwksUri),
+                options.JwksUri,
+                allowOidcFallback: options.OidcDiscoveryFallbackEnabled,
+                observations: observations),
             _ => throw new InvalidOperationException(
                 "The token validation configuration was validated at bind time; an unknown mode here is a bug."),
         };

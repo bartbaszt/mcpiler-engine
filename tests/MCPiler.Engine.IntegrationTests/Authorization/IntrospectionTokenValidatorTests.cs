@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Reflection;
 using System.Text;
 using System.Threading;
@@ -25,6 +26,7 @@ public sealed class IntrospectionTokenValidatorTests
 {
     private static readonly DateTimeOffset Now = new(2026, 9, 18, 12, 0, 0, TimeSpan.Zero);
     private static readonly Uri Endpoint = new("http://127.0.0.1:5099/introspect");
+    private static readonly string[] ReadWriteScopes = ["read", "write"];
 
     [Fact]
     public async Task A_positive_result_is_reused_until_its_configured_ttl()
@@ -202,6 +204,201 @@ public sealed class IntrospectionTokenValidatorTests
         Assert.False((await validator.ValidateAsync("token-timeout", TestContext.Current.CancellationToken)).Active);
 
         Assert.Equal(2, handler.Calls);
+    }
+
+    [Fact]
+    public async Task An_active_answer_is_observed_once_per_real_introspection()
+    {
+        var clock = new FakeTimeProvider(Now);
+        var handler = new StubHandler((_, _) => ActiveResponse(clock.GetUtcNow().AddMinutes(5)));
+        using var client = new HttpClient(handler);
+        var observations = new IssuerAvailabilityObservations();
+        var validator = CreateValidator(client, clock, ttlSeconds: 30, observations);
+
+        Assert.True((await validator.ValidateAsync("token-observed", TestContext.Current.CancellationToken)).Active);
+        Assert.True((await validator.ValidateAsync("token-observed", TestContext.Current.CancellationToken)).Active);
+
+        // A cached answer is not a new trust interaction: one request, one observation at the clock
+        // time it happened.
+        Assert.Equal(1, handler.Calls);
+        IssuerAvailabilityObservation first = Assert.Single(observations.Recent(clock.GetUtcNow()));
+        Assert.Equal(Now, first.ObservedAtUtc);
+        Assert.Equal(IssuerAvailabilityMode.Introspection, first.Mode);
+        Assert.Equal(IssuerAvailabilityCategory.IssuerAnswered, first.Category);
+
+        // After the accepted 30-second positive revalidation bound the issuer is asked again, and the
+        // new interaction is observed in its own time.
+        clock.Advance(TimeSpan.FromSeconds(31));
+        Assert.True((await validator.ValidateAsync("token-observed", TestContext.Current.CancellationToken)).Active);
+        Assert.Equal(2, handler.Calls);
+
+        IReadOnlyList<IssuerAvailabilityObservation> events = observations.Recent(clock.GetUtcNow());
+        Assert.Equal(2, events.Count);
+        Assert.Equal(Now.AddSeconds(31), events[0].ObservedAtUtc);
+        Assert.All(
+            events,
+            entry => Assert.Equal(IssuerAvailabilityCategory.IssuerAnswered, entry.Category));
+    }
+
+    [Fact]
+    public async Task An_authoritative_inactive_answer_is_observed_apart_from_an_endpoint_outage()
+    {
+        var clock = new FakeTimeProvider(Now);
+        var handler = new StubHandler((call, _) => call == 1
+            ? InactiveResponse()
+            : new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+        using var client = new HttpClient(handler);
+        var observations = new IssuerAvailabilityObservations();
+        var validator = CreateValidator(client, clock, ttlSeconds: 30, observations);
+
+        TokenVerification inactive = await validator.ValidateAsync("token-inactive", TestContext.Current.CancellationToken);
+        TokenVerification outage = await validator.ValidateAsync("token-outage", TestContext.Current.CancellationToken);
+
+        // The verdicts are distinguishable without either being cached as the other: the issuer's
+        // authoritative statement is negative-cacheable, the endpoint outage is not reusable.
+        Assert.False(inactive.Active);
+        Assert.True(inactive.IsAuthoritativeInactive);
+        Assert.False(outage.Active);
+        Assert.False(outage.IsAuthoritativeInactive);
+
+        Assert.Equal(
+            [
+                IssuerAvailabilityCategory.IntrospectionUnavailable,
+                IssuerAvailabilityCategory.TokenInactive,
+            ],
+            observations.Recent(clock.GetUtcNow()).Select(entry => entry.Category));
+    }
+
+    [Fact]
+    public async Task An_endpoint_outage_is_observed_and_a_later_answer_recovers()
+    {
+        var clock = new FakeTimeProvider(Now);
+        bool failing = true;
+        var handler = new StubHandler((_, _) => failing
+            ? new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+            : ActiveResponse(clock.GetUtcNow().AddMinutes(5)));
+        using var client = new HttpClient(handler);
+        var observations = new IssuerAvailabilityObservations();
+        var validator = CreateValidator(client, clock, ttlSeconds: 30, observations);
+
+        Assert.False((await validator.ValidateAsync("token-recover", TestContext.Current.CancellationToken)).Active);
+
+        // The outage is not negative-cached as the issuer declaring the token inactive: the next
+        // attempt reaches the recovered endpoint immediately.
+        failing = false;
+        Assert.True((await validator.ValidateAsync("token-recover", TestContext.Current.CancellationToken)).Active);
+        Assert.Equal(2, handler.Calls);
+
+        Assert.Equal(
+            [
+                IssuerAvailabilityCategory.IssuerAnswered,
+                IssuerAvailabilityCategory.IntrospectionUnavailable,
+            ],
+            observations.Recent(clock.GetUtcNow()).Select(entry => entry.Category));
+    }
+
+    [Fact]
+    public async Task An_unusable_200_answer_is_observed_as_an_endpoint_outage_not_as_inactive()
+    {
+        var handler = new StubHandler((_, _) => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"aud\":\"resource\"}", Encoding.UTF8, "application/json"),
+        });
+        using var client = new HttpClient(handler);
+        var clock = new FakeTimeProvider(Now);
+        var observations = new IssuerAvailabilityObservations();
+        var validator = CreateValidator(client, clock, ttlSeconds: 30, observations);
+
+        TokenVerification verification = await validator.ValidateAsync("token-no-active", TestContext.Current.CancellationToken);
+
+        Assert.False(verification.Active);
+        Assert.False(verification.IsAuthoritativeInactive);
+        Assert.Equal(
+            IssuerAvailabilityCategory.IntrospectionUnavailable,
+            Assert.Single(observations.Recent(clock.GetUtcNow())).Category);
+    }
+
+    [Fact]
+    public async Task Unresolvable_metadata_is_observed_as_metadata_unavailable_without_an_introspection_call()
+    {
+        var handler = new StubHandler((_, request) =>
+            request.RequestUri!.AbsolutePath == "/.well-known/oauth-authorization-server"
+                ? new HttpResponseMessage(HttpStatusCode.NotFound)
+                : throw new InvalidOperationException($"unexpected request {request.RequestUri}"));
+        using var client = new HttpClient(handler);
+        var clock = new FakeTimeProvider(Now);
+        var observations = new IssuerAvailabilityObservations();
+        var validator = new IntrospectionTokenValidator(
+            client,
+            "https://issuer.example.test",
+            endpointOverride: null,
+            cacheTtlSeconds: 30,
+            clock: clock,
+            observations: observations);
+
+        Assert.False((await validator.ValidateAsync("token-metadata", TestContext.Current.CancellationToken)).Active);
+
+        Assert.Equal(
+            IssuerAvailabilityCategory.MetadataUnavailable,
+            Assert.Single(observations.Recent(clock.GetUtcNow())).Category);
+    }
+
+    [Fact]
+    public async Task A_cancelled_validation_is_not_observed_as_an_issuer_outage()
+    {
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new StubHandler(async (_, cancellationToken) =>
+        {
+            started.SetResult();
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            return ActiveResponse(Now.AddMinutes(5));
+        });
+        using var client = new HttpClient(handler);
+        var clock = new FakeTimeProvider(Now);
+        var observations = new IssuerAvailabilityObservations();
+        var validator = CreateValidator(client, clock, ttlSeconds: 0, observations);
+
+        using var cancellation = new CancellationTokenSource();
+        Task<TokenVerification> validation = validator.ValidateAsync("token-cancelled", cancellation.Token);
+        await started.Task.WaitAsync(TestContext.Current.CancellationToken);
+        cancellation.Cancel();
+
+        bool cancelled = false;
+
+        try
+        {
+            _ = await validation;
+        }
+        catch (OperationCanceledException)
+        {
+            cancelled = true;
+        }
+
+        Assert.True(cancelled);
+        Assert.True(validation.IsCanceled);
+
+        // The caller's own cancellation is not an issuer observation: it says nothing about the
+        // endpoint and must not be recorded as one.
+        Assert.Empty(observations.Recent(clock.GetUtcNow()));
+    }
+
+    [Fact]
+    public async Task An_absent_observation_buffer_changes_no_verdict()
+    {
+        var observations = new IssuerAvailabilityObservations();
+        using var observedClient = new HttpClient(new StubHandler((_, _) => ActiveResponse(Now.AddMinutes(5))));
+        var withStore = CreateValidator(observedClient, new FakeTimeProvider(Now), ttlSeconds: 30, observations);
+        using var plainClient = new HttpClient(new StubHandler((_, _) => ActiveResponse(Now.AddMinutes(5))));
+        var withoutStore = CreateValidator(plainClient, new FakeTimeProvider(Now), ttlSeconds: 30);
+
+        TokenVerification observed = await withStore.ValidateAsync("token-parity", TestContext.Current.CancellationToken);
+        TokenVerification plain = await withoutStore.ValidateAsync("token-parity", TestContext.Current.CancellationToken);
+
+        Assert.True(observed.Active);
+        Assert.Equal(observed.Active, plain.Active);
+        Assert.Equal(observed.Audience, plain.Audience);
+        Assert.Equal(observed.Scopes, plain.Scopes);
+        Assert.NotEmpty(observations.Recent(Now));
     }
 
     [Theory]
@@ -509,16 +706,242 @@ public sealed class IntrospectionTokenValidatorTests
         Assert.DoesNotContain(clientSecret, proxy.LastAuthorization ?? string.Empty, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task Distinct_inflight_introspections_are_bounded_and_overflow_is_refused_without_a_call()
+    {
+        // MTH-RUN-2: a flood of distinct tokens must not grow the coalescing map or its waiters
+        // without bound. At the bound the extra caller is refused immediately, fail-closed, with no
+        // HTTP call, and is never retained.
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new StubHandler(async (_, cancellationToken) =>
+        {
+            await gate.Task.WaitAsync(cancellationToken);
+            return ActiveResponse(Now.AddMinutes(5));
+        });
+        using var client = new HttpClient(handler);
+        var validator = CreateValidator(client, new FakeTimeProvider(Now), ttlSeconds: 30);
+
+        List<Task<TokenVerification>> held = [];
+        for (int index = 0; index < IntrospectionTokenValidator.MaximumInFlight; index++)
+        {
+            held.Add(validator.ValidateAsync($"held-{index}", TestContext.Current.CancellationToken));
+        }
+
+        for (var attempt = 0; attempt < 200 && validator.InFlightCount < IntrospectionTokenValidator.MaximumInFlight; attempt++)
+        {
+            await Task.Delay(5, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(IntrospectionTokenValidator.MaximumInFlight, validator.InFlightCount);
+        int callsAtBound = handler.Calls;
+
+        // An overflow token is refused immediately with no HTTP call and is not retained.
+        TokenVerification overflow = await validator.ValidateAsync("overflow", TestContext.Current.CancellationToken);
+        Assert.False(overflow.Active);
+        Assert.Equal(callsAtBound, handler.Calls);
+        Assert.Equal(IntrospectionTokenValidator.MaximumInFlight, validator.InFlightCount);
+
+        gate.SetResult();
+        await Task.WhenAll(held);
+        Assert.Equal(IntrospectionTokenValidator.MaximumInFlight, handler.Calls);
+
+        for (var attempt = 0; attempt < 200 && validator.AdmittedInFlightCount != 0; attempt++)
+        {
+            await Task.Delay(5, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(0, validator.InFlightCount);
+
+        // After the issuer is released, a healthy follow-up validation succeeds.
+        Assert.True((await validator.ValidateAsync("healthy-after-release", TestContext.Current.CancellationToken)).Active);
+    }
+
+    [Fact]
+    public async Task An_oversized_introspection_body_is_refused_after_the_byte_bound()
+    {
+        // MTH-RUN-3: a response body above the finite bound is refused while streaming, so an
+        // oversized or chunked body is never fully buffered before it is rejected.
+        var oversized = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(new byte[IntrospectionTokenValidator.MaximumResponseBodyBytes + 1]),
+        };
+        oversized.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        var handler = new StubHandler((_, _) => oversized);
+        using var client = new HttpClient(handler);
+        var validator = CreateValidator(client, new FakeTimeProvider(Now), ttlSeconds: 30);
+
+        TokenVerification verification = await validator.ValidateAsync("oversized", TestContext.Current.CancellationToken);
+
+        Assert.False(verification.Active);
+    }
+
+    [Fact]
+    public async Task A_truly_streamed_body_over_the_bound_is_refused_without_buffering_it_all()
+    {
+        // MTH-RUN-3: a non-seekable producer with no Content-Length proves the streaming read path
+        // stops after the byte bound instead of buffering the whole body.
+        const long total = 4L * IntrospectionTokenValidator.MaximumResponseBodyBytes;
+        var content = new CountingNonSeekableContent(total);
+        var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
+        var handler = new StubHandler((_, _) => response);
+        using var client = new HttpClient(handler);
+        var validator = CreateValidator(client, new FakeTimeProvider(Now), ttlSeconds: 30);
+
+        TokenVerification verification = await validator.ValidateAsync("streamed", TestContext.Current.CancellationToken);
+
+        Assert.False(verification.Active);
+        Assert.True(
+            content.BytesPulled <= IntrospectionTokenValidator.MaximumResponseBodyBytes + 8192,
+            $"the reader pulled {content.BytesPulled} bytes, more than the bound plus one buffer");
+        Assert.True(content.BytesPulled < total, "the producer must not have been fully drained");
+    }
+
+    [Fact]
+    public async Task Zero_ttl_admission_is_bounded_and_overflow_is_refused_without_a_call()
+    {
+        // MTH-RUN-2: disabling result caching and single-flight must not disable load control. A
+        // TTL=0 flood of distinct tokens is bounded by the producer admission, and the overflow is
+        // refused immediately, fail-closed, with no HTTP call.
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new StubHandler(async (_, cancellationToken) =>
+        {
+            await gate.Task.WaitAsync(cancellationToken);
+            return ActiveResponse(Now.AddMinutes(5));
+        });
+        using var client = new HttpClient(handler);
+        var validator = CreateValidator(client, new FakeTimeProvider(Now), ttlSeconds: 0);
+
+        List<Task<TokenVerification>> held = [];
+        for (int index = 0; index < IntrospectionTokenValidator.MaximumInFlight; index++)
+        {
+            held.Add(validator.ValidateAsync($"zero-held-{index}", TestContext.Current.CancellationToken));
+        }
+
+        for (var attempt = 0; attempt < 200 && validator.AdmittedInFlightCount < IntrospectionTokenValidator.MaximumInFlight; attempt++)
+        {
+            await Task.Delay(5, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(IntrospectionTokenValidator.MaximumInFlight, validator.AdmittedInFlightCount);
+        int callsAtBound = handler.Calls;
+        Assert.Equal(IntrospectionTokenValidator.MaximumInFlight, callsAtBound);
+
+        TokenVerification overflow = await validator.ValidateAsync("zero-overflow", TestContext.Current.CancellationToken);
+        Assert.False(overflow.Active);
+        Assert.Equal(callsAtBound, handler.Calls);
+
+        gate.SetResult();
+        await Task.WhenAll(held);
+        Assert.All(held, task => Assert.True(task.Result.Active));
+
+        for (var attempt = 0; attempt < 200 && validator.AdmittedInFlightCount != 0; attempt++)
+        {
+            await Task.Delay(5, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(0, validator.AdmittedInFlightCount);
+    }
+
+    [Fact]
+    public async Task Zero_ttl_cancellation_stops_the_started_introspection()
+    {
+        // MTH-RUN-2: the TTL=0 operation is dedicated to the caller, so its cancellation token must
+        // reach the HTTP call: a cancelled request stops the introspection it started instead of
+        // leaving it running detached.
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var observedCancellation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new StubHandler(async (_, cancellationToken) =>
+        {
+            started.TrySetResult();
+            try
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                observedCancellation.TrySetResult();
+                throw;
+            }
+
+            return ActiveResponse(Now.AddMinutes(5));
+        });
+        using var client = new HttpClient(handler);
+        var validator = CreateValidator(client, new FakeTimeProvider(Now), ttlSeconds: 0);
+
+        using var cancellation = new CancellationTokenSource();
+        Task<TokenVerification> pending = validator.ValidateAsync("zero-cancel", cancellation.Token);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        cancellation.Cancel();
+
+        try
+        {
+            await pending;
+            Assert.Fail("The cancelled TTL=0 request should observe cancellation.");
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected: the caller observes cancellation and the started call was aborted with it.
+        }
+
+        await observedCancellation.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        for (var attempt = 0; attempt < 200 && validator.AdmittedInFlightCount != 0; attempt++)
+        {
+            await Task.Delay(5, TestContext.Current.CancellationToken);
+        }
+
+        Assert.Equal(0, validator.AdmittedInFlightCount);
+    }
+
+    [Fact]
+    public async Task Waiters_on_a_single_flight_are_bounded_per_token()
+    {
+        // MTH-RUN-2: the producer bound limits distinct keys, not the callers waiting on one key. A
+        // slow issuer must not retain an unbounded waiter set on a single token; the overflow is
+        // refused immediately, fail-closed, without joining the flight.
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var handler = new StubHandler(async (_, cancellationToken) =>
+        {
+            await gate.Task.WaitAsync(cancellationToken);
+            return ActiveResponse(Now.AddMinutes(5));
+        });
+        using var client = new HttpClient(handler);
+        var validator = CreateValidator(client, new FakeTimeProvider(Now), ttlSeconds: 30);
+
+        Task<TokenVerification> producer = validator.ValidateAsync("shared-bounded", TestContext.Current.CancellationToken);
+        await WaitForCallsAsync(handler, 1);
+
+        List<Task<TokenVerification>> waiters = [];
+        for (int index = 0; index < IntrospectionTokenValidator.MaximumWaitersPerToken; index++)
+        {
+            waiters.Add(validator.ValidateAsync("shared-bounded", TestContext.Current.CancellationToken));
+        }
+
+        // The next waiter is refused immediately and does not join the flight or add a call.
+        TokenVerification overflow = await validator.ValidateAsync("shared-bounded", TestContext.Current.CancellationToken);
+        Assert.False(overflow.Active);
+        Assert.Equal(1, handler.Calls);
+
+        gate.SetResult();
+        Assert.True((await producer).Active);
+        TokenVerification[] results = await Task.WhenAll(waiters);
+        Assert.All(results, result => Assert.True(result.Active));
+        Assert.Equal(1, handler.Calls);
+    }
+
     private static IntrospectionTokenValidator CreateValidator(
         HttpClient client,
         TimeProvider clock,
-        int ttlSeconds)
+        int ttlSeconds,
+        IssuerAvailabilityObservations? observations = null)
         => new(
             client,
             "https://issuer.example.test",
             Endpoint.AbsoluteUri,
             cacheTtlSeconds: ttlSeconds,
-            clock: clock);
+            clock: clock,
+            observations: observations);
 
     private static HttpResponseMessage ActiveResponse(DateTimeOffset? expiration)
     {
@@ -550,6 +973,271 @@ public sealed class IntrospectionTokenValidatorTests
         Assert.Equal(expected, handler.Calls);
     }
 
+    /// <summary>
+    /// Both permitted discovery routes carry the same document semantics into introspection: the
+    /// same endpoint resolution, the same audience and scope interpretation, and the same positive
+    /// revalidation bound.
+    /// </summary>
+    [Fact]
+    public async Task Both_discovery_routes_produce_the_same_verdict_and_positive_cache_bound()
+    {
+        var clock = new FakeTimeProvider(Now);
+        List<string> primaryPaths = [];
+        var primaryHandler = new StubHandler((_, request) =>
+        {
+            string path = request.RequestUri!.AbsolutePath;
+            primaryPaths.Add(path);
+            return path switch
+            {
+                "/.well-known/oauth-authorization-server" => IntrospectionMetadataResponse(
+                    "https://issuer.example.test",
+                    Endpoint.AbsoluteUri),
+                "/introspect" => ActiveResponse(Now.AddMinutes(5)),
+                _ => throw new InvalidOperationException($"unexpected request {path}"),
+            };
+        });
+
+        List<string> fallbackPaths = [];
+        var fallbackHandler = new StubHandler((_, request) =>
+        {
+            string path = request.RequestUri!.AbsolutePath;
+            fallbackPaths.Add(path);
+            return path switch
+            {
+                "/.well-known/oauth-authorization-server" => new HttpResponseMessage(HttpStatusCode.NotFound),
+                "/.well-known/openid-configuration" => IntrospectionMetadataResponse(
+                    "https://issuer.example.test",
+                    Endpoint.AbsoluteUri),
+                "/introspect" => ActiveResponse(Now.AddMinutes(5)),
+                _ => throw new InvalidOperationException($"unexpected request {path}"),
+            };
+        });
+
+        using HttpClient primaryClient = new(primaryHandler);
+        using HttpClient fallbackClient = new(fallbackHandler);
+        var primary = new IntrospectionTokenValidator(
+            primaryClient,
+            "https://issuer.example.test",
+            endpointOverride: null,
+            cacheTtlSeconds: 30,
+            clock: clock);
+        var fallback = new IntrospectionTokenValidator(
+            fallbackClient,
+            "https://issuer.example.test",
+            endpointOverride: null,
+            cacheTtlSeconds: 30,
+            clock: clock,
+            allowOidcFallback: true);
+
+        TokenVerification first = await primary.ValidateAsync("token-a", TestContext.Current.CancellationToken);
+        TokenVerification second = await primary.ValidateAsync("token-a", TestContext.Current.CancellationToken);
+        TokenVerification third = await fallback.ValidateAsync("token-a", TestContext.Current.CancellationToken);
+        TokenVerification fourth = await fallback.ValidateAsync("token-a", TestContext.Current.CancellationToken);
+
+        Assert.Equal(first.Active, third.Active);
+        Assert.Equal(first.Audience, third.Audience);
+        Assert.Equal(first.Scopes, third.Scopes);
+        Assert.Equal(first.ExpiresAt, third.ExpiresAt);
+        Assert.True(first.Active);
+        Assert.Equal("resource", first.Audience);
+        Assert.Equal(ReadWriteScopes, first.Scopes);
+        Assert.Equal(second.Active, fourth.Active);
+
+        // The positive-cache bound is unchanged by the route: the second call per route reuses the
+        // first result instead of asking the endpoint again.
+        Assert.Equal(1, primaryPaths.Count(path => path == "/introspect"));
+        Assert.Equal(1, fallbackPaths.Count(path => path == "/introspect"));
+        Assert.Equal(1, fallbackPaths.Count(path => path == "/.well-known/openid-configuration"));
+        Assert.DoesNotContain("/.well-known/openid-configuration", primaryPaths);
+    }
+
+    /// <summary>A wrong-issuer fallback document fails closed before any introspection call.</summary>
+    [Fact]
+    public async Task A_wrong_issuer_oidc_document_is_inactive_without_an_introspection_call()
+    {
+        List<string> paths = [];
+        var handler = new StubHandler((_, request) =>
+        {
+            string path = request.RequestUri!.AbsolutePath;
+            paths.Add(path);
+            return path switch
+            {
+                "/.well-known/oauth-authorization-server" => new HttpResponseMessage(HttpStatusCode.NotFound),
+                "/.well-known/openid-configuration" => IntrospectionMetadataResponse(
+                    "https://other.example",
+                    Endpoint.AbsoluteUri),
+                "/introspect" => ActiveResponse(Now.AddMinutes(5)),
+                _ => throw new InvalidOperationException($"unexpected request {path}"),
+            };
+        });
+
+        using HttpClient client = new(handler);
+        var validator = new IntrospectionTokenValidator(
+            client,
+            "https://issuer.example.test",
+            endpointOverride: null,
+            cacheTtlSeconds: 30,
+            clock: new FakeTimeProvider(Now),
+            allowOidcFallback: true);
+
+        TokenVerification verification = await validator.ValidateAsync(
+            "token-a",
+            TestContext.Current.CancellationToken);
+
+        Assert.False(verification.Active);
+        Assert.Equal(2, paths.Count);
+        Assert.DoesNotContain("/introspect", paths);
+    }
+
+    /// <summary>A duplicated endpoint member in the fallback document is unusable, not a choice.</summary>
+    [Fact]
+    public async Task A_duplicate_introspection_endpoint_in_the_oidc_document_is_inactive()
+    {
+        List<string> paths = [];
+        var handler = new StubHandler((_, request) =>
+        {
+            string path = request.RequestUri!.AbsolutePath;
+            paths.Add(path);
+            return path switch
+            {
+                "/.well-known/oauth-authorization-server" => new HttpResponseMessage(HttpStatusCode.NotFound),
+                "/.well-known/openid-configuration" => new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(
+                        $"{{\"issuer\":\"https://issuer.example.test\","
+                        + $"\"introspection_endpoint\":\"{Endpoint.AbsoluteUri}\","
+                        + $"\"introspection_endpoint\":\"{Endpoint.AbsoluteUri}\"}}",
+                        Encoding.UTF8,
+                        "application/json"),
+                },
+                "/introspect" => ActiveResponse(Now.AddMinutes(5)),
+                _ => throw new InvalidOperationException($"unexpected request {path}"),
+            };
+        });
+
+        using HttpClient client = new(handler);
+        var validator = new IntrospectionTokenValidator(
+            client,
+            "https://issuer.example.test",
+            endpointOverride: null,
+            cacheTtlSeconds: 30,
+            clock: new FakeTimeProvider(Now),
+            allowOidcFallback: true);
+
+        TokenVerification verification = await validator.ValidateAsync(
+            "token-a",
+            TestContext.Current.CancellationToken);
+
+        Assert.False(verification.Active);
+        Assert.DoesNotContain("/introspect", paths);
+    }
+
+    /// <summary>
+    /// Every RFC 8414 outcome other than 404/410 stays fail-closed at runtime without asking the
+    /// OIDC route, even when the operator enabled the fallback.
+    /// </summary>
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    [InlineData(HttpStatusCode.Forbidden)]
+    [InlineData(HttpStatusCode.TemporaryRedirect)]
+    [InlineData(HttpStatusCode.InternalServerError)]
+    public async Task A_non_definitive_rfc8414_status_is_inactive_without_the_oidc_route(HttpStatusCode status)
+    {
+        List<string> paths = [];
+        var handler = new StubHandler((_, request) =>
+        {
+            string path = request.RequestUri!.AbsolutePath;
+            paths.Add(path);
+            return path switch
+            {
+                "/.well-known/oauth-authorization-server" => new HttpResponseMessage(status),
+                "/.well-known/openid-configuration" => IntrospectionMetadataResponse(
+                    "https://issuer.example.test",
+                    Endpoint.AbsoluteUri),
+                "/introspect" => ActiveResponse(Now.AddMinutes(5)),
+                _ => throw new InvalidOperationException($"unexpected request {path}"),
+            };
+        });
+
+        using HttpClient client = new(handler);
+        var validator = new IntrospectionTokenValidator(
+            client,
+            "https://issuer.example.test",
+            endpointOverride: null,
+            cacheTtlSeconds: 30,
+            clock: new FakeTimeProvider(Now),
+            allowOidcFallback: true);
+
+        TokenVerification verification = await validator.ValidateAsync(
+            "token-a",
+            TestContext.Current.CancellationToken);
+
+        Assert.False(verification.Active);
+        Assert.Single(paths);
+        Assert.Equal("/.well-known/oauth-authorization-server", paths[0]);
+    }
+
+    /// <summary>
+    /// The production composer is the path that carries the operator's setting to the validator,
+    /// so a fallback driven through <see cref="MountAuthorizationSetup"/> proves the wiring, not
+    /// just the constructor.
+    /// </summary>
+    [Fact]
+    public async Task The_production_composer_drives_introspection_validation_through_the_fallback_route()
+    {
+        await using AuthorizationTransportServer server = await AuthorizationTransportServer.StartAsync(
+            async context =>
+            {
+                string? path = context.Request.Path.Value;
+                if (path == "/.well-known/oauth-authorization-server")
+                {
+                    context.Response.StatusCode = StatusCodes.Status404NotFound;
+                    return;
+                }
+
+                string address = $"http://{context.Request.Host.Value}";
+                context.Response.ContentType = "application/json";
+
+                if (path == "/.well-known/openid-configuration")
+                {
+                    await context.Response.WriteAsync(
+                        $"{{\"issuer\":\"{address}/\",\"introspection_endpoint\":\"{address}/introspect\"}}",
+                        context.RequestAborted);
+                    return;
+                }
+
+                await context.Response.WriteAsync(
+                    "{\"active\":true,\"aud\":\"resource\",\"scope\":\"read write\"}",
+                    context.RequestAborted);
+            });
+
+        string issuer = server.Address.AbsoluteUri;
+        ITokenValidator validator = MountAuthorizationSetup.Validator(
+            new HostAuthorizationOptions(issuer, HostTokenValidation.Introspection)
+            {
+                IntrospectionCacheTtlSeconds = 0,
+                OidcDiscoveryFallbackEnabled = true,
+            });
+
+        TokenVerification verification = await validator.ValidateAsync(
+            "token-a",
+            TestContext.Current.CancellationToken);
+
+        Assert.True(verification.Active);
+        Assert.Equal("resource", verification.Audience);
+        Assert.Equal(ReadWriteScopes, verification.Scopes);
+        Assert.Contains("/.well-known/openid-configuration", server.RequestedPaths);
+    }
+
+    private static HttpResponseMessage IntrospectionMetadataResponse(string issuer, string endpoint)
+        => new(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                $"{{\"issuer\":\"{issuer}\",\"introspection_endpoint\":\"{endpoint}\"}}",
+                Encoding.UTF8,
+                "application/json"),
+        };
+
     private sealed class FakeTimeProvider(DateTimeOffset now) : TimeProvider
     {
         private DateTimeOffset _now = now;
@@ -561,15 +1249,20 @@ public sealed class IntrospectionTokenValidatorTests
 
     private sealed class StubHandler : HttpMessageHandler
     {
-        private readonly Func<int, CancellationToken, Task<HttpResponseMessage>> _responder;
+        private readonly Func<int, HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> _responder;
         private int _calls;
 
         public StubHandler(Func<int, HttpRequestMessage, HttpResponseMessage> responder)
-            : this((number, _) => Task.FromResult(responder(number, null!)))
+            : this((number, request, _) => Task.FromResult(responder(number, request)))
         {
         }
 
         public StubHandler(Func<int, CancellationToken, Task<HttpResponseMessage>> responder)
+            : this((number, _, cancellationToken) => responder(number, cancellationToken))
+        {
+        }
+
+        private StubHandler(Func<int, HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> responder)
             => _responder = responder;
 
         public int Calls => Volatile.Read(ref _calls);
@@ -579,7 +1272,84 @@ public sealed class IntrospectionTokenValidatorTests
             CancellationToken cancellationToken)
         {
             int number = Interlocked.Increment(ref _calls);
-            return _responder(number, cancellationToken);
+            return _responder(number, request, cancellationToken);
+        }
+    }
+
+    /// <summary>
+    /// A non-seekable response body with no computed length that yields bytes lazily and records how
+    /// many were actually pulled, so a test can prove the reader stopped at its bound.
+    /// </summary>
+    private sealed class CountingNonSeekableContent : HttpContent
+    {
+        private const int ChunkSize = 8192;
+
+        private readonly long _total;
+
+        public CountingNonSeekableContent(long total)
+        {
+            _total = total;
+            Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        }
+
+        public long BytesPulled { get; private set; }
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+            => throw new NotSupportedException();
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+
+        protected override Task<Stream> CreateContentReadStreamAsync()
+            => Task.FromResult<Stream>(new PullStream(this));
+
+        private sealed class PullStream(CountingNonSeekableContent owner) : Stream
+        {
+            private long _emitted;
+
+            public override bool CanRead => true;
+
+            public override bool CanSeek => false;
+
+            public override bool CanWrite => false;
+
+            public override long Length => throw new NotSupportedException();
+
+            public override long Position
+            {
+                get => throw new NotSupportedException();
+                set => throw new NotSupportedException();
+            }
+
+            public override void Flush()
+            {
+            }
+
+            public override int Read(byte[] buffer, int offset, int count)
+                => Read(buffer.AsSpan(offset, count));
+
+            public override int Read(Span<byte> buffer)
+            {
+                if (_emitted >= owner._total)
+                {
+                    return 0;
+                }
+
+                int toRead = (int)Math.Min(Math.Min(buffer.Length, ChunkSize), owner._total - _emitted);
+                buffer[..toRead].Fill((byte)'x');
+                _emitted += toRead;
+                owner.BytesPulled += toRead;
+                return toRead;
+            }
+
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+
+            public override void SetLength(long value) => throw new NotSupportedException();
+
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
         }
     }
 }

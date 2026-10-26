@@ -6,6 +6,7 @@ using MCPiler.Engine.Execution.Secrets;
 using MCPiler.Engine.Execution.Secrets.RuntimeState;
 using MCPiler.Engine.Manifest;
 using MCPiler.Engine.Manifest.Loading;
+using MCPiler.Engine.Manifest.Model;
 using MCPiler.Engine.Manifest.Sealing;
 using MCPiler.Engine.Manifest.Validation;
 
@@ -202,7 +203,18 @@ public sealed class ManagedGenerationLoader : IDisposable
     private readonly OutboundConnectionPolicy _connections;
     private readonly FileHandleStore _files;
     private readonly RuntimeStateLocation? _runtimeState;
+    private readonly ConfirmedRevisionStore? _confirmed;
     private bool _disposed;
+
+    /// <summary>
+    /// Slots whose durable record could not be read during a recovery replay. A later null read for such a
+    /// slot is not a completed recovery: the record may be momentarily absent while an operator repairs it.
+    /// The slot stays unresolved until a read succeeds (and the record is evaluated) or the process restarts
+    /// (P1-B, R10.2/R11.1).
+    /// </summary>
+    private readonly HashSet<(string Mount, string ProfileId, string Slot)> _unresolvedRecoverySlots = new();
+
+    private readonly object _unresolvedRecoveryGate = new();
 
     private ManagedGenerationLoader(
         RuntimeOptions options,
@@ -214,6 +226,7 @@ public sealed class ManagedGenerationLoader : IDisposable
         _connections = connections;
         _files = files;
         _runtimeState = runtimeState;
+        _confirmed = runtimeState is null ? null : new ConfirmedRevisionStore(runtimeState.Root);
     }
 
     /// <summary>Whether rotated authentication state survives a restart.</summary>
@@ -554,6 +567,350 @@ public sealed class ManagedGenerationLoader : IDisposable
     }
 
     /// <summary>
+    /// The three-state confirmation for a mutable slot identity: <see cref="ConfirmationState.Confirmed"/>,
+    /// <see cref="ConfirmationState.NotConfirmed"/>, or <see cref="ConfirmationState.Unavailable"/>. A caller
+    /// must never treat <see cref="ConfirmationState.Unavailable"/> as an absent confirmation; a conflated
+    /// null would let a caller degrade to the declared revision from a source that could not be read
+    /// (R13.1/R15.11). With no durable journal configured the answer is <c>NotConfirmed</c>.
+    /// </summary>
+    /// <param name="mount">The mount the slot belongs to.</param>
+    /// <param name="profileId">The manifest-local profile identity.</param>
+    /// <param name="slot">The slot identity.</param>
+    internal ConfirmationLookup ReadConfirmedRevision(string mount, string profileId, string slot)
+        => _confirmed?.Lookup(mount, profileId, slot) ?? ConfirmationLookup.NotConfirmed;
+
+    /// <summary>
+    /// Test seam: the durable confirmation journal, when durable runtime state is configured. Production
+    /// code never reads it; a test can inject a transient read or integrity failure deterministically.
+    /// </summary>
+    internal ConfirmedRevisionStore? ConfirmedJournal => _confirmed;
+
+    /// <summary>
+    /// Whether the confirmation journal exists but failed an integrity check. Such a state is operator-visible
+    /// and resolves only through an explicit reset; nothing recovers it automatically (R15.12).
+    /// </summary>
+    public bool ConfirmedJournalIntegrityFailed => _confirmed?.IntegrityFailed ?? false;
+
+    /// <summary>
+    /// Re-evaluates whether the confirmation journal is currently integrity-failed, shared by the managed
+    /// worker diagnostic and the <c>/health/managed</c> probe (R16.5/R16.7). It reads the validated cached
+    /// snapshot when healthy and re-runs the load only while degraded, so a reset performed by another
+    /// process is observed; it never persists. With no durable journal configured the answer is false.
+    /// </summary>
+    public bool IsConfirmedJournalDegraded()
+        => _confirmed?.ReevaluateIntegrityFailed() ?? false;
+
+    /// <summary>
+    /// Runs the explicit operator reset for a permanently integrity-failed confirmation journal, moving it aside
+    /// without deleting it. Refused while the journal is readable and valid (R15.12). With no durable runtime
+    /// state configured the answer is <see cref="JournalResetOutcome.NotConfigured"/>, which is never reported as
+    /// "no journal exists" (R17.3).
+    /// </summary>
+    public JournalResetOutcome ResetConfirmedJournal(out string? asidePath)
+    {
+        asidePath = null;
+        return _confirmed is null
+            ? JournalResetOutcome.NotConfigured
+            : _confirmed.ResetFailedJournal(out asidePath);
+    }
+
+    /// <summary>
+    /// Durably records the revision the Platform confirmed for a mutable slot identity, so a recovery
+    /// report after a restart bases on what the peer holds rather than on the served generation's
+    /// declared revision (R10.6).
+    /// </summary>
+    /// <param name="mount">The mount the slot belongs to.</param>
+    /// <param name="profileId">The manifest-local profile identity.</param>
+    /// <param name="slot">The slot identity.</param>
+    /// <param name="authorityEpoch">The authority epoch the confirmation was made under.</param>
+    /// <param name="runtimeRevision">The revision the Platform confirmed.</param>
+    /// <returns>
+    /// True when the confirmation is durably recorded (or no durable store is configured); false when
+    /// the journal write failed, in which case recovery must not be treated as durably confirmed (R11.2).
+    /// </returns>
+    public bool RecordConfirmedRevision(string mount, string profileId, string slot, long authorityEpoch, long runtimeRevision)
+        => _confirmed is null
+            || _confirmed.Record(mount, profileId, slot, authorityEpoch, runtimeRevision);
+
+    /// <summary>
+    /// Drops confirmation-journal entries for identities the active generation no longer declares, so
+    /// the journal is bounded by the live slot set rather than by every identity ever confirmed (R11.7).
+    /// </summary>
+    /// <remarks>
+    /// This is a side effect on durable state and must run only after a candidate has actually become the
+    /// active generation. Loading a candidate (which host validation can still refuse) must not mutate the
+    /// running generation's journal, or a refused candidate would strand the confirmations of the
+    /// generation that is still serving (R12.2).
+    /// </remarks>
+    /// <param name="mounts">The active generation's mounts.</param>
+    public void PruneConfirmedRevisions(IReadOnlyList<MountedManifest> mounts)
+    {
+        if (_confirmed is null)
+        {
+            return;
+        }
+
+        List<string> activeKeys = [];
+        foreach (MountedManifest mount in mounts)
+        {
+            foreach (AuthenticationProfile profile in mount.Document.EffectiveAuthentication.Profiles)
+            {
+                foreach (AuthenticationSlot slot in profile.Slots)
+                {
+                    activeKeys.Add(ConfirmedRevisionStore.KeyFor(mount.Prefix, profile.Id, slot.Slot));
+                }
+            }
+        }
+
+        _confirmed.Prune(activeKeys);
+    }
+
+    /// <summary>
+    /// Re-derives the reconciliation notifications a restarted process still owes for rotations it
+    /// committed locally before it stopped.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The pending-reconciliation queue is intentionally in memory, so a restart loses the list of
+    /// unsent reports. What is not lost is the durable encrypted record each report describes: the
+    /// loader reads the active generation's declared mutable slots back from the store and, when a
+    /// slot's durable revision has advanced past the revision the delivered generation declares
+    /// within the same authority epoch, reports it again. A slot whose declared epoch already
+    /// supersedes the record is not replayed, because a newer authority has replaced it.
+    /// </para>
+    /// <para>
+    /// This is a re-derivation, not a queue rebuild: it names no value and holds nothing beyond the
+    /// callback, so the same bounded-reconciliation contract the live rotation path obeys applies.
+    /// </para>
+    /// </remarks>
+    /// <param name="generation">The active generation whose declared slots are inspected.</param>
+    /// <param name="rotations">The notification sink, identical to the live rotation callback.</param>
+    /// <param name="cancellationToken">Cancellation.</param>
+    /// <returns>
+    /// The batch outcome. A caller must not treat the replay as a completed recovery while a resume index
+    /// remains or the batch is incomplete; the initial activation replay propagates incompleteness so the
+    /// worker keeps recovery requested (R13.2).
+    /// </returns>
+    public async ValueTask<DurableReplayBatch> ReplayDurableRotationsAsync(
+        ManagedGeneration generation,
+        RotationNotification rotations,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(generation);
+
+        // The mounts alone carry everything a replay needs; retaining the list lets the worker
+        // re-derive pending rotations on its regular reconciliation cadence instead of only at a
+        // generation activation, so an evicted rotation is not stranded until the next activation
+        // (R8.5). The wrapper is only a convenience for the activation path.
+        return await ReplayDurableRotationsAsync(generation.Mounts, rotations, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <inheritdoc cref="ReplayDurableRotationsAsync(ManagedGeneration, RotationNotification, CancellationToken)"/>
+    /// <param name="mounts">The active generation's mounts whose declared slots are inspected.</param>
+    public async ValueTask<DurableReplayBatch> ReplayDurableRotationsAsync(
+        IReadOnlyList<MountedManifest> mounts,
+        RotationNotification rotations,
+        CancellationToken cancellationToken)
+    {
+        return await ReplayDurableRotationsBatchAsync(
+            mounts, rotations, startIndex: 0, maxSlots: int.MaxValue, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Re-derives at most <paramref name="maxSlots"/> declared slots starting at <paramref name="startIndex"/>,
+    /// so a recovery replay over more unreconciled identities than the queue capacity makes bounded forward
+    /// progress instead of re-overflowing on the same head every pass (R9.2).
+    /// </summary>
+    /// <param name="mounts">The active generation's mounts whose declared slots are inspected.</param>
+    /// <param name="rotations">The notification sink, identical to the live rotation callback.</param>
+    /// <param name="startIndex">
+    /// The flattened candidate index to start at. The candidate order (mount, profile, slot) is
+    /// deterministic for one mounts list, so a caller can resume across passes.
+    /// </param>
+    /// <param name="maxSlots">The maximum number of declared slots inspected in this call.</param>
+    /// <param name="cancellationToken">Cancellation.</param>
+    /// <returns>
+    /// The batch outcome: the resume index for the next call (or null when every candidate was
+    /// inspected) and whether any candidate's durable record could not be read. A caller must not
+    /// treat a batch as a completed recovery while a resume index remains or the batch is incomplete.
+    /// </returns>
+    public async ValueTask<DurableReplayBatch> ReplayDurableRotationsBatchAsync(
+        IReadOnlyList<MountedManifest> mounts,
+        RotationNotification rotations,
+        int startIndex,
+        int maxSlots,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(mounts);
+        ArgumentNullException.ThrowIfNull(rotations);
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxSlots, 1);
+
+        if (_runtimeState is null)
+        {
+            return new DurableReplayBatch(null, Incomplete: false);
+        }
+
+        // Flatten the declared slots into one deterministic list. The list is bounded by the generation's
+        // declared configuration, not by any external store, so materializing it is bounded work.
+        var candidates = new List<(string Mount, string ProfileId, string Slot, long AuthorityEpoch, long DeclaredRevision)>();
+        foreach (MountedManifest mount in mounts)
+        {
+            foreach (AuthenticationProfile profile in mount.Document.EffectiveAuthentication.Profiles)
+            {
+                foreach (AuthenticationSlot slot in profile.Slots)
+                {
+                    candidates.Add((mount.Prefix, profile.Id, slot.Slot, slot.AuthorityEpoch, slot.RuntimeRevision));
+                }
+            }
+        }
+
+        if (candidates.Count == 0)
+        {
+            return new DurableReplayBatch(null, Incomplete: false);
+        }
+
+        var start = ((startIndex % candidates.Count) + candidates.Count) % candidates.Count;
+        var processed = 0;
+        var incomplete = false;
+
+        for (var offset = 0; offset < candidates.Count && processed < maxSlots; offset++)
+        {
+            var candidate = candidates[(start + offset) % candidates.Count];
+            processed++;
+
+            ManagedSlotSnapshot? record;
+            try
+            {
+                record = await ReadSlotAsync(candidate.Mount, candidate.ProfileId, candidate.Slot, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (RuntimeStateStoreException)
+            {
+                // An unreadable record is left for a later reconciliation attempt, exactly as the live path
+                // does; replaying an invented value would be worse than silence. The batch is marked
+                // incomplete so the caller does not treat this pass as a completed recovery while a locally
+                // held credential was never reconciled (R10.2). The slot identity is remembered so a later
+                // transient absence of its record is not mistaken for a completed recovery (P1-B).
+                MarkRecoverySlotUnresolved(candidate.Mount, candidate.ProfileId, candidate.Slot);
+                incomplete = true;
+                continue;
+            }
+
+            if (record is null)
+            {
+                if (IsRecoverySlotUnresolved(candidate.Mount, candidate.ProfileId, candidate.Slot))
+                {
+                    // A slot whose durable record could not be read is not resolved by a null read: the
+                    // record can be momentarily absent while an operator repairs it, and treating that as
+                    // "nothing to reconcile" would let recovery complete while a restored, unreconciled
+                    // rotation still diverges from the Platform (P1-B). It stays pending until the record is
+                    // read again (and reconciled) or an explicit terminal operation clears it.
+                    incomplete = true;
+                }
+
+                continue;
+            }
+
+            ClearRecoverySlotUnresolved(candidate.Mount, candidate.ProfileId, candidate.Slot);
+
+            if (record.AuthorityEpoch != candidate.AuthorityEpoch
+                || record.RuntimeRevision <= candidate.DeclaredRevision)
+            {
+                continue;
+            }
+
+
+            // The base the Platform must advance from is the revision it currently holds for this slot.
+            // When a confirmation is durably known for this epoch the declared revision can lag it: the
+            // Platform accepted an earlier rotation and advanced its stored revision while the served
+            // generation still declared the older one, so a declared-revision base is refused as a mismatch
+            // and the newer credential is stranded (R10.6). With no confirmation (several rotations
+            // coalesced before the first report) the declared revision is correct (R9.1).
+            var baseRevision = candidate.DeclaredRevision;
+            if (_confirmed is not null)
+            {
+                ConfirmationLookup confirmation = _confirmed.Lookup(
+                    candidate.Mount, candidate.ProfileId, candidate.Slot);
+
+                if (confirmation.State == ConfirmationState.Unavailable)
+                {
+                    // The confirmation journal could not be read or failed its integrity check. Treating
+                    // that as "no confirmation" would base the report on the declared revision and could
+                    // have the Platform refuse it as a mismatch and the worker drop it terminally. Defer
+                    // this slot and keep the batch incomplete so a later attempt retries it (R13.1).
+                    incomplete = true;
+                    continue;
+                }
+
+                if (confirmation.State == ConfirmationState.Confirmed
+                    && confirmation.Epoch == record.AuthorityEpoch)
+                {
+                    if (confirmation.Revision >= record.RuntimeRevision)
+                    {
+                        // The durable record is already reconciled at or below the confirmed revision; there is
+                        // nothing left to report. This is the durable counterpart of the in-memory
+                        // acknowledged-version memory.
+                        continue;
+                    }
+
+                    baseRevision = confirmation.Revision;
+                }
+            }
+
+            await rotations(
+                candidate.Mount,
+                candidate.ProfileId,
+                candidate.Slot,
+                record.AuthorityEpoch,
+                baseRevision,
+                record.RuntimeRevision,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        var next = start + processed;
+        return new DurableReplayBatch(next >= candidates.Count ? null : next, incomplete);
+    }
+
+    private void MarkRecoverySlotUnresolved(string mount, string profileId, string slot)
+    {
+        lock (_unresolvedRecoveryGate)
+        {
+            _unresolvedRecoverySlots.Add((mount, profileId, slot));
+        }
+    }
+
+    private bool IsRecoverySlotUnresolved(string mount, string profileId, string slot)
+    {
+        lock (_unresolvedRecoveryGate)
+        {
+            return _unresolvedRecoverySlots.Contains((mount, profileId, slot));
+        }
+    }
+
+    private void ClearRecoverySlotUnresolved(string mount, string profileId, string slot)
+    {
+        lock (_unresolvedRecoveryGate)
+        {
+            _unresolvedRecoverySlots.Remove((mount, profileId, slot));
+        }
+    }
+
+    /// <summary>Test seam: whether any recovery slot is currently unresolved after a read failure.</summary>
+    internal bool HasUnresolvedRecoverySlotsForTest
+    {
+        get
+        {
+            lock (_unresolvedRecoveryGate)
+            {
+                return _unresolvedRecoverySlots.Count > 0;
+            }
+        }
+    }
+
+    /// <summary>
     /// Every provider key the mount's Manifests declare, in a deterministic order.
     /// </summary>
     private static IReadOnlyList<string> RequiredProviderKeys(MountedManifest mount)
@@ -627,3 +984,16 @@ public sealed class ManagedGenerationLoader : IDisposable
     /// </remarks>
     public void Dispose() => _disposed = true;
 }
+
+/// <summary>
+/// The outcome of one bounded durable-rotation replay batch.
+/// </summary>
+/// <param name="NextCursor">
+/// The resume index for the next batch, or null when every candidate has been inspected. A non-null
+/// value means unreconciled candidates remain, so the caller must not treat recovery as complete.
+/// </param>
+/// <param name="Incomplete">
+/// True when at least one candidate slot could not be read because its durable record raised a store
+/// failure. The caller must retry rather than treat the batch as a completed recovery.
+/// </param>
+public readonly record struct DurableReplayBatch(int? NextCursor, bool Incomplete);

@@ -1,3 +1,5 @@
+using MCPiler.Engine.Runtime;
+
 namespace MCPiler.Engine.Execution.ResponseCaching;
 
 internal enum ResponseFlightAdmissionKind
@@ -15,12 +17,21 @@ internal sealed class ResponseFlightRegistry : IDisposable
     private readonly object _gate = new();
     private readonly Dictionary<ResponseCacheKey, ResponseFlightState> _flights = [];
     private readonly int _maximumFlights;
+    private readonly int _maximumWaiters;
+    private int _waiterCount;
     private bool _disposed;
 
-    internal ResponseFlightRegistry(int maximumFlights)
+    internal ResponseFlightRegistry(int maximumFlights, int maximumWaiters)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(maximumFlights);
+        ArgumentOutOfRangeException.ThrowIfNegative(maximumWaiters);
         _maximumFlights = maximumFlights;
+        _maximumWaiters = maximumWaiters;
+    }
+
+    internal ResponseFlightRegistry(int maximumFlights)
+        : this(maximumFlights, ResponseCacheOptions.HardMaxWaitersPerMount)
+    {
     }
 
     internal int Count
@@ -40,13 +51,7 @@ internal sealed class ResponseFlightRegistry : IDisposable
         {
             lock (_gate)
             {
-                int count = 0;
-                foreach (ResponseFlightState state in _flights.Values)
-                {
-                    count += state.WaiterCount;
-                }
-
-                return count;
+                return _waiterCount;
             }
         }
     }
@@ -64,7 +69,16 @@ internal sealed class ResponseFlightRegistry : IDisposable
 
             if (_flights.TryGetValue(key, out ResponseFlightState? existing))
             {
+                // Waiter admission is bounded independently of producer capacity. A burst that all
+                // targets one in-flight key would otherwise retain an unbounded number of waiters,
+                // each holding request/task state, behind a single producer slot.
+                if (_waiterCount >= _maximumWaiters)
+                {
+                    return new ResponseFlightAdmission(ResponseFlightAdmissionKind.CapacityBypass, null);
+                }
+
                 existing.RegisterWaiter();
+                _waiterCount++;
                 return new ResponseFlightAdmission(
                     ResponseFlightAdmissionKind.Joined,
                     new ResponseFlightLease(this, key, existing, isProducer: false));
@@ -80,6 +94,17 @@ internal sealed class ResponseFlightRegistry : IDisposable
             return new ResponseFlightAdmission(
                 ResponseFlightAdmissionKind.Producer,
                 new ResponseFlightLease(this, key, state, isProducer: true));
+        }
+    }
+
+    internal void ReleaseWaiter()
+    {
+        lock (_gate)
+        {
+            if (_waiterCount > 0)
+            {
+                _waiterCount--;
+            }
         }
     }
 
@@ -169,9 +194,21 @@ internal sealed class ResponseFlightLease : IDisposable
 
     public void Dispose()
     {
-        if (_isProducer && Interlocked.Exchange(ref _completed, 1) == 0)
+        if (_isProducer)
         {
-            _registry.Complete(_key, _state, null);
+            if (Interlocked.Exchange(ref _completed, 1) == 0)
+            {
+                _registry.Complete(_key, _state, null);
+            }
+
+            return;
+        }
+
+        // A joined waiter releases its admission slot exactly once, whether it consumed the
+        // producer's result or left the wait by cancellation/timeout.
+        if (Interlocked.Exchange(ref _completed, 1) == 0)
+        {
+            _registry.ReleaseWaiter();
         }
     }
 }

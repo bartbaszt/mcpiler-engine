@@ -227,4 +227,147 @@ public sealed class CommandLineTests
         Assert.False(HostConfiguration.TryBind(parsed.Mounts, parsed.Settings, out _, out IReadOnlyList<string> refusals));
         Assert.Contains(refusals, refusal => refusal.Contains("'base-url'", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public void An_auth_authorize_command_carries_its_targets_and_redirect()
+    {
+        CommandLineResult parsed = CommandLine.Parse(
+            ["auth", "authorize", "/api", "my-profile", "--oauth-redirect-uri", "http://127.0.0.1:57431/oauth/callback"]);
+
+        Assert.Equal(HostVerb.AuthAuthorize, parsed.Verb);
+        Assert.Empty(parsed.Refusals);
+        Assert.Equal(["/api", "my-profile"], parsed.Targets);
+        Assert.Equal("http://127.0.0.1:57431/oauth/callback", parsed.OAuthRedirectUri);
+    }
+
+    [Fact]
+    public void An_auth_authorize_without_a_full_target_is_refused()
+    {
+        CommandLineResult parsed = CommandLine.Parse(["auth", "authorize", "/api"]);
+
+        Assert.Null(parsed.Verb);
+        Assert.Contains(parsed.Refusals, refusal => refusal.Contains("mount prefix and a profile id", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void An_unknown_auth_subcommand_is_refused()
+    {
+        CommandLineResult parsed = CommandLine.Parse(["auth", "rotate", "/api", "my-profile"]);
+
+        Assert.Null(parsed.Verb);
+        Assert.Contains(parsed.Refusals, refusal => refusal.Contains("not one of: authorize, status, clear, events, authority-reset", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void An_auth_status_takes_no_target_or_both()
+    {
+        CommandLineResult inventory = CommandLine.Parse(["auth", "status"]);
+        CommandLineResult one = CommandLine.Parse(["auth", "status", "/api", "my-profile"]);
+        CommandLineResult partial = CommandLine.Parse(["auth", "status", "/api"]);
+
+        Assert.Equal(HostVerb.AuthStatus, inventory.Verb);
+        Assert.Empty(inventory.Targets);
+        Assert.Equal(HostVerb.AuthStatus, one.Verb);
+        Assert.Equal(["/api", "my-profile"], one.Targets);
+        Assert.Null(partial.Verb);
+        Assert.Contains(partial.Refusals, refusal => refusal.Contains("both a mount prefix and a profile id", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void An_auth_clear_carries_its_target_and_takes_no_redirect()
+    {
+        CommandLineResult parsed = CommandLine.Parse(["auth", "clear", "/api", "my-profile"]);
+
+        Assert.Equal(HostVerb.AuthClear, parsed.Verb);
+        Assert.Empty(parsed.Refusals);
+        Assert.Equal(["/api", "my-profile"], parsed.Targets);
+        Assert.Null(parsed.OAuthRedirectUri);
+    }
+
+    [Fact]
+    public void An_auth_events_command_takes_no_target()
+    {
+        CommandLineResult parsed = CommandLine.Parse(["auth", "events"]);
+        CommandLineResult extra = CommandLine.Parse(["auth", "events", "/api"]);
+
+        Assert.Equal(HostVerb.AuthEvents, parsed.Verb);
+        Assert.Empty(parsed.Targets);
+        Assert.False(extra.Valid);
+        Assert.NotEmpty(extra.Refusals);
+    }
+
+    [Fact]
+    public void An_auth_authority_reset_carries_its_target_and_acknowledgement()
+    {
+        CommandLineResult parsed = CommandLine.Parse(
+            ["auth", "authority-reset", "/api", "my-profile", "--acknowledge-irrecoverable"]);
+        CommandLineResult unacknowledged = CommandLine.Parse(["auth", "authority-reset", "/api", "my-profile"]);
+
+        Assert.Equal(HostVerb.AuthAuthorityReset, parsed.Verb);
+        Assert.Empty(parsed.Refusals);
+        Assert.Equal(["/api", "my-profile"], parsed.Targets);
+        Assert.True(parsed.AcknowledgeReset);
+        Assert.Equal(HostVerb.AuthAuthorityReset, unacknowledged.Verb);
+        Assert.False(unacknowledged.AcknowledgeReset);
+    }
+
+    [Fact]
+    public void An_issuer_readiness_command_is_read()
+    {
+        CommandLineResult parsed = CommandLine.Parse(["issuer", "readiness"]);
+
+        Assert.Equal(HostVerb.IssuerReadiness, parsed.Verb);
+        Assert.Empty(parsed.Refusals);
+        Assert.Empty(parsed.Targets);
+    }
+
+    [Fact]
+    public void An_unknown_or_missing_issuer_subcommand_is_refused()
+    {
+        CommandLineResult missing = CommandLine.Parse(["issuer"]);
+        CommandLineResult unknown = CommandLine.Parse(["issuer", "probe"]);
+
+        Assert.Null(missing.Verb);
+        Assert.Contains(missing.Refusals, refusal => refusal.Contains("readiness", StringComparison.Ordinal));
+        Assert.Null(unknown.Verb);
+        Assert.Contains(unknown.Refusals, refusal => refusal.Contains("'probe'", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void The_loopback_authorization_allowance_reaches_the_settings_a_verb_binds()
+    {
+        CommandLineResult parsed = CommandLine.Parse(
+            ["auth", "authorize", "/api", "my-profile",
+             "--oauth-redirect-uri", "http://127.0.0.1:57431/oauth/callback",
+             "--allow-loopback-authorization", "true"]);
+
+        Assert.True(parsed.Valid);
+        Assert.Contains(
+            new KeyValuePair<string, string>("allow-loopback-authorization", "true"),
+            parsed.Settings);
+    }
+
+    [Fact]
+    public void An_unreadable_acknowledgement_is_refused_rather_than_ignored()
+    {
+        CommandLineResult parsed = CommandLine.Parse(
+            ["auth", "authority-reset", "/api", "my-profile", "--acknowledge-irrecoverable=maybe"]);
+
+        Assert.False(parsed.Valid);
+        Assert.False(parsed.AcknowledgeReset);
+        Assert.Contains(parsed.Refusals, refusal => refusal.Contains("--acknowledge-irrecoverable", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_repeated_oauth_redirect_uri_is_refused()
+    {
+        CommandLineResult parsed = CommandLine.Parse(
+        [
+            "auth", "authorize", "/api", "my-profile",
+            "--oauth-redirect-uri", "http://127.0.0.1:57431/oauth/callback",
+            "--oauth-redirect-uri", "http://127.0.0.1:57432/oauth/callback",
+        ]);
+
+        Assert.Contains(parsed.Refusals, refusal => refusal.Contains("more than once", StringComparison.Ordinal));
+    }
 }

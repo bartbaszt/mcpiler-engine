@@ -240,6 +240,33 @@ public sealed class AccessTokenCacheTests
     }
 
     [Fact]
+    public async Task Idle_per_profile_gates_are_removed_so_synchronization_state_is_bounded()
+    {
+        // MTH-RUN-4: many distinct profiles completing single-flight work over time must not leave
+        // per-profile synchronization state behind. Once the last caller for a key leaves, its gate
+        // is removed; a later caller for the same key simply recreates it.
+        using var singleFlight = new AccessTokenSingleFlight();
+
+        for (int index = 0; index < 500; index++)
+        {
+            await singleFlight.RunAsync(
+                $"profile-{index}",
+                _ => ValueTask.FromResult("ok"),
+                CancellationToken.None);
+        }
+
+        Assert.Equal(0, singleFlight.Count);
+
+        // Reuse of a previously seen key still works after its idle gate was removed.
+        var reused = await singleFlight.RunAsync(
+            "profile-42",
+            _ => ValueTask.FromResult("again"),
+            CancellationToken.None);
+        Assert.Equal("again", reused);
+        Assert.Equal(0, singleFlight.Count);
+    }
+
+    [Fact]
     public async Task A_disposed_single_flight_refuses_use()
     {
         var singleFlight = new AccessTokenSingleFlight();

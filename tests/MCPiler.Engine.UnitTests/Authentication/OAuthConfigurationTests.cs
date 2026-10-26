@@ -322,6 +322,129 @@ public sealed class OAuthConfigurationTests
         Assert.Equal(43, first.Length);
     }
 
+    [Fact]
+    public void The_reserved_parameter_set_names_every_protocol_owned_field()
+    {
+        Assert.Equal(
+            [
+                "response_type",
+                "client_id",
+                "redirect_uri",
+                "code_challenge",
+                "code_challenge_method",
+                "state",
+                "scope",
+                "resource",
+                "audience",
+            ],
+            OAuthAuthorizationRequest.ReservedParameters);
+    }
+
+    [Fact]
+    public void An_authorization_request_emits_one_exact_protocol_owned_parameter_set()
+    {
+        var configuration = Configuration(
+            """
+            {
+              "clientId": "example-client",
+              "tokenEndpoint": "https://auth.example.com/token",
+              "authorizationEndpoint": "https://auth.example.com/authorize",
+              "scopes": ["write", "read"],
+              "resource": "https://api.example.com",
+              "audience": "api"
+            }
+            """);
+
+        var uri = OAuthAuthorizationRequest.Build(
+            configuration,
+            new Uri("http://127.0.0.1:57431/callback"),
+            "state-canary",
+            "challenge-canary");
+
+        var pairs = ParseQuery(uri);
+        Assert.Equal("code", One(pairs, "response_type"));
+        Assert.Equal("example-client", One(pairs, "client_id"));
+        Assert.Equal("http://127.0.0.1:57431/callback", One(pairs, "redirect_uri"));
+        Assert.Equal("read write", One(pairs, "scope"));
+        Assert.Equal("https://api.example.com", One(pairs, "resource"));
+        Assert.Equal("api", One(pairs, "audience"));
+        Assert.Equal("S256", One(pairs, "code_challenge_method"));
+        Assert.Equal("challenge-canary", One(pairs, "code_challenge"));
+        Assert.Equal("state-canary", One(pairs, "state"));
+
+        // Exactly one challenge, whatever the scope order, so a provider sees one PKCE field.
+        Assert.Single(pairs, pair => pair.Key == "code_challenge");
+        Assert.DoesNotContain(pairs, pair => pair.Key is "code_verifier");
+    }
+
+    [Theory]
+    [InlineData("response_type")]
+    [InlineData("client_id")]
+    [InlineData("redirect_uri")]
+    [InlineData("code_challenge")]
+    [InlineData("code_challenge_method")]
+    [InlineData("state")]
+    [InlineData("scope")]
+    [InlineData("resource")]
+    [InlineData("audience")]
+    public void An_authorization_request_refuses_an_extension_that_overrides_a_protocol_field(string name)
+    {
+        var configuration = Configuration(
+            $$"""
+            {
+              "clientId": "example-client",
+              "tokenEndpoint": "https://auth.example.com/token",
+              "authorizationEndpoint": "https://auth.example.com/authorize",
+              "authorizationParameters": { "{{name}}": "evil" }
+            }
+            """);
+
+        var exception = Assert.Throws<OAuthAuthorizationAttemptException>(() =>
+            OAuthAuthorizationRequest.Build(
+                configuration,
+                new Uri("http://127.0.0.1:57431/callback"),
+                "state-canary",
+                "challenge-canary"));
+
+        Assert.Equal(OAuthAuthorizationAttemptError.AuthorizationParameterRefused, exception.Error);
+    }
+
+    [Fact]
+    public void An_authorization_request_refuses_an_encoded_name_collision()
+    {
+        // '%73tate' decodes to 'state'; the reader sees the literal name, so the engine decodes it.
+        var configuration = Configuration(
+            """
+            {
+              "clientId": "example-client",
+              "tokenEndpoint": "https://auth.example.com/token",
+              "authorizationEndpoint": "https://auth.example.com/authorize",
+              "authorizationParameters": { "%73tate": "shadow" }
+            }
+            """);
+
+        var exception = Assert.Throws<OAuthAuthorizationAttemptException>(() =>
+            OAuthAuthorizationRequest.Build(
+                configuration,
+                new Uri("http://127.0.0.1:57431/callback"),
+                "state-canary",
+                "challenge-canary"));
+
+        Assert.Equal(OAuthAuthorizationAttemptError.AuthorizationParameterRefused, exception.Error);
+    }
+
+    private static List<KeyValuePair<string, string>> ParseQuery(Uri uri)
+    {
+        Assert.True(OAuthAuthorizationRequest.TryParseQuery(uri.Query, out var pairs));
+        return pairs;
+    }
+
+    private static string One(List<KeyValuePair<string, string>> pairs, string name)
+        => Assert.Single(pairs, pair => pair.Key == name).Value;
+
+    private static OAuthStrategyConfiguration Configuration(string text)
+        => OAuthStrategyConfiguration.FromConfiguration(Json(text), authorizationCodeRequired: false);
+
     private static System.Text.Json.Nodes.JsonObject Json(string text) =>
         CanonicalJson.Parse(Encoding.UTF8.GetBytes(text))!.AsObject();
 }

@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
 
@@ -38,19 +39,22 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
     private static readonly TimeSpan ShutdownBudget = TimeSpan.FromSeconds(5);
 
     private readonly WebApplication _app;
+    private readonly AuthorizationCodeProviderScenario? _authorizationCode;
 
     private FakeAuthorizationServer(
         WebApplication app,
         RSA signingKey,
         RsaSecurityKey parameters,
         bool active,
-        Func<int> introspectionCalls)
+        Func<int> introspectionCalls,
+        AuthorizationCodeProviderScenario? authorizationCode)
     {
         _app = app;
         Key = signingKey;
         SigningParameters = parameters;
         Active = active;
         _introspectionCalls = introspectionCalls;
+        _authorizationCode = authorizationCode;
     }
 
     /// <summary>The loopback address the server bound, which is also the issuer identifier.</summary>
@@ -67,6 +71,7 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
 
     /// <summary>How many introspection requests this fake has received.</summary>
     public int IntrospectionCalls => _introspectionCalls();
+    public AuthorizationCodeProviderScenario? AuthorizationCode => _authorizationCode;
 
     private readonly Func<int> _introspectionCalls;
 
@@ -141,7 +146,8 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
         string? introspectionClientSecret = null,
         bool publishesIntrospection = true,
         IntrospectionGate? introspectionGate = null,
-        int? introspectionExpiresInSeconds = null)
+        int? introspectionExpiresInSeconds = null,
+        AuthorizationCodeProviderScenario? authorizationCode = null)
     {
         if (introspectionClientId is null ^ introspectionClientSecret is null)
         {
@@ -155,6 +161,9 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
 
         WebApplicationBuilder builder = WebApplication.CreateSlimBuilder();
         builder.WebHost.UseUrls("http://127.0.0.1:0");
+        // ASP.NET's default HTTP diagnostics print authorization query strings, including
+        // short-lived OAuth codes and state. The fixture must never emit those values.
+        builder.Logging.ClearProviders();
 
         WebApplication app = builder.Build();
 
@@ -169,6 +178,11 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
         {
             string path = context.Request.Path.Value ?? string.Empty;
             string host = context.Request.Host.Value ?? string.Empty;
+
+            if (authorizationCode is not null && await authorizationCode.HandleAsync(context))
+            {
+                return;
+            }
 
             if (path.EndsWith("/.well-known/oauth-authorization-server", StringComparison.Ordinal))
             {
@@ -185,6 +199,15 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
                         + "/jwks\",\"introspection_endpoint_auth_methods_supported\":[\"client_secret_basic\"]}"
                     : "{\"issuer\":\"" + issuer
                         + "\",\"jwks_uri\":\"http://" + host + "/jwks\"}";
+
+                if (authorizationCode is not null)
+                {
+                    var document = JsonNode.Parse(metadata)!.AsObject();
+                    document["authorization_endpoint"] = "http://" + host + "/authorize";
+                    document["token_endpoint"] = "http://" + host + "/token";
+                    document["code_challenge_methods_supported"] = new JsonArray("S256");
+                    metadata = document.ToJsonString();
+                }
 
                 await context.Response.WriteAsync(metadata, context.RequestAborted);
                 return;
@@ -254,7 +277,8 @@ internal sealed class FakeAuthorizationServer : IAsyncDisposable
             signing,
             parameters,
             active,
-            () => Volatile.Read(ref introspectionCalls))
+            () => Volatile.Read(ref introspectionCalls),
+            authorizationCode)
         {
             Address = new Uri(bound, UriKind.Absolute),
         };

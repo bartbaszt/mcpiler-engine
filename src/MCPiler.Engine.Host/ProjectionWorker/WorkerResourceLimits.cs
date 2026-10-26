@@ -8,6 +8,19 @@ using MCPiler.Engine.Runtime.Projection;
 
 namespace MCPiler.Engine.Host.ProjectionWorker;
 
+/// <summary>The host platforms for which worker memory confinement is or is not implemented.</summary>
+internal enum WorkerHostPlatform
+{
+    /// <summary>Windows: a Job Object with <c>JOB_OBJECT_LIMIT_PROCESS_MEMORY</c>.</summary>
+    Windows,
+
+    /// <summary>Linux: <c>RLIMIT_AS</c> plus a managed heap cap.</summary>
+    Linux,
+
+    /// <summary>Any other host, including macOS: confinement is unavailable and evaluation is refused.</summary>
+    Other,
+}
+
 /// <summary>
 /// Applies the operating system's per-process memory confinement to the worker itself.
 /// </summary>
@@ -85,12 +98,54 @@ internal static class WorkerResourceLimits
     private const uint JobObjectLimitProcessMemory = 0x00000100;
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
 
+    /// <summary>
+    /// A test seam for the detected host platform. Production reads the real operating system;
+    /// tests override it to prove the unsupported-host fail-closed path without a macOS host. The
+    /// value flows with the async execution context so it cannot leak across parallel tests.
+    /// </summary>
+    private static readonly AsyncLocal<WorkerHostPlatform?> PlatformOverride = new();
+
+    /// <summary>The confinement platform this process is running on.</summary>
+    internal static WorkerHostPlatform CurrentPlatform
+        => PlatformOverride.Value
+            ?? (OperatingSystem.IsWindows()
+                ? WorkerHostPlatform.Windows
+                : OperatingSystem.IsLinux()
+                    ? WorkerHostPlatform.Linux
+                    : WorkerHostPlatform.Other);
+
+    /// <summary>Test seam: overrides the detected platform for the current async flow.</summary>
+    internal static IDisposable OverridePlatformForTesting(WorkerHostPlatform? platform)
+    {
+        WorkerHostPlatform? previous = PlatformOverride.Value;
+        PlatformOverride.Value = platform;
+        return new PlatformRestore(previous);
+    }
+
+    private sealed class PlatformRestore(WorkerHostPlatform? previous) : IDisposable
+    {
+        public void Dispose() => PlatformOverride.Value = previous;
+    }
+
     /// <summary>Applies the platform's confinement to this process.</summary>
     /// <param name="committedBytes">The Windows committed-memory limit.</param>
     /// <param name="addressSpaceBytes">The Linux address-space (RLIMIT_AS) limit.</param>
     /// <param name="applied">What was applied, for the ready handshake.</param>
     /// <param name="refusal">Why confinement could not be applied.</param>
     internal static bool TryApply(
+        long committedBytes,
+        long addressSpaceBytes,
+        out string applied,
+        out string? refusal)
+        => TryApply(CurrentPlatform, committedBytes, addressSpaceBytes, out applied, out refusal);
+
+    /// <summary>
+    /// Applies confinement for one explicit platform. Confinement exists only on Windows (Job
+    /// Object) and Linux (RLIMIT_AS); every other host, including macOS, is unsupported and is
+    /// refused fail-closed rather than being assumed protected.
+    /// </summary>
+    internal static bool TryApply(
+        WorkerHostPlatform platform,
         long committedBytes,
         long addressSpaceBytes,
         out string applied,
@@ -108,16 +163,16 @@ internal static class WorkerResourceLimits
             return false;
         }
 
-        if (OperatingSystem.IsWindows())
+        return platform switch
         {
-            return TryApplyWindowsJob(committedBytes, out applied, out refusal);
-        }
+            WorkerHostPlatform.Windows => TryApplyWindowsJob(committedBytes, out applied, out refusal),
+            WorkerHostPlatform.Linux => TryApplyPosixLimit(addressSpaceBytes, out applied, out refusal),
+            _ => RefuseUnsupportedHost(out refusal),
+        };
+    }
 
-        if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
-        {
-            return TryApplyPosixLimit(addressSpaceBytes, out applied, out refusal);
-        }
-
+    private static bool RefuseUnsupportedHost(out string? refusal)
+    {
         refusal = string.Create(
             CultureInfo.InvariantCulture,
             $"No memory confinement is implemented for {RuntimeInformation.OSDescription}.");
@@ -426,7 +481,9 @@ internal static class WorkerResourceLimits
         applied = string.Empty;
         refusal = null;
 
-        if (!TryGetResourceLimit(ResourceAddressSpace, out long soft, out long hard))
+        int resource = AddressSpaceResourceId();
+
+        if (!TryGetResourceLimit(resource, out long soft, out long hard))
         {
             refusal = "The worker could not read its own address-space limit.";
             return false;
@@ -435,7 +492,7 @@ internal static class WorkerResourceLimits
         // Never raise a limit the host set; only narrow it.
         long target = Math.Min(addressSpaceBytes, hard == Unlimited ? addressSpaceBytes : hard);
 
-        if (!TrySetResourceLimit(ResourceAddressSpace, target, hard == Unlimited ? target : hard))
+        if (!TrySetResourceLimit(resource, target, hard == Unlimited ? target : hard))
         {
             refusal = string.Create(
                 CultureInfo.InvariantCulture,
@@ -443,7 +500,7 @@ internal static class WorkerResourceLimits
             return false;
         }
 
-        if (!TryGetResourceLimit(ResourceAddressSpace, out long appliedSoft, out _) || appliedSoft != target)
+        if (!TryGetResourceLimit(resource, out long appliedSoft, out _) || appliedSoft != target)
         {
             refusal = "The applied address-space limit does not match the requested value.";
             return false;
@@ -453,7 +510,15 @@ internal static class WorkerResourceLimits
         return true;
     }
 
-    private const int ResourceAddressSpace = 9;
+    /// <summary>
+    /// The <c>getrlimit</c>/<c>setrlimit</c> resource id that names the address-space limit on the
+    /// only supported POSIX host. Linux numbers it 9. No other POSIX host is supported: an
+    /// unsupported host is refused rather than mapped to a different kernel's resource numbering.
+    /// </summary>
+    internal static int AddressSpaceResourceId() => LinuxResourceAddressSpace;
+
+    private const int LinuxResourceAddressSpace = 9;
+
     private const long Unlimited = -1;
     private const int JobObjectExtendedLimitInformationClass = JobObjectExtendedLimitInformation;
 

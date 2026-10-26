@@ -182,7 +182,10 @@ public sealed class EngineExecution : IDisposable
                         generationLabel,
                         started.ResponseCache,
                         identityKey,
-                        timeProvider)
+                        timeProvider,
+                        mount.Document.AgentSurface.Operations
+                            .Select(static op => op.Slug)
+                            .ToHashSet(StringComparer.Ordinal))
                     : null;
 
                 ExecutionService executions = new(
@@ -446,7 +449,55 @@ public sealed class EngineExecution : IDisposable
             return null;
         }
 
-        return CacheForPrefix(mountPrefix)?.ClearScope(operationSlug);
+        ResponseCache? cache = CacheForPrefix(mountPrefix);
+        if (cache is null)
+        {
+            return null;
+        }
+
+        if (operationSlug is { Length: > 0 })
+        {
+            // Only a declared slug advances an operation epoch; an unknown slug is refused without
+            // growing the epoch map, so a caller-supplied value cannot allocate state.
+            cache.TryClearOperation(operationSlug, out ResponseCacheClearOutcome outcome);
+            return outcome;
+        }
+
+        return cache.ClearScope(null);
+    }
+
+    /// <summary>
+    /// Clears one mount's cache, optionally one declared operation, distinguishing a mount that is
+    /// not served, a mount whose caching is disabled, and an operation slug the mount does not declare.
+    /// </summary>
+    public ResponseCacheScopedClear ClearResponseCacheScoped(string mountPrefix, string? operationSlug)
+    {
+        if (string.IsNullOrEmpty(mountPrefix))
+        {
+            return new ResponseCacheScopedClear(ResponseCacheClearScope.MountUnknown, null);
+        }
+
+        ResponseCache? cache = CacheForPrefix(mountPrefix);
+        if (cache is null)
+        {
+            // Distinguish a prefix that names no mount (unknown) from a served mount that carries no
+            // cache (caching disabled). An unknown mount is a refusal, not a successful no-op.
+            return MountPrefixes.Contains(mountPrefix, StringComparer.Ordinal)
+                ? new ResponseCacheScopedClear(ResponseCacheClearScope.CachingDisabled, null)
+                : new ResponseCacheScopedClear(ResponseCacheClearScope.MountUnknown, null);
+        }
+
+        if (operationSlug is { Length: > 0 })
+        {
+            if (!cache.TryClearOperation(operationSlug, out ResponseCacheClearOutcome scoped))
+            {
+                return new ResponseCacheScopedClear(ResponseCacheClearScope.OperationUnknown, scoped);
+            }
+
+            return new ResponseCacheScopedClear(ResponseCacheClearScope.Cleared, scoped);
+        }
+
+        return new ResponseCacheScopedClear(ResponseCacheClearScope.Cleared, cache.ClearScope(null));
     }
 
     /// <summary>The mounted prefixes this execution owns, in mount order.</summary>
@@ -464,6 +515,58 @@ public sealed class EngineExecution : IDisposable
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The authentication runtime one mounted prefix serves through, or null when this execution
+    /// serves no such prefix.
+    /// </summary>
+    /// <remarks>
+    /// An in-host operator mutation reaches the mount through the runtime the serving path acquires
+    /// through, so the clear shares that mount's slot gate, its access-token cache and its durable
+    /// store instance. A second runtime over the same mount would fence nothing: it would hold a
+    /// different gate and would not be the cache a served request reads.
+    /// </remarks>
+    internal AuthenticationRuntime? MountAuthentication(string mountPrefix)
+    {
+        foreach ((MountedManifest mount, MountExecution execution) in _mounts)
+        {
+            if (string.Equals(mount.Prefix, mountPrefix, StringComparison.Ordinal))
+            {
+                return execution.Authentication;
+            }
+        }
+
+        return null;
+    }
+
+    public ResponseCacheObservation? ObserveScopedResponseCache(string mountPrefix, string? operationSlug)
+    {
+        if (string.IsNullOrEmpty(mountPrefix))
+        {
+            return null;
+        }
+
+        return CacheForPrefix(mountPrefix)?.Observe(operationSlug);
+    }
+
+    /// <summary>
+    /// Whether the served mount with this prefix declares an operation with this slug.
+    /// </summary>
+    /// <remarks>
+    /// Used by an operator channel to reject an unknown slug before any cache state is touched.
+    /// </remarks>
+    public bool MountDeclaresOperation(string mountPrefix, string operationSlug)
+    {
+        foreach ((MountedManifest mount, _) in _mounts)
+        {
+            if (string.Equals(mount.Prefix, mountPrefix, StringComparison.Ordinal))
+            {
+                return mount.Document.AgentSurface.Operation(operationSlug) is not null;
+            }
+        }
+
+        return false;
     }
 
 
@@ -486,6 +589,8 @@ public sealed class EngineExecution : IDisposable
     {
         public ExecutionService Executions { get; } = executions;
 
+        public AuthenticationRuntime Authentication { get; } = authentication;
+
         public ResponseCache? Cache { get; } = cache;
 
         public void Dispose()
@@ -493,9 +598,30 @@ public sealed class EngineExecution : IDisposable
             // Providers first: a retired generation's secrets must stop resolving before the
             // execution that could still read them finishes disposing.
             providers?.Dispose();
-            authentication.Dispose();
+            Authentication.Dispose();
             clients.Dispose();
             Cache?.Dispose();
         }
     }
 }
+
+/// <summary>The disposition of a scoped cache clear request.</summary>
+public enum ResponseCacheClearScope
+{
+    /// <summary>The operation (or whole mount) was cleared.</summary>
+    Cleared,
+
+    /// <summary>No mount with that prefix is served by this generation.</summary>
+    MountUnknown,
+
+    /// <summary>The mount is served but carries no cache (caching disabled).</summary>
+    CachingDisabled,
+
+    /// <summary>The mount declares no operation with the requested slug; nothing was cleared.</summary>
+    OperationUnknown,
+}
+
+/// <summary>A scoped clear result, or null when nothing could be cleared.</summary>
+public sealed record ResponseCacheScopedClear(
+    ResponseCacheClearScope Scope,
+    ResponseCacheClearOutcome? Outcome);

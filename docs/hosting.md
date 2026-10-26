@@ -87,12 +87,15 @@ The host accepts the following settings:
 | `--introspection-client-id <id>` | Client identity the process authenticates as to the introspection endpoint. Paired with `--introspection-client-secret-file`. |
 | `--introspection-client-secret-file <file>` | File holding that client's secret. A path, never a value: a command-line secret is visible to every process listing. Paired with `--introspection-client-id`. |
 | `--jwks-uri <url>` | Override the issuer's published JWKS URI. |
+| `--oidc-discovery-fallback <true\|false>` | Opt-in restricted issuer metadata fallback, default `false`. When `true`, an exact HTTP 404/410 from the configured issuer's RFC 8414 metadata URL permits one request to the issuer-derived OIDC `openid-configuration` URL; malformed or wrong-issuer metadata, redirects, 401/403, 5xx, timeouts and DNS/TLS failures never fall back. Valid for both validation modes; refused together with an explicit endpoint override, which replaces discovery. |
 | `--drain-timeout-seconds <n>` | Positive whole-second shutdown drain window. Default: 100 seconds. |
 | `--response-cache-max-body-bytes <n>` | Narrows the hard 8 MiB per-entry body ceiling. Zero disables response caching. |
 | `--response-cache-max-retained-bytes <n>` | Narrows the hard 256 MiB accounted-memory ceiling per mount. Zero disables response caching. |
 | `--response-cache-max-entries <n>` | Narrows the hard 4,096-entry ceiling per mount. Zero disables response caching. |
 | `--response-cache-max-ttl-seconds <n>` | Narrows the hard 86,400-second effective TTL ceiling. Zero disables response caching. |
 | `--response-cache-operator-secret-file <file>` | Enables the authenticated response-cache operator channel using a dedicated bearer secret read from this file. |
+| `--oauth-operator-secret-file <file>` | Enables the authenticated standalone-authorization operator channel using its own dedicated bearer secret read from this file. |
+| `--oauth-operator-endpoint <url>` | Turns `auth authorize` into a relay against a serving Engine's operator channel instead of a local, leased bootstrap. |
 
 Unknown settings are refused by name. Runtime API destinations, allowed origins, credentials,
 and Manifest-compiled execution limits are not host configuration.
@@ -106,6 +109,76 @@ execution unchanged. Startup and inspection reports show effective ceilings and 
 The introspection cache is separate from the upstream response cache. Its TTL is meaningful only
 with `--token-validation introspection`; supplying it with `jwks` validation or without issuer
 validation is refused rather than ignored.
+
+The OIDC discovery fallback is off by default. With `--oidc-discovery-fallback true`, Engine first
+requests the configured issuer's RFC 8414 metadata URL and falls back to the issuer-derived
+`/.well-known/openid-configuration` URL only when that RFC 8414 resource answers exactly HTTP 404
+or 410. Every other outcome — a malformed or wrong-issuer document, a redirect, 401/403, 5xx, a
+timeout, a DNS or TLS failure — fails closed without a fallback request, because any of those is a
+trust-configuration error rather than proof of absence. The alternate URL is constructed from the
+configured `--issuer` alone, with the well-known path appended to the issuer path per OIDC
+Discovery: there is no arbitrary metadata-URL setting and no provider-slug inference. The returned
+`issuer` must be byte-identical to `--issuer`, duplicated issuer or endpoint members are refused as
+ambiguous, and every advertised endpoint still passes the HTTPS-unless-loopback rule.
+
+### Issuer readiness probe
+
+`inspect` stays what it was: it proves what would be served and whether startup would refuse, and it
+never resolves Manifest credentials. Whether the configured issuer can be *reached and trusted right
+now* is a separate, explicit, networked question:
+
+```bash
+dotnet mcpiler-engine.dll issuer readiness \
+  --file-store-root /var/lib/mcpiler/files \
+  --issuer https://idp.example.com/realms/main \
+  --token-validation jwks
+```
+
+The verb reads the same deployment settings as `serve`, contacts only the configured issuer's
+metadata URL (RFC 8414 first; the issuer-derived OIDC URL only with `--oidc-discovery-fallback true`
+after exactly HTTP 404/410) and then the effective JWKS URI or introspection endpoint. With
+`--jwks-uri` or `--introspection-endpoint` the metadata step is skipped, exactly as the serving
+validators skip it. The introspection check authenticates as the configured
+`--introspection-client-id` and sends one invented, non-secret probe value, so the endpoint can be
+exercised without a caller token: readiness never manufactures a bearer, never accepts one as an
+argument and never prints one. It opens no listener, takes no store-root lease and changes no
+authorization policy.
+
+The report is plain text with a stable outcome token: `issuer readiness: ready`, or
+`issuer readiness: not ready [issuer/<category>]` plus a sanitized non-secret detail. Categories:
+
+| Category | Meaning | Exit code |
+| --- | --- | --- |
+| `unconfigured` | No issuer or no validation mode is named. | 78 |
+| `unsupported-mode` | The bound trust mode has no readiness probe in this build. | 78 |
+| `credential-unusable` | The introspection client secret file is missing, empty or unreadable; the issuer was not contacted. | 78 |
+| `invalid-metadata` | A metadata document arrived but is unusable: malformed, wrong issuer, duplicated member or no usable endpoint member. | 78 |
+| `issuer-unavailable` | The metadata resource produced no usable answer: outage, timeout, redirect or a non-success status. Retryable. | 1 |
+| `origin-refused` | The effective trust URL is remote plain http, or a TLS trust failure was detected at the endpoint. No request was sent to a refused address. | 78 |
+| `endpoint-unreachable` | The JWKS or introspection endpoint produced no usable answer: outage, timeout, redirect or 429/5xx. Retryable. | 1 |
+| `endpoint-unauthorized` | The introspection endpoint refused the resource-server client identity (401/403). | 78 |
+| `endpoint-unusable` | The endpoint answered but its answer cannot establish readiness: no usable signing keys, no RFC 7662 `active` member, or an invented probe value reported as active. | 78 |
+
+A ready result proves metadata, byte-exact issuer identity, endpoint reachability and, for
+introspection, resource-server client authentication only. Issued-token audience, scope and
+revocation behavior require a real provider-issued token accepted by the protected MCP resource, and
+the report says so explicitly.
+
+Provider-specific setup is documented separately and stays documentation-qualified: the
+[Keycloak guide](authorization/keycloak.md) covers realm issuer paths, client/scope/audience
+configuration and reverse-proxy pitfalls for 26.4.0 and later; the
+[authentik guide](authorization/authentik.md) covers the provider-scoped issuer and the constrained
+OIDC fallback, and states plainly that its exact-audience path is unresolved. Neither provider is
+labeled compatible until `eng/provider-smoke` has accepted real provider-issued tokens against a
+protected surface and the report is recorded.
+
+Every address in the report is rendered as its origin - scheme, host and port - and never as its
+full spelling. A configured issuer or a discovered endpoint can carry credentials in its userinfo,
+path, query or fragment, and an issuer document is untrusted input, so the report names the
+withheld component categories instead. A value that is not an absolute URL is never echoed at all,
+and failure prose is fixed text: no document member, URL spelling or exception message reaches the
+operator raw. A refused issuer mismatch therefore reports the category without repeating either
+issuer string.
 
 ### Response-cache operator channel
 
@@ -126,6 +199,74 @@ When enabled:
   `--trusted-proxy`.
 - Clearing cache entries does not mutate the Manifest or managed desired generation and does not
   cancel an in-flight producer.
+
+### Standalone-authorization operator channel
+
+Standalone OAuth authorization is managed from the command line while the Engine is stopped, because
+the mutation verbs take the runtime-state-root lease exclusively. A *serving* Engine exposes the same
+read-only view and the same single-slot clear over a second non-MCP operator surface, which can work
+there only because the serving process already holds that lease. It too is disabled by default:
+unless `--oauth-operator-secret-file` is configured, these routes are not mapped at all.
+
+When enabled:
+
+- `GET /.engine/oauth/capability` reports the contract identifier, its generation, whether this
+  deployment is file or managed, and the admitted bounds.
+- `GET /.engine/oauth/status[?mount=<prefix>&profile=<id>]` reports each matching profile's state,
+  its declared source references (presence and shape only, never a value), the durable epoch and
+  revision, and the next action an operator should take. When this process validates bearer tokens
+  against a configured issuer, the response also carries a bounded `issuerAvailability` section.
+- `GET /.engine/oauth/events[?limit=<n>]` reports the bounded, sanitized recent authorization
+  outcomes of this process. It is in-memory and says so; it is not an audit history.
+- `POST /.engine/oauth/clear?mount=<prefix>&profile=<id>` clears one profile's runtime-owned refresh
+  authorization. The cleared floor is committed before the response, so a restart cannot resurrect
+  the previous record or an earlier Manifest-declared value. A declared provider revocation is
+  attempted afterwards at the profile's own endpoint only, and its result is reported separately
+  from the local clear.
+- `POST /.engine/oauth/authorize` (file mode only) opens one bounded authorization attempt for a
+  mount/profile and an exact loopback `redirectUri` the caller has registered with the provider. It
+  answers with a single-use `relay` handle, the `authorizationUrl` the operator opens, and the
+  attempt's expiry. The PKCE verifier and the protocol state never leave the serving process.
+- `POST /.engine/oauth/authorize/complete` takes that handle plus the callback's decoded `state`,
+  `code` and `error`, and commits what the provider issued. The handle is single-use, the state is
+  compared with the attempt's own value before any exchange, and the commit is a compare-and-commit
+  on the runtime the mount serves with, so it fences a concurrent acquisition and the serving path's
+  very next call observes it.
+- `POST /.engine/oauth/authorize/abort` abandons a handle an operator will not finish. It is
+  idempotent, and a handle opened under a different credential is refused rather than consumed.
+- Every route requires `Authorization: Bearer <operator-secret>` and the
+  `X-MCPiler-Contract-Generation` header, and every relay session is bound to the credential that
+  opened it, so a second operator credential cannot complete or abandon someone else's authorization.
+  The secret is read from the configured file at startup and is deliberately distinct from the
+  response-cache operator secret: this one can clear a live credential, which that one cannot.
+- The read-only routes read no request body and refuse a query string longer than 2,048 characters;
+  the relay routes read one JSON body of at most 4,096 characters. Every route requires HTTPS unless
+  the request genuinely originates on loopback, and the channel admits a bounded number of concurrent
+  operations with a bounded waiting set, a per-second request rate and a bounded number of unfinished
+  authorizations. A caller beyond a bound is refused immediately with the code that names it.
+- The serving process exposes no callback endpoint of its own: the operator's own CLI binds the
+  loopback callback and relays only the values the exchange needs, which is why the whole operation
+  works without the operator stopping the Engine.
+- In managed mode only the read-only routes are mapped, and `status` reports the Platform-owned
+  boundary rather than any local authority.
+- This is not an MCP tool: it authorizes no ordinary tool call, and an MCP caller token, a managed
+  sync credential or an upstream token is not operator authority.
+
+When a configured issuer validates bearer tokens, `status` also reports `issuerAvailability`: the
+configured validation mode and the bounded, sanitized observations the trust validator recorded —
+each with the observation time, a stable category and that category's fixed fail-closed consequence.
+The categories are `keys-refreshed`, `metadata-unavailable`, `keys-unavailable`, `token-rejected`,
+`issuer-answered`, `token-inactive` and `introspection-unavailable`.
+
+The section is diagnostic state, never a health check and never an authorization input. It separates
+"the issuer could not be asked" (`metadata-unavailable`, `keys-unavailable`,
+`introspection-unavailable`) from an issuer that answered (`keys-refreshed`, `issuer-answered`,
+`token-inactive`) and from a token this process refused while key material was available
+(`token-rejected`). An outage is never reported as the issuer declaring a token inactive. No decision
+reads the observations back: a JWT inside the accepted JWKS stale-key window keeps validating through
+a temporary outage, and the positive introspection revalidation bound (30 seconds by default) is
+unchanged. The buffer is in-memory, bounded and discarded with the process; an empty history means
+nothing was observed, not that the issuer is healthy.
 
 Two switches affect Manifest admission:
 
@@ -392,6 +533,10 @@ the Manifest is protected; the local process boundary is the caller-authorizatio
 Use `version` or `--version` to print the Engine build identity and the supported Manifest
 format range.
 
+Readiness is the explicitly networked counterpart and stays a separate command: run
+`issuer readiness` (see "Issuer readiness probe") to check whether the configured issuer can be
+reached and trusted right now. `inspect` itself never becomes a readiness probe.
+
 ## File-store operations
 
 The file-store commands inspect metadata only; they never print stored payload bytes:
@@ -425,11 +570,18 @@ path as Streamable HTTP.
 
 ## Health and shutdown
 
-HTTP mode maps two health endpoints after all mounts have started successfully:
+HTTP mode maps three health endpoints after all mounts have started successfully:
 
 - `GET /health/live` returns HTTP 200 while the process is alive.
 - `GET /health/ready` returns HTTP 200 while the file store is usable and the host is accepting
   work. It returns HTTP 503 during shutdown drain or when the file store becomes unusable.
+- `GET /health/managed` reports the managed confirmation journal. In managed mode it returns HTTP 200
+  with `ok` when the journal is healthy and HTTP 503 while the journal failed its integrity check and
+  managed reconciliation is stalled until an operator runs `confirmed-revisions reset`. In file mode it
+  returns HTTP 200 with `ok: managed synchronization is not configured`, so the two 200 bodies are
+  distinct and file mode is never mistaken for a healthy managed journal. Alert on the 503.
+  `/health/ready` and `/health/live` are deliberately unaffected, so a stalled managed reconciliation
+  does not take a functional Engine out of traffic.
 
 On shutdown, Engine closes admission to new product requests immediately and lets already admitted
 tool invocations finish up to `--drain-timeout-seconds`. Health remains observable during that

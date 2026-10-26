@@ -39,8 +39,10 @@ internal sealed class JwksTokenValidator : ITokenValidator
     private readonly HttpClient _client;
     private readonly string _issuer;
     private readonly string? _jwksOverride;
+    private readonly bool _allowOidcFallback;
     private readonly TokenValidationParameters _parameters;
     private readonly TimeProvider _clock;
+    private readonly IssuerAvailabilityObservations? _observations;
     private readonly object _keyGate = new();
 
     private string? _jwksUri;
@@ -54,12 +56,16 @@ internal sealed class JwksTokenValidator : ITokenValidator
         HttpClient client,
         string issuer,
         string? jwksOverride,
-        TimeProvider? clock = null)
+        TimeProvider? clock = null,
+        bool allowOidcFallback = false,
+        IssuerAvailabilityObservations? observations = null)
     {
         _client = client;
         _issuer = issuer;
         _jwksOverride = jwksOverride;
+        _allowOidcFallback = allowOidcFallback;
         _clock = clock ?? TimeProvider.System;
+        _observations = observations;
         _parameters = new TokenValidationParameters
         {
             ValidIssuer = issuer,
@@ -92,13 +98,28 @@ internal sealed class JwksTokenValidator : ITokenValidator
         string? kid = TokenKeyId(token);
         if (kid is null || ContainsKey(keys, kid))
         {
+            // Key material was available and the token still did not verify: an authoritative token
+            // decision, recorded so an operator outage question can be answered without it.
+            Observe(IssuerAvailabilityCategory.TokenRejected);
             return verification;
         }
 
         JsonWebKeySet? refreshed = await ResolveKeysAsync(forceRefresh: true, cancellationToken).ConfigureAwait(false);
-        return refreshed is null
-            ? TokenVerification.Inactive
-            : await ValidateWithKeysAsync(token, refreshed).ConfigureAwait(false);
+
+        if (refreshed is null)
+        {
+            // No usable key material at all; the failed refresh already recorded the trust outage.
+            return TokenVerification.Inactive;
+        }
+
+        TokenVerification afterRefresh = await ValidateWithKeysAsync(token, refreshed).ConfigureAwait(false);
+
+        if (!afterRefresh.Active)
+        {
+            Observe(IssuerAvailabilityCategory.TokenRejected);
+        }
+
+        return afterRefresh;
     }
 
     private async Task<TokenVerification> ValidateWithKeysAsync(string token, JsonWebKeySet keys)
@@ -188,6 +209,9 @@ internal sealed class JwksTokenValidator : ITokenValidator
             ? null
             : await FetchKeysAsync(jwksUri, CancellationToken.None).ConfigureAwait(false);
 
+        JsonWebKeySet? served;
+        IssuerAvailabilityCategory category;
+
         lock (_keyGate)
         {
             DateTimeOffset now = _clock.GetUtcNow();
@@ -198,12 +222,27 @@ internal sealed class JwksTokenValidator : ITokenValidator
             {
                 _cachedKeys = fetched;
                 _keysFetchedAt = now;
-                return fetched;
+                served = fetched;
+                category = IssuerAvailabilityCategory.KeySetRefreshed;
             }
-
-            return StaleKeysUnsafe(now);
+            else
+            {
+                // The refresh failed. Which half failed is the operator's only actionable fact: a
+                // metadata resolution that named no endpoint is a configuration or issuer-document
+                // problem, while a key endpoint that did not answer may recover on its own.
+                served = StaleKeysUnsafe(now);
+                category = jwksUri is null
+                    ? IssuerAvailabilityCategory.MetadataUnavailable
+                    : IssuerAvailabilityCategory.KeySetUnavailable;
+            }
         }
+
+        Observe(category);
+        return served;
     }
+
+    private void Observe(IssuerAvailabilityCategory category)
+        => _observations?.Record(_clock.GetUtcNow(), IssuerAvailabilityMode.Jwks, category);
 
     private JsonWebKeySet? FreshKeysUnsafe(DateTimeOffset now)
         => _cachedKeys is not null && now - _keysFetchedAt <= KeyRefreshInterval
@@ -249,9 +288,16 @@ internal sealed class JwksTokenValidator : ITokenValidator
     }
 
     /// <summary>
-    /// Resolves the JWKS URI once from validated RFC 8414 metadata, unless configuration overrode
+    /// Resolves the JWKS URI once from validated issuer metadata, unless configuration overrode
     /// it. The URI is cached separately from the bounded key-set cache.
     /// </summary>
+    /// <remarks>
+    /// Discovery goes through the one shared resolver, so the runtime path observes exactly the
+    /// startup path's route policy: RFC 8414 first, and the issuer-derived OIDC route only when the
+    /// host enabled fallback and RFC 8414 answered a definitive 404/410. Every other outcome —
+    /// including a valid document that names a disallowed endpoint — fails closed without a keys
+    /// request.
+    /// </remarks>
     private async Task<string?> ResolveJwksUriAsync(CancellationToken cancellationToken)
     {
         if (_jwksUri is not null)
@@ -267,25 +313,15 @@ internal sealed class JwksTokenValidator : ITokenValidator
                 : null;
         }
 
-        IssuerMetadataDiscovery metadata;
-
-        try
-        {
-            metadata = await IssuerMetadata.DiscoverAsync(
-                _client,
-                _issuer,
-                cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception failure) when (failure is HttpRequestException or TaskCanceledException or UriFormatException)
-        {
-            return null;
-        }
+        IssuerMetadataDiscovery metadata = await IssuerMetadata.ResolveAsync(
+            _client,
+            _issuer,
+            _allowOidcFallback,
+            cancellationToken).ConfigureAwait(false);
 
         if (metadata.InvalidReason is not null
             || metadata.Document is not { } discovered
-            || !discovered.TryGetProperty("jwks_uri", out JsonElement declared)
-            || declared.ValueKind is not JsonValueKind.String
-            || declared.GetString() is not { } address
+            || !IssuerMetadata.TryReadEndpoint(discovered, "jwks_uri", out string address)
             || !Uri.TryCreate(address, UriKind.Absolute, out Uri? resolved)
             || resolved.Scheme is not ("http" or "https")
             || !AuthorizationEndpointPolicy.IsAllowed(resolved))
