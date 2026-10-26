@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   resolve:
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: read
@@ -192,7 +192,7 @@ jobs:
 
   verify_candidate:
     needs: resolve
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: read
@@ -239,7 +239,7 @@ jobs:
   git_publish:
     if: ${{ needs.resolve.outputs.mode == 'visibility' }}
     needs: [resolve, verify_candidate]
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       actions: read
@@ -275,7 +275,7 @@ jobs:
   resume_guard:
     if: ${{ needs.resolve.outputs.mode == 'postgit' }}
     needs: [resolve, verify_candidate]
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -292,7 +292,7 @@ jobs:
   stable_promote:
     needs: [resolve, verify_candidate, git_publish, resume_guard]
     if: ${{ always() && needs.verify_candidate.result == 'success' && (needs.git_publish.result == 'success' || needs.git_publish.result == 'skipped') && (needs.resume_guard.result == 'success' || needs.resume_guard.result == 'skipped') }}
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -319,7 +319,7 @@ jobs:
     # taints every later job in the dependency chain. Each tail job therefore declares its own accepting
     # form; a bare `needs:` would be silently skipped while the run still reported success.
     if: ${{ always() && needs.resolve.result == 'success' && needs.stable_promote.result == 'success' }}
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -348,7 +348,7 @@ jobs:
     # Same accepting form as the other tail job: resume must be able to repair a missing GitHub Release
     # even though the unrelated sibling branch was skipped.
     if: ${{ always() && needs.resolve.result == 'success' && needs.latest_promote.result == 'success' }}
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
@@ -383,7 +383,7 @@ jobs:
     # succeeded or was the mode-exclusive sibling of the stage that did.
     if: ${{ always() }}
     needs: [resolve, verify_candidate, git_publish, resume_guard, stable_promote, latest_promote, github_release]
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:

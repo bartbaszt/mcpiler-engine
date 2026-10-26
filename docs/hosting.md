@@ -629,10 +629,6 @@ third-party packages and reviewed licence classification; it does not replace up
 binary-agreement texts. See [Licensing and redistribution](licensing.md), especially the
 JSON-Everything official-binary terms, before redistributing an Engine image.
 
-Release verification uses the dedicated self-hosted GitHub Actions runner described in
-[`CI and release runners`](ci-runners.md). The ARM64 runtime smoke is performed under QEMU
-emulation; the resulting image index still contains native ARM64 application binaries.
-
 Release verification keeps the runnable image index separate from supply-chain evidence. The raw
 index contains exactly `linux/amd64` and `linux/arm64`; BuildKit root-index attestations are
 disabled. A keyless Sigstore signature, machine-readable SBOM and SLSA provenance are attached as

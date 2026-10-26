@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-usage: eng/verify-container.sh --image <ref> --version <A.B.C> --revision <40-hex-sha> [--index-only|--runtime-only] [--platform linux/amd64|linux/arm64]
+usage: eng/verify-container.sh --image <ref> --version <A.B.C> --revision <40-hex-sha> [--index-only|--runtime-only]
        eng/verify-container.sh --compare-index <candidate> <stable> <latest>
 EOF
   exit 64
@@ -13,7 +13,6 @@ image=""
 version=""
 revision=""
 mode="all"
-platform=""
 compare=()
 engine_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest_fixture="$engine_root/tests/fixtures/manifests/minimal"
@@ -25,7 +24,6 @@ while (($#)); do
     --revision) revision="${2:-}"; shift 2 ;;
     --index-only) mode="index"; shift ;;
     --runtime-only) mode="runtime"; shift ;;
-    --platform) platform="${2:-}"; shift 2 ;;
     --compare-index)
       (($# == 4)) || usage
       compare=("$2" "$3" "$4")
@@ -58,9 +56,6 @@ if ((${#compare[@]})); then
 fi
 
 [[ -n "$image" && "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$revision" =~ ^[0-9a-f]{40}$ ]] || usage
-[[ -z "$platform" || "$platform" == linux/amd64 || "$platform" == linux/arm64 ]] || usage
-platform_args=()
-[[ -z "$platform" ]] || platform_args=(--platform "$platform")
 
 if [[ "$mode" != "runtime" ]]; then
   tmp_index="$(mktemp)"
@@ -85,7 +80,7 @@ PY
 fi
 
 if [[ "$mode" != "index" ]]; then
-  docker pull "${platform_args[@]}" "$image" >/dev/null
+  docker pull "$image" >/dev/null
 
   if [[ ! -d "$manifest_fixture" ]]; then
     echo "FAIL: verifier Manifest fixture is missing: $manifest_fixture" >&2
@@ -126,14 +121,14 @@ if any(item.startswith("MCPILER_MASTER_KEY") for item in env):
 PY
   rm -f "$inspect_file"
 
-  identity="$(docker run --rm "${platform_args[@]}" "$image" version)"
+  identity="$(docker run --rm "$image" version)"
   [[ "$identity" == "mcpiler-engine $version"* ]] || {
     echo "FAIL: version verb reported '$identity', expected release $version." >&2
     exit 1
   }
 
   set +e
-  refusal="$(docker run --rm "${platform_args[@]}" "$image" serve 2>&1)"
+  refusal="$(docker run --rm "$image" serve 2>&1)"
   refusal_exit=$?
   set -e
   [[ $refusal_exit -eq 78 ]] || {
@@ -142,7 +137,7 @@ PY
   }
 
   set +e
-  paired_setting_refusal="$(docker run --rm "${platform_args[@]}" \
+  paired_setting_refusal="$(docker run --rm \
     --mount "type=bind,src=$manifest_fixture,dst=/manifests/minimal,readonly" \
     "$image" serve \
     --mount /minimal=/manifests/minimal \
@@ -159,7 +154,7 @@ PY
     exit 1
   }
 
-  container="$(docker create "${platform_args[@]}" "$image" version)"
+  container="$(docker create "$image" version)"
   cleanup_container() { docker rm -f "$container" >/dev/null 2>&1 || true; }
   trap cleanup_container EXIT
   for path in \

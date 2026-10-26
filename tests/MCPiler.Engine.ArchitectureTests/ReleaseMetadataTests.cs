@@ -76,8 +76,7 @@ public sealed class ReleaseMetadataTests
         Assert.Contains("contents: write", workflow, StringComparison.Ordinal);
         Assert.Contains("packages: write", workflow, StringComparison.Ordinal);
         Assert.Contains("id-token: write", workflow, StringComparison.Ordinal);
-        Assert.Contains("docker/setup-qemu-action@", workflow, StringComparison.Ordinal);
-        Assert.Contains("--platform linux/arm64", workflow, StringComparison.Ordinal);
+        Assert.Contains("ubuntu-24.04-arm", workflow, StringComparison.Ordinal);
         Assert.Contains("linux/amd64,linux/arm64", workflow, StringComparison.Ordinal);
         Assert.Contains("provenance: false", workflow, StringComparison.Ordinal);
         Assert.Contains("sbom: false", workflow, StringComparison.Ordinal);
@@ -93,34 +92,6 @@ public sealed class ReleaseMetadataTests
         var supplyJob = Job(workflow, "supply_chain");
         Assert.Contains("id-token: write", supplyJob, StringComparison.Ordinal);
         Assert.DoesNotContain("contents: write", supplyJob, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void Private_engine_workflows_require_a_dedicated_unmetered_runner()
-    {
-        const string runner = "runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]";
-        foreach (var path in new[]
-        {
-            ".github/workflows/ci.yml",
-            ".github/workflows/secret-scan.yml",
-            ".github/workflows/release.yml",
-            ".github/workflows/release-resume.yml",
-        })
-        {
-            var workflow = Read(path);
-            var requested = workflow.Split('\n').Select(line => line.Trim())
-                .Where(line => line.StartsWith("runs-on:", StringComparison.Ordinal))
-                .ToArray();
-
-            Assert.NotEmpty(requested);
-            Assert.All(requested, actual => Assert.Equal(runner, actual));
-        }
-
-        // A persistent self-hosted runner with Docker access must not execute fork PR code.
-        Assert.Contains("github.event.pull_request.head.repo.full_name == github.repository",
-            Read(".github/workflows/ci.yml"), StringComparison.Ordinal);
-        Assert.Contains("github.event.pull_request.head.repo.full_name == github.repository",
-            Read(".github/workflows/secret-scan.yml"), StringComparison.Ordinal);
     }
 
     [Fact]

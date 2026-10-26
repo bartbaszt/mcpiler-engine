@@ -18,7 +18,7 @@ permissions:
 jobs:
   source_verify:
     name: PRECHECK / SOURCE_VERIFIED
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -40,7 +40,7 @@ jobs:
   prepare:
     name: METADATA_PREPARED / RELEASE_COMMITTED
     needs: source_verify
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
@@ -108,7 +108,7 @@ jobs:
   candidate_publish:
     name: CANDIDATE_PUBLISHED
     needs: prepare
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -132,9 +132,6 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s\n' "$RELEASE_BUNDLE" | bash eng/release-bundle.sh restore --repo . --base64-stdin --sha256 "$RELEASE_BUNDLE_SHA256" --base-sha "$BASE_SHA" --release-commit "$RELEASE_COMMIT"
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-        with:
-          platforms: arm64
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -160,7 +157,7 @@ jobs:
   smoke_amd64:
     name: CANDIDATE_SMOKED linux/amd64
     needs: [prepare, candidate_publish]
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: read
@@ -188,12 +185,12 @@ jobs:
           password: ${{ github.token }}
       - name: Native amd64 smoke
         working-directory: source
-        run: bash eng/verify-container.sh --image '${{ needs.candidate_publish.outputs.candidate_ref }}' --version '${{ needs.prepare.outputs.release_version }}' --revision '${{ needs.prepare.outputs.release_commit }}' --runtime-only --platform linux/amd64
+        run: bash eng/verify-container.sh --image '${{ needs.candidate_publish.outputs.candidate_ref }}' --version '${{ needs.prepare.outputs.release_version }}' --revision '${{ needs.prepare.outputs.release_commit }}' --runtime-only
 
   smoke_arm64:
     name: CANDIDATE_SMOKED linux/arm64
     needs: [prepare, candidate_publish]
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
       packages: read
@@ -214,22 +211,19 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s\n' "$RELEASE_BUNDLE" | bash eng/release-bundle.sh restore --repo . --base64-stdin --sha256 "$RELEASE_BUNDLE_SHA256" --base-sha "$BASE_SHA" --release-commit "$RELEASE_COMMIT"
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-        with:
-          platforms: arm64
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-      - name: Emulated arm64 smoke
+      - name: Native arm64 smoke
         working-directory: source
-        run: bash eng/verify-container.sh --image '${{ needs.candidate_publish.outputs.candidate_ref }}' --version '${{ needs.prepare.outputs.release_version }}' --revision '${{ needs.prepare.outputs.release_commit }}' --runtime-only --platform linux/arm64
+        run: bash eng/verify-container.sh --image '${{ needs.candidate_publish.outputs.candidate_ref }}' --version '${{ needs.prepare.outputs.release_version }}' --revision '${{ needs.prepare.outputs.release_commit }}' --runtime-only
 
   sbom:
     name: Generate candidate SBOM
     needs: [prepare, smoke_amd64, smoke_arm64, candidate_publish]
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: read
@@ -269,7 +263,7 @@ jobs:
   supply_chain:
     name: SUPPLY_CHAIN_VERIFIED
     needs: [prepare, candidate_publish, sbom]
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -354,7 +348,7 @@ jobs:
   visibility:
     name: PACKAGE_VISIBILITY_REQUIRED / anonymous candidate check
     needs: [prepare, candidate_publish, supply_chain]
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
@@ -374,7 +368,7 @@ jobs:
   git_publish:
     name: GIT_PUBLISHED
     needs: [prepare, candidate_publish, visibility]
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
@@ -409,7 +403,7 @@ jobs:
   stable_promote:
     name: STABLE_PROMOTED
     needs: [prepare, candidate_publish, git_publish]
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -433,7 +427,7 @@ jobs:
   latest_promote:
     name: LATEST_PROMOTED
     needs: [prepare, candidate_publish, stable_promote]
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
@@ -461,7 +455,7 @@ jobs:
   github_release:
     name: GITHUB_RELEASE_PUBLISHED / COMPLETE
     needs: [prepare, latest_promote]
-    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
