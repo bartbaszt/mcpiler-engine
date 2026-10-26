@@ -128,6 +128,7 @@ public-repository boundaries.
 | [authoring.md](authoring.md) | hand-authoring workflow |
 | [manifest.md](manifest.md) | normative persisted-contract/reference documentation |
 | [hosting.md](hosting.md) | operator and deployment reference |
+| [ci-runners.md](ci-runners.md) | private-repository CI and stable-release runner requirements |
 | [authorization/keycloak.md](authorization/keycloak.md) | documented Keycloak issuer/client/audience setup; compatibility unverified until the smoke harness passes |
 | [authorization/authentik.md](authorization/authentik.md) | documented authentik issuer/client/audience setup and its explicit audience limitations; compatibility unverified |
 | [troubleshooting.md](troubleshooting.md) | symptom-driven operator guide |

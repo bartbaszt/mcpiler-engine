@@ -16,8 +16,9 @@ concurrency:
 jobs:
   dco:
     name: DCO sign-off
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    # A persistent runner with Docker access must never execute code from fork PRs.
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
     steps:
       - name: Check out pull request range
         uses: actions/checkout@v5
@@ -48,7 +49,8 @@ jobs:
 
   verify:
     name: Build and test
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, Linux, X64, mcpiler-engine-release]
     steps:
       - name: Check out
         uses: actions/checkout@v5
