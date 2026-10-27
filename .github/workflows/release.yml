@@ -132,7 +132,7 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s\n' "$RELEASE_BUNDLE" | bash eng/release-bundle.sh restore --repo . --base64-stdin --sha256 "$RELEASE_BUNDLE_SHA256" --base-sha "$BASE_SHA" --release-commit "$RELEASE_COMMIT"
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -352,7 +352,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Require anonymous access before Git or stable publication
         env:
           CANDIDATE_REF: ${{ needs.candidate_publish.outputs.candidate_ref }}
@@ -412,7 +412,7 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.release_tag }}
           persist-credentials: false
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
@@ -436,7 +436,7 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.release_tag }}
           persist-credentials: false
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
