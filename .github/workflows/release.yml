@@ -133,7 +133,7 @@ jobs:
           set -euo pipefail
           printf '%s\n' "$RELEASE_BUNDLE" | bash eng/release-bundle.sh restore --repo . --base64-stdin --sha256 "$RELEASE_BUNDLE_SHA256" --base-sha "$BASE_SHA" --release-commit "$RELEASE_COMMIT"
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -178,7 +178,7 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s\n' "$RELEASE_BUNDLE" | bash eng/release-bundle.sh restore --repo . --base64-stdin --sha256 "$RELEASE_BUNDLE_SHA256" --base-sha "$BASE_SHA" --release-commit "$RELEASE_COMMIT"
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -211,7 +211,7 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s\n' "$RELEASE_BUNDLE" | bash eng/release-bundle.sh restore --repo . --base64-stdin --sha256 "$RELEASE_BUNDLE_SHA256" --base-sha "$BASE_SHA" --release-commit "$RELEASE_COMMIT"
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -293,7 +293,7 @@ jobs:
           set -euo pipefail
           printf '%s\n' "$SBOM_GZ_BASE64" > sbom.spdx.json.gz.b64
           bash source/eng/release-bundle.sh sbom-restore --input sbom.spdx.json.gz.b64 --output sbom.spdx.json --sha256 "$SBOM_SHA256"
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -413,7 +413,7 @@ jobs:
           ref: ${{ needs.prepare.outputs.release_tag }}
           persist-credentials: false
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -437,7 +437,7 @@ jobs:
           ref: ${{ needs.prepare.outputs.release_tag }}
           persist-credentials: false
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
