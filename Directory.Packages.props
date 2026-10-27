@@ -44,7 +44,7 @@
       uses, so the two implementations agree on JSON Schema by construction rather than by
       comparison.
     -->
-    <PackageVersion Include="JsonSchema.Net" Version="9.4.0" />
+    <PackageVersion Include="JsonSchema.Net" Version="9.5.0" />
 
     <!--
       Runtime as of the output projection profile. Two obligations need a real JMESPath
