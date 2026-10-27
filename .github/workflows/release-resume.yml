@@ -45,7 +45,7 @@ jobs:
             echo 'Provide exactly one of release_tag or release_run_id.' >&2
             exit 64
           fi
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ inputs.release_run_id != '' }}
         with:
           ref: main
@@ -142,7 +142,7 @@ jobs:
           printf 'mode=visibility\nrelease_tag=%s\nrelease_version=%s\nrelease_commit=%s\nbase_sha=%s\ncandidate_ref=ghcr.io/bartbaszt/mcpiler-engine:%s\nrelease_bundle_sha256=%s\n' "$tag" "$version" "$release_commit" "$base_sha" "$release_commit" "$bundle_sha" >>"$GITHUB_OUTPUT"
           bundle_base64="$(bash source/eng/release-bundle.sh encode --bundle release.bundle)"
           printf 'release_bundle=%s\n' "$bundle_base64" >>"$GITHUB_OUTPUT"
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ inputs.release_tag != '' }}
         with:
           ref: ${{ inputs.release_tag }}
@@ -197,7 +197,7 @@ jobs:
       contents: read
       actions: read
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ needs.resolve.outputs.mode == 'visibility' }}
         with:
           ref: ${{ needs.resolve.outputs.base_sha }}
@@ -215,7 +215,7 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s\n' "$RELEASE_BUNDLE" | bash eng/release-bundle.sh restore --repo . --base64-stdin --sha256 "$RELEASE_BUNDLE_SHA256" --base-sha "$BASE_SHA" --release-commit "$RELEASE_COMMIT"
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: ${{ needs.resolve.outputs.mode == 'postgit' }}
         with:
           ref: ${{ needs.resolve.outputs.release_tag }}
@@ -244,7 +244,7 @@ jobs:
       contents: write
       actions: read
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: main
           fetch-depth: 0
@@ -279,7 +279,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve.outputs.release_tag }}
           fetch-depth: 0
@@ -297,7 +297,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve.outputs.release_tag }}
           persist-credentials: false
@@ -324,7 +324,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve.outputs.release_tag }}
           persist-credentials: false
@@ -352,7 +352,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.resolve.outputs.release_tag }}
           fetch-depth: 0
