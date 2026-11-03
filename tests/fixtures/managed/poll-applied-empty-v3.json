@@ -1,0 +1,36 @@
+{
+  "protocolVersion": 3,
+  "engineVersion": "fixture",
+  "supportedManifestRange": "0.3",
+  "activeGenerationId": null,
+  "deliveredGenerationId": null,
+  "lastCandidateOutcome": null,
+  "lastCandidateDiagnostics": [],
+  "pendingReconciliationCount": 0,
+  "engineInstanceId": "fixture-engine-instance",
+  "engineReportSequence": 7,
+  "appliedDesiredKind": "empty",
+  "appliedDesiredRevisionId": "0000000000000000000000000000000000000000000000000000000000000002",
+  "compatibility": {
+    "schemaVersion": 1,
+    "manifest": {
+      "minimum": "0.3",
+      "maximum": "0.3",
+      "sections": {
+        "server": { "minimum": 2, "maximum": 2 },
+        "policy": { "minimum": 2, "maximum": 2 },
+        "operations": { "minimum": 2, "maximum": 2 },
+        "agentSurface": { "minimum": 2, "maximum": 2 },
+        "credentials": { "minimum": 4, "maximum": 4 },
+        "authentication": { "minimum": 2, "maximum": 2 },
+        "tools": { "minimum": 1, "maximum": 1 },
+        "search": { "minimum": 1, "maximum": 1 }
+      }
+    },
+    "contracts": {
+      "managed-generation": { "minimum": "3", "maximum": "3" },
+      "response-cache-operator": { "minimum": "1", "maximum": "1" },
+      "oauth-operator": { "minimum": "1", "maximum": "1" }
+    }
+  }
+}

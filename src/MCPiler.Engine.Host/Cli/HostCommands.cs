@@ -363,6 +363,48 @@ public static class HostCommands
             .SynchronizeInitialAsync(cancellationToken)
             .ConfigureAwait(false);
 
+        if (initial.Empty)
+        {
+            // An authenticated v3 Studio confirmed an authoritative empty desired state. The
+            // process owns a live control loop but no MCP listener, and it is not serving-ready.
+            // Health routes do not exist until the first validated generation binds the listener.
+            progress?.WriteLine(
+                identity + Environment.NewLine
+                + $"managed: connected to {options.Describe()} as deployment {options.DeploymentId}."
+                + Environment.NewLine
+                + $"managed: applied empty desired revision {initial.EmptyRevisionId}. "
+                + "Connected; awaiting first published connector. No MCP listener is bound and no "
+                + "tools are available until a complete generation is published and activated.");
+            progress?.Flush();
+
+            using var listener = new ManagedListenerHolder();
+            worker.EnableFirstListener(
+                (generation, token) => StartManagedListenerAsync(
+                    binding,
+                    drain,
+                    generations,
+                    generationsLoader,
+                    listener,
+                    generation,
+                    token));
+
+            worker.Start(cancellationToken);
+
+            await WaitForManagedShutdownAsync(listener, cancellationToken).ConfigureAwait(false);
+
+            worker.Dispose();
+
+            if (listener.Application is { } bound)
+            {
+                DrainReport controlDrain = await drain
+                    .ShutdownAsync(bound, binding.Lifecycle.DrainTimeout)
+                    .ConfigureAwait(false);
+                ReportDrain(progress, controlDrain);
+            }
+
+            return new CommandOutcome(ExitCodes.Success, string.Empty);
+        }
+
         if (!initial.Started)
         {
             string refusal = initial.Refusal is { } refusalValue
@@ -454,17 +496,281 @@ public static class HostCommands
         Func<bool> managedJournalDegraded,
         out CommandOutcome? refusal)
     {
+        WebApplication? app = TryBuildManaged(
+            binding,
+            drain,
+            generations,
+            managedJournalDegraded,
+            out StartupRefusal? buildRefusal);
+
+        refusal = buildRefusal is null
+            ? null
+            : new CommandOutcome(ExitCodes.Configuration, buildRefusal.Message + Environment.NewLine);
+
+        return app;
+    }
+
+    private static WebApplication? TryBuildManaged(
+        HostBinding binding,
+        DrainCoordinator drain,
+        EngineGenerationManager generations,
+        Func<bool> managedJournalDegraded,
+        out StartupRefusal? refusal,
+        EngineGeneration? prepared = null)
+    {
         try
         {
             refusal = null;
-            return EngineWebHost.BuildManaged(binding, drain, generations, managedJournalDegraded);
+
+            // A first bind from control-only must not require an installed pointer: the listener
+            // is built around the prepared candidate while admission stays denied, and the
+            // worker activates it only after this start succeeds.
+            return prepared is null
+                ? EngineWebHost.BuildManaged(binding, drain, generations, managedJournalDegraded)
+                : EngineWebHost.BuildManaged(binding, drain, generations, prepared, managedJournalDegraded);
         }
         catch (InvalidOperationException unbuildable)
         {
-            refusal = new CommandOutcome(
-                ExitCodes.Configuration,
-                unbuildable.Message + Environment.NewLine);
+            refusal = new StartupRefusal(
+                string.Empty,
+                "managed/listener-build-failed",
+                unbuildable.Message);
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Starts the single process-lifetime MCP listener for the first validated generation of a
+    /// process that began control-only, or reuses the already bound listener for a later
+    /// generation.
+    /// </summary>
+    /// <remarks>
+    /// The coordinator gate serialises every delivery, so two polls cannot both build a first
+    /// listener. Listener construction uses the prepared candidate while the generation manager
+    /// still has no pointer, so every admission on the provisional socket is denied. The worker
+    /// activates the candidate only after this method reports a successful bind; a build/start
+    /// failure leaves the control loop alive, retains the last applied pair and returns a
+    /// sanitized refusal. If the worker's later activation fails, it invokes the rollback this
+    /// result carries, and the process returns to unbound control-only operation.
+    /// </remarks>
+    private static async Task<FirstListenerStart> StartManagedListenerAsync(
+        HostBinding binding,
+        DrainCoordinator drain,
+        EngineGenerationManager generations,
+        ManagedGenerationLoader loader,
+        ManagedListenerHolder listener,
+        EngineGeneration generation,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(listener);
+        ArgumentNullException.ThrowIfNull(generation);
+
+        using var gate = await listener.EnterAsync(cancellationToken).ConfigureAwait(false);
+
+        if (listener.Application is not null)
+        {
+            return FirstListenerStart.Refused(new StartupRefusal(
+                string.Empty,
+                "managed/listener-already-bound",
+                "Another activation bound the MCP listener first; this candidate was not reported active."));
+        }
+
+        WebApplication? app = TryBuildManaged(
+            binding,
+            drain,
+            generations,
+            loader.IsConfirmedJournalDegraded,
+            out StartupRefusal? refusal,
+            prepared: generation);
+
+        if (app is null)
+        {
+            return FirstListenerStart.Refused(refusal!);
+        }
+
+        try
+        {
+            await app.StartAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            await app.DisposeAsync().ConfigureAwait(false);
+            return FirstListenerStart.Refused(new StartupRefusal(
+                string.Empty,
+                "managed/listener-start-cancelled",
+                "Starting the first MCP listener was cancelled; the process remains control-only."));
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            await app.DisposeAsync().ConfigureAwait(false);
+            return FirstListenerStart.Refused(new StartupRefusal(
+                string.Empty,
+                "managed/listener-start-failed",
+                "The first MCP listener could not be started: " + exception.Message));
+        }
+
+        if (!listener.TryAttach(app))
+        {
+            await StopProvisionalAsync(listener, app).ConfigureAwait(false);
+            return FirstListenerStart.Refused(new StartupRefusal(
+                string.Empty,
+                "managed/listener-already-bound",
+                "Another activation bound the MCP listener first; this candidate was not reported active."));
+        }
+
+        return FirstListenerStart.Bound(
+            () => StopProvisionalAsync(listener, app),
+            () => listener.Confirm(app));
+    }
+
+    /// <summary>
+    /// Stops and disposes a provisional first listener that never became serving, then releases
+    /// it so a later delivery can attempt one fresh bind on the same process.
+    /// </summary>
+    /// <remarks>
+    /// No ordinary request can have been admitted: the generation manager had no pointer for the
+    /// whole provisional window. The process-lifetime drain coordinator is deliberately not
+    /// invoked, because beginning a drain is irreversible and would close admission for the
+    /// lifetime of the process.
+    /// </remarks>
+    private static async Task StopProvisionalAsync(ManagedListenerHolder listener, WebApplication app)
+    {
+        // Release first: the shutdown wait must keep waiting instead of treating a rolled-back
+        // socket as the process-lifetime listener.
+        listener.Release(app);
+
+        try
+        {
+            await app.StopAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        finally
+        {
+            await app.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Waits for the control-only process to be cancelled or for a first listener whose candidate
+    /// has been activated and then stops. A failed bind or a bind whose activation failed leaves
+    /// the control loop retrying, not the process exiting.
+    /// </summary>
+    private static async Task WaitForManagedShutdownAsync(
+        ManagedListenerHolder listener,
+        CancellationToken cancellationToken)
+    {
+        WebApplication app;
+
+        try
+        {
+            app = await listener.WaitForServingAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        await WaitForStoppingAsync(app, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Owns the optional process-lifetime listener built by the first successful bind.
+    /// </summary>
+    /// <remarks>
+    /// A provisional bind and its activation are separate steps. <see cref="TryAttach"/> records the
+    /// socket so a second delivery cannot bind again, but only <see cref="Confirm"/> publishes it as
+    /// the process-lifetime listener after the worker installed the generation pointer. A bind whose
+    /// activation failed calls <see cref="Release"/>, which discards that socket while leaving the
+    /// single serving signal pending until a later bind is confirmed. The signal is deliberately not
+    /// replaced on release: a main-thread waiter that captured it before the rollback must wake when
+    /// the retry eventually confirms.
+    /// </remarks>
+    internal sealed class ManagedListenerHolder : IDisposable
+    {
+        private readonly object _sync = new();
+        private readonly SemaphoreSlim _gate = new(initialCount: 1, maxCount: 1);
+        private readonly TaskCompletionSource<WebApplication> _serving =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private WebApplication? _application;
+        private WebApplication? _confirmed;
+
+        internal WebApplication? Application
+        {
+            get
+            {
+                lock (_sync)
+                {
+                    return _application;
+                }
+            }
+        }
+
+        internal async Task<IDisposable> EnterAsync(CancellationToken cancellationToken)
+        {
+            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            return new GateLease(_gate);
+        }
+
+        internal bool TryAttach(WebApplication application)
+        {
+            lock (_sync)
+            {
+                if (_application is not null || _confirmed is not null)
+                {
+                    return false;
+                }
+
+                _application = application;
+                return true;
+            }
+        }
+
+        /// <summary>Publishes a bound listener whose candidate the worker has activated.</summary>
+        internal void Confirm(WebApplication application)
+        {
+            lock (_sync)
+            {
+                if (!ReferenceEquals(_application, application))
+                {
+                    return;
+                }
+
+                _confirmed = application;
+            }
+
+            _serving.TrySetResult(application);
+        }
+
+        /// <summary>Discards a provisional listener whose candidate was never activated.</summary>
+        internal void Release(WebApplication application)
+        {
+            lock (_sync)
+            {
+                // A confirmed listener is process lifetime and is never released by rollback.
+                if (_confirmed is not null || !ReferenceEquals(_application, application))
+                {
+                    return;
+                }
+
+                _application = null;
+            }
+        }
+
+        /// <summary>
+        /// Waits for the first listener whose candidate was successfully activated. A rolled-back
+        /// provisional bind leaves this wait pending, so a later retry that confirms the one
+        /// process-lifetime listener still wakes the same waiter.
+        /// </summary>
+        internal Task<WebApplication> WaitForServingAsync(CancellationToken cancellationToken)
+            => _serving.Task.WaitAsync(cancellationToken);
+
+        public void Dispose() => _gate.Dispose();
+
+        private sealed class GateLease(SemaphoreSlim gate) : IDisposable
+        {
+            private SemaphoreSlim? _gate = gate;
+
+            public void Dispose()
+                => Interlocked.Exchange(ref _gate, null)?.Release();
         }
     }
 

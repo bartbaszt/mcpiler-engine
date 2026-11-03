@@ -23,6 +23,9 @@ internal enum ManagedPollOutcome
     /// <summary>The Platform delivered a generation this process does not have active.</summary>
     Delivered,
 
+    /// <summary>The Platform delivered an affirmative empty desired state.</summary>
+    Empty,
+
     /// <summary>The Platform answered, but the candidate it delivered could not be loaded.</summary>
     CandidateRefused,
 
@@ -39,11 +42,16 @@ internal sealed record ManagedPollResult(
     ManagedPollOutcome Outcome,
     ManagedGenerationDelivery? Delivery,
     IReadOnlyList<ManagedDiagnosticMessage> Diagnostics,
-    long? SessionEpoch)
+    long? SessionEpoch,
+    string? EmptyDesiredRevisionId = null)
 {
     /// <summary>A result that carried no generation and no diagnostics.</summary>
     public static ManagedPollResult Unchanged(long sessionEpoch)
         => new(ManagedPollOutcome.Unchanged, null, [], sessionEpoch);
+
+    /// <summary>A result carrying an affirmative empty desired state.</summary>
+    public static ManagedPollResult Empty(string desiredRevisionId, long sessionEpoch)
+        => new(ManagedPollOutcome.Empty, null, [], sessionEpoch, desiredRevisionId);
 
     /// <summary>A result for an exchange that could not complete.</summary>
     public static ManagedPollResult Unreachable { get; } = new(ManagedPollOutcome.Unreachable, null, [], null);
@@ -363,6 +371,80 @@ internal sealed class ManagedSyncClient : IDisposable
             return ManagedPollResult.Unreachable;
         }
 
+        string kind;
+        int protocolVersion;
+
+        try
+        {
+            using var document = JsonDocument.Parse(payload);
+
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty("protocolVersion", out var versionElement)
+                || !versionElement.TryGetInt32(out protocolVersion)
+                || !document.RootElement.TryGetProperty("kind", out var kindElement)
+                || kindElement.ValueKind != JsonValueKind.String
+                || kindElement.GetString() is not { } parsedKind)
+            {
+                return Refused(
+                    "managed/response-shape-invalid",
+                    "The Platform returned a managed response without a protocol version and kind.");
+            }
+
+            kind = parsedKind;
+        }
+        catch (JsonException)
+        {
+            return Refused(
+                "managed/response-json-invalid",
+                "The Platform returned malformed managed JSON.");
+        }
+
+        if (protocolVersion != ManagedProtocol.Version)
+        {
+            return Refused(
+                "managed/protocol-version-unsupported",
+                $"The Platform answered managed protocol {protocolVersion}; this Engine speaks {ManagedProtocol.Version}.");
+        }
+
+        if (string.Equals(kind, ManagedProtocol.KindEmpty, StringComparison.Ordinal))
+        {
+            ManagedEmptyMessage? empty;
+
+            try
+            {
+                empty = JsonSerializer.Deserialize<ManagedEmptyMessage>(payload, ProtocolJson);
+            }
+            catch (JsonException)
+            {
+                return Refused(
+                    "managed/response-shape-invalid",
+                    "The Platform returned an empty desired state with an invalid strict shape.");
+            }
+
+            if (empty is null
+                || empty.ProtocolVersion != ManagedProtocol.Version
+                || !string.Equals(empty.Kind, ManagedProtocol.KindEmpty, StringComparison.Ordinal)
+                || empty.Metadata is null
+                || !ManagedProtocol.IsValidDesiredRevisionId(empty.Metadata.DesiredRevisionId)
+                || string.IsNullOrWhiteSpace(empty.Metadata.EngineVersion)
+                || empty.Metadata.EngineVersion.Length > 200)
+            {
+                return Refused(
+                    "managed/response-shape-invalid",
+                    "The Platform returned an empty desired state with an invalid shape.");
+            }
+
+            return ManagedPollResult.Empty(empty.Metadata.DesiredRevisionId!, sessionEpoch: 0);
+        }
+
+        if (!string.Equals(kind, ManagedProtocol.KindGeneration, StringComparison.Ordinal)
+            && !string.Equals(kind, ManagedProtocol.KindRefusal, StringComparison.Ordinal))
+        {
+            return Refused(
+                "managed/response-kind-invalid",
+                "The Platform returned an unknown managed response kind.");
+        }
+
         ManagedGenerationMessage? parsed;
 
         try
@@ -397,7 +479,7 @@ internal sealed class ManagedSyncClient : IDisposable
                 "The Platform returned a managed response with an invalid shape.");
         }
 
-        if (string.Equals(parsed.Kind, "refusal", StringComparison.Ordinal))
+        if (string.Equals(parsed.Kind, ManagedProtocol.KindRefusal, StringComparison.Ordinal))
         {
             ManagedDiagnosticMessage diagnostic = parsed.Diagnostics.Count > 0
                 ? parsed.Diagnostics[0]
@@ -409,7 +491,7 @@ internal sealed class ManagedSyncClient : IDisposable
             return Refused(diagnostic.Code, diagnostic.Message);
         }
 
-        if (!string.Equals(parsed.Kind, "generation", StringComparison.Ordinal))
+        if (!string.Equals(parsed.Kind, ManagedProtocol.KindGeneration, StringComparison.Ordinal))
         {
             return Refused("managed/response-kind-invalid", "The Platform returned an unknown managed response kind.");
         }
@@ -423,7 +505,20 @@ internal sealed class ManagedSyncClient : IDisposable
                 parsed.Compatibility?.Message ?? "The Platform did not provide a compatible contract result.");
         }
 
-        if (string.IsNullOrWhiteSpace(parsed.GenerationId) || parsed.Mounts.Count == 0)
+        // A generation id is the applied desired revision the Platform acknowledges. Accepting a
+        // generation whose identity is not a canonical revision, or whose metadata names a
+        // different revision, would report an applied pair the Platform refuses on the next poll;
+        // that refusal carries no epoch, so the Engine would resend the same contradiction forever.
+        if (!ManagedProtocol.IsValidDesiredRevisionId(parsed.GenerationId)
+            || !ManagedProtocol.IsValidDesiredRevisionId(parsed.Metadata.DesiredRevisionId)
+            || !string.Equals(parsed.GenerationId, parsed.Metadata.DesiredRevisionId, StringComparison.Ordinal))
+        {
+            return Refused(
+                "managed/response-shape-invalid",
+                "The Platform delivered a generation whose identity is not the desired revision it acknowledges.");
+        }
+
+        if (parsed.Mounts.Count == 0)
         {
             return ManagedPollResult.Unreachable;
         }
@@ -462,7 +557,8 @@ internal sealed class ManagedSyncClient : IDisposable
                 parsed.GenerationId,
                 parsed.Metadata.EngineVersion,
                 mounts,
-                parsed.Secrets),
+                parsed.Secrets,
+                parsed.Metadata.DesiredRevisionId),
             [],
             null);
     }

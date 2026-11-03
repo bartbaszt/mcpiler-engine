@@ -160,7 +160,7 @@ public sealed record CompatibilityDescriptor(
             }),
         new Dictionary<string, CompatibilityRange>(StringComparer.Ordinal)
         {
-            [CompatibilitySchema.ManagedGeneration] = new("2", "2"),
+            [CompatibilitySchema.ManagedGeneration] = new("3", "3"),
             [CompatibilitySchema.ResponseCacheOperator] = new("1", "1"),
             [CompatibilitySchema.OAuthOperator] = new("1", "1"),
         });

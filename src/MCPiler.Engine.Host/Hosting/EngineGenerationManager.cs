@@ -43,6 +43,7 @@ internal sealed class EngineGenerationManager : IDisposable
 {
     private readonly object _gate = new();
     private EngineGeneration? _current;
+    private long _lastNumber = -1;
     private bool _disposed;
 
     internal EngineGenerationManager(HostMode mode)
@@ -134,6 +135,33 @@ internal sealed class EngineGenerationManager : IDisposable
             }
 
             _current = candidate;
+            _lastNumber = candidate.Number;
+        }
+
+        return previous is null ? Task.CompletedTask : previous.RetireAsync();
+    }
+
+    /// <summary>
+    /// Atomically clears the admission pointer for an affirmative empty desired state, without
+    /// disposing the generation or closing the listener.
+    /// </summary>
+    /// <remarks>
+    /// The exchange is the same critical section <see cref="Activate"/> and <see cref="TryLease"/>
+    /// use, so every concurrent admission either takes one lease on the pre-transition generation
+    /// or is denied afterwards. The returned task completes when the retired generation's already
+    /// leased work has drained and its execution graph is disposed; reporting applied-empty does not
+    /// wait for it. A later <see cref="Activate"/> continues the same address-number sequence.
+    /// </remarks>
+    internal Task RetireToEmpty()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        EngineGeneration? previous;
+
+        lock (_gate)
+        {
+            previous = _current;
+            _current = null;
         }
 
         return previous is null ? Task.CompletedTask : previous.RetireAsync();
@@ -155,7 +183,16 @@ internal sealed class EngineGenerationManager : IDisposable
     /// is bookkeeping for diagnostics and tests; two generations can never be current at once, so
     /// deriving the successor from the current one is exact.
     /// </remarks>
-    internal long NextNumber => (Current?.Number ?? -1) + 1;
+    internal long NextNumber
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _lastNumber + 1;
+            }
+        }
+    }
 
     /// <inheritdoc />
     public void Dispose()

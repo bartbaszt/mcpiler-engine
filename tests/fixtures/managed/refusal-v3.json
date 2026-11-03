@@ -1,0 +1,24 @@
+{
+  "protocolVersion": 3,
+  "generationId": "",
+  "mounts": [],
+  "secrets": {},
+  "metadata": {
+    "desiredRevisionId": "",
+    "engineVersion": "fixture"
+  },
+  "kind": "refusal",
+  "compatibility": {
+    "status": "invalid",
+    "reasonCode": "managed/protocol-version-unsupported",
+    "dimension": "contract",
+    "descriptorSchemaVersion": 1,
+    "message": "The peer speaks an unsupported managed protocol version."
+  },
+  "diagnostics": [
+    {
+      "code": "managed/protocol-version-unsupported",
+      "message": "The peer speaks an unsupported managed protocol version."
+    }
+  ]
+}

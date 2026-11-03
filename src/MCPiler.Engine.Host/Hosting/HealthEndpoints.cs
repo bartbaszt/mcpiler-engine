@@ -31,7 +31,8 @@ internal static class HealthEndpoints
         WebApplication app,
         string fileStoreRoot,
         DrainCoordinator drain,
-        Func<bool>? managedJournalDegraded = null)
+        Func<bool>? managedJournalDegraded = null,
+        Func<bool>? hasActiveGeneration = null)
     {
         ArgumentNullException.ThrowIfNull(app);
         ArgumentException.ThrowIfNullOrEmpty(fileStoreRoot);
@@ -39,7 +40,7 @@ internal static class HealthEndpoints
 
         app.MapGet(LivePath, static () => Results.Text("alive\n", statusCode: StatusCodes.Status200OK));
 
-        app.MapGet(ReadyPath, () => Ready(fileStoreRoot, drain));
+        app.MapGet(ReadyPath, () => Ready(fileStoreRoot, drain, hasActiveGeneration));
 
         app.MapGet(ManagedPath, () => Managed(managedJournalDegraded));
     }
@@ -73,12 +74,24 @@ internal static class HealthEndpoints
         return Results.Text("ok\n", statusCode: StatusCodes.Status200OK);
     }
 
-    private static IResult Ready(string fileStoreRoot, DrainCoordinator drain)
+    private static IResult Ready(
+        string fileStoreRoot,
+        DrainCoordinator drain,
+        Func<bool>? hasActiveGeneration)
     {
         if (drain.IsDraining)
         {
             return Results.Text(
                 "not ready: shutdown drain is in progress\n",
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+
+        // A previously bound managed listener keeps health routes alive after an affirmative
+        // empty instruction, but it is not serving-ready until a generation is active again.
+        if (hasActiveGeneration is not null && !hasActiveGeneration())
+        {
+            return Results.Text(
+                "not ready: no active MCP generation is installed\n",
                 statusCode: StatusCodes.Status503ServiceUnavailable);
         }
 

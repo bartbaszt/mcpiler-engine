@@ -962,6 +962,56 @@ public sealed class EngineGenerationActivationTests : IAsyncDisposable
     /// A drained generation releases its execution graph and cannot be leased again.
     /// </summary>
     [Fact]
+    public async Task Retiring_to_empty_closes_new_admissions_and_keeps_already_leased_work_on_its_generation()
+    {
+        await using ManagedListener listener = await StartAsync();
+
+        Assert.True(listener.Manager.TryLease(out EngineGenerationLease? held));
+        using (held)
+        {
+            EngineGeneration first = listener.Manager.Current!;
+            long firstNumber = first.Number;
+
+            Task retirement = listener.Manager.RetireToEmpty();
+
+            Assert.Null(listener.Manager.Current);
+            Assert.False(listener.Manager.TryLease(out _));
+
+            // The already admitted lease still resolves the retired surface.
+            Assert.True(first.TryResolve("/api/full", out SurfaceResolution? resolution));
+            Assert.NotNull(resolution);
+
+            using var http = new HttpClient();
+            Assert.Equal(
+                HttpStatusCode.NotFound,
+                (await http.GetAsync(listener.At("/api/full"), Token)).StatusCode);
+            Assert.Equal(
+                HttpStatusCode.ServiceUnavailable,
+                (await http.GetAsync(listener.At(HealthEndpoints.ReadyPath), Token)).StatusCode);
+            Assert.Equal(
+                HttpStatusCode.OK,
+                (await http.GetAsync(listener.At(HealthEndpoints.LivePath), Token)).StatusCode);
+
+            // A later generation reuses the same bound listener and continues the address sequence.
+            EngineGeneration next = listener.NewGeneration(Load("/api", ServedManifests.OneSurface));
+            Assert.Equal(firstNumber + 1, next.Number);
+            Task replaced = listener.Manager.Activate(next);
+            await replaced.WaitAsync(Token);
+
+            using McpHttpSession session = await McpHttpSession.OpenAsync(
+                listener.At("/api/full"),
+                Token);
+            Assert.Equal(
+                ["list-pets", "add-pet"],
+                Tools(await session.RequestAsync("tools/list", 2, Token))
+                    .Select(tool => tool?["name"]?.GetValue<string>())
+                    .ToArray());
+        }
+
+        await Task.Yield();
+    }
+
+    [Fact]
     public async Task A_drained_generation_is_disposed_and_stops_admitting()
     {
         await using ManagedListener listener = await StartAsync();

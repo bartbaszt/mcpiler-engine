@@ -82,15 +82,17 @@ public static class EngineWebHost
         // The generation wraps the execution graph the command runner owns, so disposing it does
         // not dispose what it does not own.
         EngineGenerationManager generations = new(HostMode.File);
-        _ = generations.Activate(new EngineGeneration(
+        var generation = new EngineGeneration(
             number: 0,
             mounts,
             execution,
             ownsExecution: false,
-            externalResources: binding.ExternalResources));
+            externalResources: binding.ExternalResources);
+        _ = generations.Activate(generation);
 
         return BuildCore(
             binding,
+            generation,
             execution,
             drain,
             generations,
@@ -129,9 +131,55 @@ public static class EngineWebHost
                 + "serve an empty surface and claim to be ready.");
         }
 
+        return BuildManaged(binding, drain, generations, active, managedJournalDegraded);
+    }
+
+    /// <summary>
+    /// Builds a listener around one fully prepared candidate without making it the active generation.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A control-only process prepares its first candidate before any socket exists. The listener
+    /// must be built and bound from that candidate's validated mounts, authentication and
+    /// protected-resource authority, but admission stays closed until the manager atomically
+    /// installs the pointer. Building against <see cref="EngineGenerationManager.Current"/> here
+    /// would require activating an unbound candidate, which is exactly the false-serving window
+    /// the lifecycle forbids.
+    /// </para>
+    /// <para>
+    /// The caller owns the binding/rollback ordering: a listener built this way denies every MCP
+    /// admission while the manager has no current generation, and is stopped and disposed if the
+    /// later activation fails.
+    /// </para>
+    /// </remarks>
+    /// <param name="binding">Everything the command line resolved to.</param>
+    /// <param name="drain">The lifecycle coordinator owned by the command runner.</param>
+    /// <param name="generations">The manager admission will read after activation.</param>
+    /// <param name="prepared">A validated candidate that has not been activated.</param>
+    /// <param name="managedJournalDegraded">Optional journal-integrity probe for the health surface.</param>
+    internal static WebApplication BuildManaged(
+        HostBinding binding,
+        DrainCoordinator drain,
+        EngineGenerationManager generations,
+        EngineGeneration prepared,
+        Func<bool>? managedJournalDegraded = null)
+    {
+        ArgumentNullException.ThrowIfNull(binding);
+        ArgumentNullException.ThrowIfNull(drain);
+        ArgumentNullException.ThrowIfNull(generations);
+        ArgumentNullException.ThrowIfNull(prepared);
+
+        if (generations.Mode != HostMode.Managed)
+        {
+            throw new InvalidOperationException(
+                "A managed listener requires a managed generation manager; the supplied manager "
+                + "serves a fixed mount set.");
+        }
+
         return BuildCore(
             binding,
-            active.Execution,
+            prepared,
+            prepared.Execution,
             drain,
             generations,
             managed: true,
@@ -140,6 +188,7 @@ public static class EngineWebHost
 
     private static WebApplication BuildCore(
         HostBinding binding,
+        EngineGeneration activeGeneration,
         EngineExecution execution,
         DrainCoordinator drain,
         EngineGenerationManager generations,
@@ -147,15 +196,15 @@ public static class EngineWebHost
         RuntimeStartResult? started = null,
         Func<bool>? managedJournalDegraded = null)
     {
-        if (generations.Current is not { } activeGeneration)
-        {
-            throw new InvalidOperationException("The listener has no active Engine generation.");
-        }
-
         if (HostRouteTopologyValidation.Find(activeGeneration.Mounts) is { Count: > 0 } topologyRefusals)
         {
             StartupRefusal first = topologyRefusals[0];
-            generations.Dispose();
+
+            if (!managed || generations.Current is not null)
+            {
+                generations.Dispose();
+            }
+
             throw new InvalidOperationException(
                 $"refused {first.Mount} [{first.Code}]: {first.Message}");
         }
@@ -167,7 +216,11 @@ if (binding.Listener.Transport is HostTransport.Http
                 binding.AllowedHosts,
                 binding.Authorization is not null) is { } authorityRefusal)
         {
-            generations.Dispose();
+            if (!managed || generations.Current is not null)
+            {
+                generations.Dispose();
+            }
+
             throw new InvalidOperationException(
                 $"refused {authorityRefusal.Mount} [{authorityRefusal.Code}]: {authorityRefusal.Message}");
         }
@@ -177,12 +230,16 @@ if (binding.Listener.Transport is HostTransport.Http
         // names the mount, and an operator debugs their deployment rather than a client
         // that can only ever see a 401.
         StartupRefusal? unconfigured = AuthorizationRefusal.Find(
-            generations.Current?.Mounts.Mounts ?? [],
+            activeGeneration.Mounts.Mounts,
             binding.Authorization);
 
         if (unconfigured is not null)
         {
-            generations.Dispose();
+            if (!managed || generations.Current is not null)
+            {
+                generations.Dispose();
+            }
+
             throw new InvalidOperationException(
                 "refused " + unconfigured.Mount + ": " + unconfigured.Message);
         }
@@ -358,10 +415,15 @@ if (binding.Listener.Transport is HostTransport.Http
         }
         else
         {
-            McpRegistration.MapMounts(app, generations.Current!.Mounts);
+            McpRegistration.MapMounts(app, activeGeneration.Mounts);
         }
 
-        HealthEndpoints.Map(app, binding.Runtime.FileStoreRoot, drain, managedJournalDegraded);
+        HealthEndpoints.Map(
+            app,
+            binding.Runtime.FileStoreRoot,
+            drain,
+            managedJournalDegraded,
+            managed ? () => generations.HasGeneration : null);
 
         // The operator channels are mapped last and only when their dedicated secret was configured.
         // Their routes are not MCP addresses, so neither the origin check nor generation admission

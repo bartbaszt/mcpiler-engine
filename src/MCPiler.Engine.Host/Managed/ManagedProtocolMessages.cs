@@ -157,8 +157,47 @@ public sealed class ManagedPollRequestMessage
     [JsonPropertyName("engineReportSequence")]
     public long EngineReportSequence { get; set; }
 
+    /// <summary>
+    /// The desired-state kind this process last applied successfully, or null before any apply.
+    /// Never inferred from <see cref="ActiveGenerationId"/>.
+    /// </summary>
+    [JsonPropertyName("appliedDesiredKind")]
+    public string? AppliedDesiredKind { get; set; }
+
+    /// <summary>
+    /// The exact desired revision this process last applied successfully, or null before any apply.
+    /// Required as a pair with <see cref="AppliedDesiredKind"/>.
+    /// </summary>
+    [JsonPropertyName("appliedDesiredRevisionId")]
+    public string? AppliedDesiredRevisionId { get; set; }
+
     [JsonPropertyName("compatibility")]
     public CompatibilityDescriptor? Compatibility { get; set; }
+}
+
+/// <summary>
+/// The protocol-v3 empty success payload, as the Platform producer writes it.
+/// </summary>
+/// <remarks>
+/// The closed member set is the contract: no generation identity, mounts, secrets, compatibility or
+/// diagnostics. The JSON reader refuses every additional member before this type is interpreted.
+/// </remarks>
+public sealed class ManagedEmptyMessage
+{
+    /// <summary>The protocol version the producer wrote.</summary>
+    [JsonRequired]
+    [JsonPropertyName("protocolVersion")]
+    public int ProtocolVersion { get; set; }
+
+    /// <summary>Always <c>empty</c>.</summary>
+    [JsonRequired]
+    [JsonPropertyName("kind")]
+    public string Kind { get; set; } = string.Empty;
+
+    /// <summary>Bounded non-secret revision and correlation metadata.</summary>
+    [JsonRequired]
+    [JsonPropertyName("metadata")]
+    public ManagedMetadataMessage Metadata { get; set; } = new();
 }
 
 /// <summary>One bounded, sanitized diagnostic.</summary>
