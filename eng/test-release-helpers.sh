@@ -30,11 +30,22 @@ expect_failure() {
   fi
 }
 
+# The gate derives the release tag from the Host version, so read that version here instead of
+# hard-coding it: this test must stay green across version bumps, and the shared shape check keeps
+# both sides on strict stable SemVer.
+host_csproj="$ROOT/src/MCPiler.Engine.Host/MCPiler.Engine.Host.csproj"
+host_version="$(sed -n 's:.*<Version>\([^<]*\)</Version>.*:\1:p' "$host_csproj" | head -n 1)"
+if [[ ! "$host_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  printf 'FAIL: Host <Version> must be strict stable SemVer, got %q\n' "$host_version" >&2
+  failures=$((failures + 1))
+fi
+
 metadata_output="$(bash "$ROOT/eng/check-release-metadata.sh")"
 expect_success "release metadata current state" bash "$ROOT/eng/check-release-metadata.sh"
 expect_failure "release tag must match Host version" env RELEASE_TAG=v9.9.9 bash "$ROOT/eng/check-release-metadata.sh"
 expect_failure "release revision must be full Git SHA" env RELEASE_REVISION=abc bash "$ROOT/eng/check-release-metadata.sh"
-expect_eq "ENGINE_TAG=v0.1.0" "$(printf '%s\n' "$metadata_output" | grep '^ENGINE_TAG=')" "release tag shape"
+expect_eq "ENGINE_TAG=v$host_version" "$(printf '%s\n' "$metadata_output" | grep '^ENGINE_TAG=')" "release tag shape"
+expect_eq "ENGINE_VERSION=$host_version" "$(printf '%s\n' "$metadata_output" | grep '^ENGINE_VERSION=')" "release version shape"
 expect_eq "OCI_SOURCE=https://github.com/bartbaszt/mcpiler-engine" "$(printf '%s\n' "$metadata_output" | grep '^OCI_SOURCE=')" "OCI source input"
 expect_eq "OCI_LICENSES=Apache-2.0" "$(printf '%s\n' "$metadata_output" | grep '^OCI_LICENSES=')" "OCI licence input"
 
@@ -102,16 +113,36 @@ expect_success "CRLF changelog keeps the diagnostic-code marker" changelog_marke
 expect_success "CRLF changelog keeps the Git-range marker" changelog_marker_present "$tmp/crlf-changelog.md" '- Git range:'
 
 # The same readers own the metadata gate; prove it against a CRLF-materialized changelog by
-# pointing the gate at a copy so the repository file is not touched.
+# pointing the gate at a copy so the repository file is not touched. The fixture root is
+# self-contained (fixed 0.1.0 Host version and Manifest range) so this assertion cannot drift with
+# the repository's current release; only the gate script itself is copied as the unit under test.
 crlf_root="$tmp/crlf-root"
 mkdir -p "$crlf_root/eng" "$crlf_root/src/MCPiler.Engine.Host" "$crlf_root/src/MCPiler.Engine/Manifest"
 cp "$ROOT/eng/check-release-metadata.sh" "$crlf_root/eng/"
-cp "$ROOT/src/MCPiler.Engine.Host/MCPiler.Engine.Host.csproj" "$crlf_root/src/MCPiler.Engine.Host/"
-cp "$ROOT/src/MCPiler.Engine/Manifest/ManifestFormatSupport.cs" "$crlf_root/src/MCPiler.Engine/Manifest/"
+cat >"$crlf_root/src/MCPiler.Engine.Host/MCPiler.Engine.Host.csproj" <<'EOF'
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+</Project>
+EOF
+cat >"$crlf_root/src/MCPiler.Engine/Manifest/ManifestFormatSupport.cs" <<'EOF'
+namespace MCPiler.Engine.Manifest;
+
+internal static class ManifestFormatSupport
+{
+    public static ManifestFormatVersion Minimum { get; } = new(0, 3);
+    public static ManifestFormatVersion Maximum { get; } = new(0, 3);
+}
+EOF
 printf '## v0.1.0\r\n\r\n- Manifest format: 0.3\r\n- Diagnostic codes: none\r\n- Git range: start..v0.1.0\r\n' >"$crlf_root/CHANGELOG.md"
 expect_success "metadata gate reads a CRLF-materialized changelog" bash "$crlf_root/eng/check-release-metadata.sh"
 printf '## v0.1.0\n\n- Manifest format: 0.3\n- Diagnostic codes: none\n- Git range: start..v0.1.0\n' >"$crlf_root/CHANGELOG.md"
 expect_success "metadata gate reads an LF changelog (control)" bash "$crlf_root/eng/check-release-metadata.sh"
+# Negative control: the headers above must match the fixture Host version, otherwise the positive
+# cases could pass because the gate stopped comparing lines at all.
+printf '## v0.9.9\r\n\r\n- Manifest format: 0.3\r\n- Diagnostic codes: none\r\n- Git range: start..v0.9.9\r\n' >"$crlf_root/CHANGELOG.md"
+expect_failure "metadata gate rejects a changelog header that does not match the Host version" bash "$crlf_root/eng/check-release-metadata.sh"
 
 # The attribute is the durable half, so a fresh checkout does not materialize CRLF at all.
 expect_success "Git attributes force LF for the changelog" grep -Fq 'CHANGELOG.md text eol=lf' "$ROOT/.gitattributes"
