@@ -62,7 +62,7 @@ public sealed class CompatibilityContractGuardTests
     private static readonly Dictionary<string, string> ReviewedContracts = new(StringComparer.Ordinal)
     {
         // Platform requires this generation before it delivers a managed generation.
-        ["managed-generation"] = "2",
+        ["managed-generation"] = "3",
 
         // The response-cache operator channel; Engine advertises the generation it serves.
         ["response-cache-operator"] = "1",
@@ -332,8 +332,8 @@ public sealed class CompatibilityContractGuardTests
                 StringComparison.Ordinal),
         "managed-generation-regressed"
             => fixture.Replace(
+                "\"managed-generation\":{\"minimum\":\"3\",\"maximum\":\"3\"}",
                 "\"managed-generation\":{\"minimum\":\"2\",\"maximum\":\"2\"}",
-                "\"managed-generation\":{\"minimum\":\"1\",\"maximum\":\"1\"}",
                 StringComparison.Ordinal),
         "oauth-operator-generation-bumped"
             => fixture.Replace(

@@ -1,0 +1,9 @@
+{
+  "protocolVersion": 3,
+  "kind": "empty",
+  "kind": "generation",
+  "metadata": {
+    "desiredRevisionId": "0000000000000000000000000000000000000000000000000000000000000002",
+    "engineVersion": "fixture"
+  }
+}

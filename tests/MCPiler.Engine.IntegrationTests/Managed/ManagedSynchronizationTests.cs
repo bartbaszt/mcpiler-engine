@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -57,6 +58,17 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     private const string ProviderKey = "MCPILER_OAUTH2_CLIENT_CREDENTIALS_CLIENTSECRET";
     private const string ProviderValueCanary = "CANARY-provider-value-4d27";
 
+    // Generation ids are canonical revisions: the protocol uses the generation id as the applied
+    // desired revision, so a readable placeholder would also have to be the revision the Platform
+    // accepts as the applied pair.
+    private static readonly string GenerationId1 = GenerationId("g1");
+    private static readonly string GenerationId2 = GenerationId("g2");
+    private static readonly string GenerationId3 = GenerationId("g3");
+
+    /// <summary>The generation identity the shared valid generation fixture declares.</summary>
+    private const string FixtureGenerationId =
+        "00000000000000000000000000000000000000000000000000000000000000ab";
+
     private static CancellationToken Token => TestContext.Current.CancellationToken;
 
     private readonly string _root =
@@ -69,13 +81,13 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     [Fact]
     public async Task An_initial_synchronization_activates_the_delivered_generation_and_serves_it()
     {
-        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var generation = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
         await using var platform = await PlatformAsync(
             _ => Response.Generation(generation));
 
         await using ManagedProcess engine = await StartAsync(platform);
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
 
         // The delivered generation is the one serving: its tool set answers over HTTP.
         using McpHttpSession session = await McpHttpSession.OpenAsync(
@@ -115,6 +127,987 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task An_authenticated_empty_response_initializes_control_only_without_constructing_a_listener()
+    {
+        var revision = new string('a', 64);
+        await using var platform = await PlatformAsync(_ => Response.Empty(revision));
+
+        ManagedGenerationLoader loader = await OpenLoaderAsync();
+        var manager = new EngineGenerationManager(HostMode.Managed);
+        HostBinding binding = ManagedBinding();
+        using var worker = new ManagedSyncWorker(
+            platform.Options(),
+            loader,
+            manager,
+            binding,
+            "test",
+            backoff: new ManagedSyncBackoff(TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(50)));
+
+        try
+        {
+            ManagedInitialSync initial = await worker.SynchronizeInitialAsync(TestContext.Current.CancellationToken);
+
+            Assert.False(initial.Started);
+            Assert.True(initial.Empty);
+            Assert.Equal(revision, initial.EmptyRevisionId);
+            Assert.Null(initial.Refusal);
+            Assert.Null(manager.Current);
+            Assert.Null(worker.ActiveGenerationId);
+            Assert.Equal(ManagedProtocol.KindEmpty, worker.AppliedDesiredKind);
+            Assert.Equal(revision, worker.AppliedDesiredRevisionId);
+
+            worker.Start(TestContext.Current.CancellationToken);
+
+            await WaitForAsync(
+                () => platform.PollBodies.Any(body =>
+                    body["appliedDesiredKind"]?.GetValue<string>() == ManagedProtocol.KindEmpty),
+                () => "The control loop never reported the applied empty pair.");
+
+            var report = platform.PollBodies.Last();
+            Assert.Equal(ManagedProtocol.KindEmpty, report["appliedDesiredKind"]!.GetValue<string>());
+            Assert.Equal(revision, report["appliedDesiredRevisionId"]!.GetValue<string>());
+            Assert.Null(report["activeGenerationId"]);
+        }
+        finally
+        {
+            manager.Dispose();
+            loader.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task A_valid_empty_instruction_retires_admission_while_the_bound_listener_keeps_health_routes()
+    {
+        var revision = new string('b', 64);
+        var current = Response.Generation(
+            Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector"));
+        await using var platform = await PlatformAsync(_ => current);
+
+        await using ManagedProcess engine = await StartAsync(platform);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
+
+        current = Response.Empty(revision);
+
+        await WaitForAsync(
+            () => engine.Worker.ActiveGenerationId is null
+                && engine.Worker.AppliedDesiredKind == ManagedProtocol.KindEmpty,
+            () => "The worker did not apply the affirmative empty state: "
+                + string.Join(" | ", engine.Diagnostics));
+
+        using var http = new HttpClient();
+        Assert.Equal(
+            HttpStatusCode.NotFound,
+            (await http.GetAsync(engine.At("/mcp/connector/full"), Token)).StatusCode);
+        Assert.Equal(
+            HttpStatusCode.ServiceUnavailable,
+            (await http.GetAsync(engine.At(HealthEndpoints.ReadyPath), Token)).StatusCode);
+        Assert.Equal(
+            HttpStatusCode.OK,
+            (await http.GetAsync(engine.At(HealthEndpoints.LivePath), Token)).StatusCode);
+
+        await WaitForAsync(
+            () => platform.PollBodies.Any(body =>
+                body["appliedDesiredKind"]?.GetValue<string>() == ManagedProtocol.KindEmpty
+                && body["activeGenerationId"] is null),
+            () => "The applied empty pair was never reported.");
+    }
+
+    [Theory]
+    [InlineData("missing-metadata", "{\"protocolVersion\":3,\"kind\":\"empty\"}")]
+    [InlineData("extra-generation-member", "{\"protocolVersion\":3,\"kind\":\"empty\",\"generationId\":\"g2\",\"metadata\":{\"desiredRevisionId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"engineVersion\":\"fixture\"}}")]
+    [InlineData("invalid-revision", "{\"protocolVersion\":3,\"kind\":\"empty\",\"metadata\":{\"desiredRevisionId\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"engineVersion\":\"fixture\"}}")]
+    [InlineData("unknown-kind", "{\"protocolVersion\":3,\"kind\":\"emptyish\",\"metadata\":{\"desiredRevisionId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"engineVersion\":\"fixture\"}}")]
+    public async Task A_malformed_empty_response_never_retires_the_active_generation(
+        string caseName,
+        string malformedEmpty)
+    {
+        var generation = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var delivering = false;
+        await using var platform = await PlatformAsync(_ => delivering
+            ? Response.Bytes(Encoding.UTF8.GetBytes(malformedEmpty), isGeneration: true)
+            : Response.Generation(generation));
+
+        await using ManagedProcess engine = await StartAsync(platform);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
+
+        delivering = true;
+
+        await WaitForAsync(
+            () => platform.PollBodies.Any(body =>
+                body["lastCandidateOutcome"]?.GetValue<string>() == ManagedProtocol.CandidateFailed),
+            () => caseName + ": the malformed empty response was not refused: "
+                + string.Join(" | ", engine.Diagnostics));
+
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
+        Assert.NotEqual(ManagedProtocol.KindEmpty, engine.Worker.AppliedDesiredKind);
+        using McpHttpSession session = await McpHttpSession.OpenAsync(
+            engine.At("/mcp/connector/full"),
+            Token);
+        Assert.Equal(
+            ["list-pets", "add-pet"],
+            Names(await session.RequestAsync("tools/list", 2, Token)));
+    }
+
+    [Fact]
+    public async Task A_generation_after_empty_invokes_the_first_listener_coordinator_before_reporting_active()
+    {
+        var revision = new string('c', 64);
+        var empty = Response.Empty(revision);
+        var generation = Response.Generation(
+            Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector"));
+        var current = empty;
+        await using var platform = await PlatformAsync(_ => current);
+
+        ManagedGenerationLoader loader = await OpenLoaderAsync();
+        var manager = new EngineGenerationManager(HostMode.Managed);
+        HostBinding binding = ManagedBinding();
+        List<string> diagnostics = [];
+        using var worker = new ManagedSyncWorker(
+            platform.Options(),
+            loader,
+            manager,
+            binding,
+            "test",
+            message => diagnostics.Add(message),
+            backoff: new ManagedSyncBackoff(TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(50)));
+
+        try
+        {
+            ManagedInitialSync initial = await worker.SynchronizeInitialAsync(TestContext.Current.CancellationToken);
+            Assert.True(initial.Empty);
+
+            int starts = 0;
+            worker.EnableFirstListener((candidate, token) =>
+            {
+                starts++;
+                Assert.False(token.IsCancellationRequested);
+
+                // The first listener binds against the prepared candidate while the manager still
+                // denies admissions; the worker installs the pointer only after the bind returns.
+                Assert.Null(manager.Current);
+                Assert.False(manager.TryLease(out EngineGenerationLease? denied));
+                Assert.Null(denied);
+
+                return Task.FromResult(FirstListenerStart.Bound(
+                    () => Task.CompletedTask,
+                    () => { }));
+            });
+
+            worker.Start(TestContext.Current.CancellationToken);
+            current = generation;
+
+            await WaitForAsync(
+                () => worker.ActiveGenerationId == GenerationId1,
+                () => "The generation after empty was not activated: " + string.Join(" | ", diagnostics));
+
+            Assert.Equal(1, starts);
+            Assert.NotNull(manager.Current);
+            Assert.Equal(ManagedProtocol.KindGeneration, worker.AppliedDesiredKind);
+            Assert.Equal(64, worker.AppliedDesiredRevisionId!.Length);
+        }
+        finally
+        {
+            manager.Dispose();
+            loader.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task A_provisional_first_listener_denies_admission_and_readiness_until_the_candidate_is_activated()
+    {
+        var revision = new string('d', 64);
+        var generation = Response.Generation(
+            Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector"));
+        var current = Response.Empty(revision);
+        await using var platform = await PlatformAsync(_ => current);
+
+        ManagedGenerationLoader loader = await OpenLoaderAsync();
+        var manager = new EngineGenerationManager(HostMode.Managed);
+        var drain = new DrainCoordinator();
+        HostBinding binding = ManagedBinding();
+        List<string> diagnostics = [];
+        using var worker = new ManagedSyncWorker(
+            platform.Options(),
+            loader,
+            manager,
+            binding,
+            "test",
+            message =>
+            {
+                lock (diagnostics)
+                {
+                    diagnostics.Add(message);
+                }
+            },
+            backoff: new ManagedSyncBackoff(TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(50)));
+
+        WebApplication? provisional = null;
+        var bound = new TaskCompletionSource<Uri>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        try
+        {
+            ManagedInitialSync initial = await worker.SynchronizeInitialAsync(Token);
+            Assert.True(initial.Empty);
+
+            worker.EnableFirstListener(async (candidate, token) =>
+            {
+                Assert.Null(manager.Current);
+
+                WebApplication app = EngineWebHost.BuildManaged(
+                    binding,
+                    drain,
+                    manager,
+                    candidate,
+                    loader.IsConfirmedJournalDegraded);
+
+                try
+                {
+                    await app.StartAsync(token);
+                }
+                catch
+                {
+                    await app.DisposeAsync();
+                    throw;
+                }
+
+                provisional = app;
+                bound.TrySetResult(new Uri(app.Urls.Single(), UriKind.Absolute));
+
+                // Hold the provisional listener open while the test probes it. The worker cannot
+                // activate the candidate until this callback returns.
+                await release.Task.WaitAsync(token);
+
+                return FirstListenerStart.Bound(
+                    static () => Task.CompletedTask,
+                    static () => { });
+            });
+
+            worker.Start(Token);
+            current = generation;
+
+            Uri address = await bound.Task.WaitAsync(Token);
+
+            // The socket is live, but no generation pointer is installed: admission and readiness
+            // must both stay closed and the last applied pair must still be the empty one.
+            Assert.Null(manager.Current);
+            Assert.False(manager.TryLease(out _));
+            Assert.Null(worker.ActiveGenerationId);
+            Assert.Equal(ManagedProtocol.KindEmpty, worker.AppliedDesiredKind);
+            Assert.Equal(revision, worker.AppliedDesiredRevisionId);
+
+            using var http = new HttpClient();
+            Assert.Equal(
+                HttpStatusCode.NotFound,
+                (await http.GetAsync(new Uri(address, "/mcp/connector/full"), Token)).StatusCode);
+            Assert.Equal(
+                HttpStatusCode.ServiceUnavailable,
+                (await http.GetAsync(new Uri(address, HealthEndpoints.ReadyPath), Token)).StatusCode);
+            Assert.Equal(
+                HttpStatusCode.OK,
+                (await http.GetAsync(new Uri(address, HealthEndpoints.LivePath), Token)).StatusCode);
+
+            release.TrySetResult();
+
+            await WaitForAsync(
+                () => worker.ActiveGenerationId == GenerationId1,
+                () => "The provisional listener never activated its candidate: "
+                    + string.Join(" | ", diagnostics));
+
+            Assert.NotNull(manager.Current);
+            Assert.True(manager.TryLease(out EngineGenerationLease? lease));
+            lease!.Dispose();
+
+            // The same bound socket now serves the activated generation, so this is the same
+            // process rather than a second bind.
+            using McpHttpSession session = await McpHttpSession.OpenAsync(
+                new Uri(address, "/mcp/connector/full"),
+                Token);
+            Assert.Equal(
+                ["list-pets", "add-pet"],
+                Names(await session.RequestAsync("tools/list", 2, Token)));
+            Assert.Equal(
+                HttpStatusCode.OK,
+                (await http.GetAsync(new Uri(address, HealthEndpoints.ReadyPath), Token)).StatusCode);
+        }
+        finally
+        {
+            release.TrySetResult();
+            worker.Dispose();
+            manager.Dispose();
+            loader.Dispose();
+
+            if (provisional is { } app)
+            {
+                await app.StopAsync(CancellationToken.None);
+                await app.DisposeAsync();
+            }
+
+            drain.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task A_failed_provisional_bind_keeps_the_control_only_pair_and_retries_on_the_same_process()
+    {
+        var revision = new string('e', 64);
+        var generation = Response.Generation(
+            Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector"));
+        var current = Response.Empty(revision);
+        await using var platform = await PlatformAsync(_ => current);
+
+        ManagedGenerationLoader loader = await OpenLoaderAsync();
+        var manager = new EngineGenerationManager(HostMode.Managed);
+        var drain = new DrainCoordinator();
+        HostBinding binding = ManagedBinding();
+        List<string> diagnostics = [];
+        using var worker = new ManagedSyncWorker(
+            platform.Options(),
+            loader,
+            manager,
+            binding,
+            "test",
+            message =>
+            {
+                lock (diagnostics)
+                {
+                    diagnostics.Add(message);
+                }
+            },
+            backoff: new ManagedSyncBackoff(TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(50)));
+
+        var attempts = 0;
+        var firstDeniedAdmission = false;
+        var secondDeniedAdmission = false;
+        var secondAttemptReached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowSecondAttempt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        WebApplication? boundApp = null;
+
+        try
+        {
+            ManagedInitialSync initial = await worker.SynchronizeInitialAsync(Token);
+            Assert.True(initial.Empty);
+
+            worker.EnableFirstListener(async (candidate, token) =>
+            {
+                if (Interlocked.Increment(ref attempts) == 1)
+                {
+                    firstDeniedAdmission = manager.Current is null && !manager.TryLease(out _);
+                    return FirstListenerStart.Refused(new StartupRefusal(
+                        string.Empty,
+                        "managed/listener-start-failed",
+                        "The test refused the first provisional bind."));
+                }
+
+                secondDeniedAdmission = manager.Current is null;
+                secondAttemptReached.TrySetResult();
+                await allowSecondAttempt.Task.WaitAsync(token);
+
+                WebApplication app = EngineWebHost.BuildManaged(
+                    binding,
+                    drain,
+                    manager,
+                    candidate,
+                    loader.IsConfirmedJournalDegraded);
+                await app.StartAsync(token);
+                boundApp = app;
+
+                return FirstListenerStart.Bound(
+                    static () => Task.CompletedTask,
+                    static () => { });
+            });
+
+            worker.Start(Token);
+            current = generation;
+
+            await WaitForAsync(
+                () => Volatile.Read(ref attempts) >= 1
+                    && diagnostics.Any(message => message.Contains("test refused", StringComparison.Ordinal)),
+                () => "The first provisional bind refusal was never reported: "
+                    + string.Join(" | ", diagnostics));
+
+            Assert.True(firstDeniedAdmission);
+            Assert.Null(manager.Current);
+            Assert.Null(worker.ActiveGenerationId);
+            Assert.Equal(ManagedProtocol.KindEmpty, worker.AppliedDesiredKind);
+            Assert.Equal(revision, worker.AppliedDesiredRevisionId);
+            Assert.DoesNotContain(
+                platform.PollBodies,
+                body => body["appliedDesiredKind"]?.GetValue<string>() == ManagedProtocol.KindGeneration);
+
+            await secondAttemptReached.Task.WaitAsync(Token);
+
+            // A later delivery on the same worker still binds without a pointer, so the failed
+            // attempt did not fabricate an active or applied generation.
+            Assert.True(secondDeniedAdmission);
+            Assert.Null(manager.Current);
+            Assert.Null(worker.ActiveGenerationId);
+            Assert.Equal(ManagedProtocol.KindEmpty, worker.AppliedDesiredKind);
+            Assert.Equal(revision, worker.AppliedDesiredRevisionId);
+
+            allowSecondAttempt.TrySetResult();
+
+            await WaitForAsync(
+                () => worker.ActiveGenerationId == GenerationId1,
+                () => "The same process never retried its first listener successfully: "
+                    + string.Join(" | ", diagnostics));
+
+            Assert.NotNull(manager.Current);
+            Assert.Equal(2, Volatile.Read(ref attempts));
+        }
+        finally
+        {
+            allowSecondAttempt.TrySetResult();
+            worker.Dispose();
+            manager.Dispose();
+            loader.Dispose();
+
+            if (boundApp is { } app)
+            {
+                await app.StopAsync(CancellationToken.None);
+                await app.DisposeAsync();
+            }
+
+            drain.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task A_candidate_that_cannot_activate_after_binding_releases_the_provisional_listener()
+    {
+        var revision = new string('f', 64);
+        var generation = Response.Generation(
+            Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector"));
+        var current = Response.Empty(revision);
+        await using var platform = await PlatformAsync(_ => current);
+
+        ManagedGenerationLoader loader = await OpenLoaderAsync();
+        var manager = new EngineGenerationManager(HostMode.Managed);
+        var drain = new DrainCoordinator();
+        HostBinding binding = ManagedBinding();
+        List<string> diagnostics = [];
+        using var worker = new ManagedSyncWorker(
+            platform.Options(),
+            loader,
+            manager,
+            binding,
+            "test",
+            message =>
+            {
+                lock (diagnostics)
+                {
+                    diagnostics.Add(message);
+                }
+            },
+            backoff: new ManagedSyncBackoff(TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(50)));
+
+        var attempts = 0;
+        var bound = new TaskCompletionSource<Uri>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        try
+        {
+            ManagedInitialSync initial = await worker.SynchronizeInitialAsync(Token);
+            Assert.True(initial.Empty);
+
+            worker.EnableFirstListener(async (candidate, token) =>
+            {
+                if (Interlocked.Increment(ref attempts) > 1)
+                {
+                    return FirstListenerStart.Refused(new StartupRefusal(
+                        string.Empty,
+                        "managed/listener-start-failed",
+                        "The test refuses every retry after the forced activation failure."));
+                }
+
+                WebApplication app = EngineWebHost.BuildManaged(
+                    binding,
+                    drain,
+                    manager,
+                    candidate,
+                    loader.IsConfirmedJournalDegraded);
+                await app.StartAsync(token);
+                bound.TrySetResult(new Uri(app.Urls.Single(), UriKind.Absolute));
+
+                // Force the activation that follows this bind to fail. The rollback the worker
+                // invokes is the one this test supplies, so its effect is observable.
+                manager.Dispose();
+
+                return FirstListenerStart.Bound(
+                    async () =>
+                    {
+                        await app.StopAsync(CancellationToken.None);
+                        await app.DisposeAsync();
+                    },
+                    static () => { });
+            });
+
+            worker.Start(Token);
+            current = generation;
+
+            Uri address = await bound.Task.WaitAsync(Token);
+
+            await WaitForAsync(
+                () => diagnostics.Any(message =>
+                    message.Contains("managed/activation-failed", StringComparison.Ordinal)),
+                () => "The post-bind activation failure was never reported: "
+                    + string.Join(" | ", diagnostics));
+
+            Assert.Null(manager.Current);
+            Assert.Null(worker.ActiveGenerationId);
+            Assert.Equal(ManagedProtocol.KindEmpty, worker.AppliedDesiredKind);
+            Assert.Equal(revision, worker.AppliedDesiredRevisionId);
+
+            // The rolled-back socket is gone: the process is unbound control-only, not serving.
+            using var http = new HttpClient();
+            await Assert.ThrowsAnyAsync<HttpRequestException>(async () =>
+                await http.GetAsync(new Uri(address, HealthEndpoints.LivePath), Token));
+        }
+        finally
+        {
+            worker.Dispose();
+            manager.Dispose();
+            loader.Dispose();
+            drain.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task A_cancellation_the_engine_did_not_request_fails_only_the_bind_and_disposes_the_candidate()
+    {
+        var revision = new string('1', 64);
+        var generation = Response.Generation(
+            Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector"));
+        var current = Response.Empty(revision);
+        await using var platform = await PlatformAsync(_ => current);
+
+        ManagedGenerationLoader loader = await OpenLoaderAsync();
+        var manager = new EngineGenerationManager(HostMode.Managed);
+        HostBinding binding = ManagedBinding();
+        List<string> diagnostics = [];
+        using var worker = new ManagedSyncWorker(
+            platform.Options(),
+            loader,
+            manager,
+            binding,
+            "test",
+            message =>
+            {
+                lock (diagnostics)
+                {
+                    diagnostics.Add(message);
+                }
+            },
+            backoff: new ManagedSyncBackoff(TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(50)));
+
+        var attempts = 0;
+        EngineGeneration? firstCandidate = null;
+
+        try
+        {
+            ManagedInitialSync initial = await worker.SynchronizeInitialAsync(Token);
+            Assert.True(initial.Empty);
+
+            worker.EnableFirstListener((candidate, token) =>
+            {
+                if (Interlocked.Increment(ref attempts) == 1)
+                {
+                    firstCandidate = candidate;
+
+                    // A bind library may time out on its own token while the worker's token is
+                    // untouched. That is a failed bind, not shutdown: it must not escape the pass,
+                    // and the candidate it prepared must not stay alive.
+                    throw new OperationCanceledException("The first listener bind exceeded its own timeout.");
+                }
+
+                return Task.FromResult(FirstListenerStart.Refused(new StartupRefusal(
+                    string.Empty,
+                    "managed/listener-start-failed",
+                    "The test refuses every retry after the internal cancellation.")));
+            });
+
+            worker.Start(Token);
+            current = generation;
+
+            await WaitForAsync(
+                () => Volatile.Read(ref attempts) >= 2
+                    && diagnostics.Any(message =>
+                        message.Contains("internal cancellation", StringComparison.Ordinal)),
+                () => "A non-token cancellation escaped the bind path instead of refusing the candidate: "
+                    + string.Join(" | ", diagnostics));
+
+            Assert.NotNull(firstCandidate);
+            Assert.True(firstCandidate!.IsDisposed);
+            Assert.Null(manager.Current);
+            Assert.Null(worker.ActiveGenerationId);
+            Assert.Equal(ManagedProtocol.KindEmpty, worker.AppliedDesiredKind);
+            Assert.Equal(revision, worker.AppliedDesiredRevisionId);
+        }
+        finally
+        {
+            worker.Dispose();
+            manager.Dispose();
+            loader.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task A_long_candidate_diagnostic_is_bounded_without_splitting_a_surrogate_pair()
+    {
+        var revision = new string('2', 64);
+        var generation = Response.Generation(
+            Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector"));
+        var current = Response.Empty(revision);
+        var requests = new ConcurrentQueue<JsonObject>();
+        await using var platform = await PlatformAsync(request =>
+        {
+            requests.Enqueue(request);
+            return current;
+        });
+
+        ManagedGenerationLoader loader = await OpenLoaderAsync();
+        var manager = new EngineGenerationManager(HostMode.Managed);
+        HostBinding binding = ManagedBinding();
+        List<string> diagnostics = [];
+        using var worker = new ManagedSyncWorker(
+            platform.Options(),
+            loader,
+            manager,
+            binding,
+            "test",
+            message =>
+            {
+                lock (diagnostics)
+                {
+                    diagnostics.Add(message);
+                }
+            },
+            backoff: new ManagedSyncBackoff(TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(50)));
+
+        // The emoji occupies the truncation boundary: keeping the first 500 UTF-16 code units would
+        // split its surrogate pair, so the bounded value must stop one unit earlier.
+        string longCode = new('c', 300);
+        string longMessage = new string('x', 499) + "\U0001F600" + new string('y', 200);
+
+        try
+        {
+            ManagedInitialSync initial = await worker.SynchronizeInitialAsync(Token);
+            Assert.True(initial.Empty);
+
+            worker.EnableFirstListener((_, _) => Task.FromResult(FirstListenerStart.Refused(new StartupRefusal(
+                string.Empty,
+                longCode,
+                longMessage))));
+
+            worker.Start(Token);
+            current = generation;
+
+            await WaitForAsync(
+                () => requests.Any(request =>
+                    request["lastCandidateOutcome"]?.GetValue<string>() == ManagedProtocol.CandidateFailed),
+                () => "The long refusal was never reported: " + string.Join(" | ", diagnostics));
+
+            var reporting = requests.Last(request =>
+                request["lastCandidateOutcome"]?.GetValue<string>() == ManagedProtocol.CandidateFailed);
+            var reported = Assert.IsType<JsonObject>(
+                Assert.Single(Assert.IsType<JsonArray>(reporting["lastCandidateDiagnostics"])));
+
+            string code = reported["code"]!.GetValue<string>();
+            string message = reported["message"]!.GetValue<string>();
+
+            Assert.Equal(200, code.Length);
+            Assert.Equal(new string('c', 200), code);
+            Assert.Equal(499, message.Length);
+            Assert.Equal(new string('x', 499), message);
+            Assert.False(char.IsSurrogate(message[^1]));
+        }
+        finally
+        {
+            worker.Dispose();
+            manager.Dispose();
+            loader.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task A_generation_whose_identity_contradicts_its_desired_revision_is_refused_and_the_active_generation_keeps_serving()
+    {
+        // The shared corpus holds a generation whose only difference from the valid fixture is
+        // metadata.desiredRevisionId. Accepting it would report an applied pair the Platform refuses
+        // on the next poll, so the Engine must refuse it while the active generation keeps serving.
+        byte[] mismatch = File.ReadAllBytes(
+            Fixture("managed", "invalid-v3", "generation-revision-mismatch.json"));
+
+        var generation = Generation(
+            FixtureGenerationId,
+            ServedManifests.OneSurface,
+            prefix: "/mcp/connector");
+        var deliveringMismatch = false;
+        var requests = new ConcurrentQueue<JsonObject>();
+        await using var platform = await PlatformAsync(request =>
+        {
+            requests.Enqueue(request);
+            return deliveringMismatch
+                ? Response.Bytes(mismatch, isGeneration: true)
+                : Response.Generation(generation);
+        });
+
+        await using ManagedProcess engine = await StartAsync(platform);
+
+        Assert.Equal(FixtureGenerationId, engine.Worker.ActiveGenerationId);
+        Assert.Equal(ManagedProtocol.KindGeneration, engine.Worker.AppliedDesiredKind);
+        Assert.Equal(FixtureGenerationId, engine.Worker.AppliedDesiredRevisionId);
+
+        deliveringMismatch = true;
+
+        await WaitForAsync(
+            () => requests.Any(request =>
+                request["lastCandidateOutcome"]?.GetValue<string>() == ManagedProtocol.CandidateFailed
+                && request["lastCandidateDiagnostics"] is JsonArray diagnostics
+                && diagnostics.Count > 0
+                && diagnostics[0]?["code"]?.GetValue<string>() == "managed/response-shape-invalid"),
+            () => "The contradictory desired revision was not strictly refused: "
+                + string.Join(" | ", engine.Diagnostics));
+
+        Assert.Equal(FixtureGenerationId, engine.Worker.ActiveGenerationId);
+        Assert.Equal(ManagedProtocol.KindGeneration, engine.Worker.AppliedDesiredKind);
+        Assert.Equal(FixtureGenerationId, engine.Worker.AppliedDesiredRevisionId);
+
+        using McpHttpSession session = await McpHttpSession.OpenAsync(
+            engine.At("/mcp/connector/full"),
+            Token);
+        Assert.Equal(
+            ["list-pets", "add-pet"],
+            Names(await session.RequestAsync("tools/list", 2, Token)));
+    }
+
+    [Fact]
+    public async Task A_generation_hot_swaps_on_the_already_bound_first_listener_without_a_second_bind()
+    {
+        var revision = new string('a', 64);
+        var first = Response.Generation(
+            Generation(GenerationId1, ServedManifests.ThreeSurfaces, prefix: "/mcp/connector"));
+        var second = Response.Generation(
+            Generation(GenerationId2, ServedManifests.OneSurface, prefix: "/mcp/connector"));
+        var current = Response.Empty(revision);
+        await using var platform = await PlatformAsync(_ => current);
+
+        ManagedGenerationLoader loader = await OpenLoaderAsync();
+        var manager = new EngineGenerationManager(HostMode.Managed);
+        var drain = new DrainCoordinator();
+        HostBinding binding = ManagedBinding();
+        List<string> diagnostics = [];
+        using var worker = new ManagedSyncWorker(
+            platform.Options(),
+            loader,
+            manager,
+            binding,
+            "test",
+            message =>
+            {
+                lock (diagnostics)
+                {
+                    diagnostics.Add(message);
+                }
+            },
+            backoff: new ManagedSyncBackoff(TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(50)));
+
+        var starts = 0;
+        var bound = new TaskCompletionSource<Uri>(TaskCreationOptions.RunContinuationsAsynchronously);
+        WebApplication? app = null;
+
+        try
+        {
+            ManagedInitialSync initial = await worker.SynchronizeInitialAsync(Token);
+            Assert.True(initial.Empty);
+
+            worker.EnableFirstListener(async (candidate, token) =>
+            {
+                Interlocked.Increment(ref starts);
+                WebApplication listener = EngineWebHost.BuildManaged(
+                    binding,
+                    drain,
+                    manager,
+                    candidate,
+                    loader.IsConfirmedJournalDegraded);
+                await listener.StartAsync(token);
+                app = listener;
+                bound.TrySetResult(new Uri(listener.Urls.Single(), UriKind.Absolute));
+
+                return FirstListenerStart.Bound(
+                    static () => Task.CompletedTask,
+                    static () => { });
+            });
+
+            worker.Start(Token);
+            current = first;
+
+            Uri address = await bound.Task.WaitAsync(Token);
+            await WaitForAsync(
+                () => worker.ActiveGenerationId == GenerationId1,
+                () => "The first generation never activated: " + string.Join(" | ", diagnostics));
+
+            current = second;
+
+            await WaitForAsync(
+                () => worker.ActiveGenerationId == GenerationId2,
+                () => "The delivered replacement never hot-swapped: " + string.Join(" | ", diagnostics));
+
+            // Exactly one bind: the worker must not send later generations back through the
+            // first-listener coordinator now that the process-lifetime socket exists.
+            Assert.Equal(1, Volatile.Read(ref starts));
+            Assert.DoesNotContain(
+                diagnostics,
+                message => message.Contains("listener-already-bound", StringComparison.Ordinal));
+
+            using var http = new HttpClient();
+            Assert.Equal(
+                HttpStatusCode.NotFound,
+                (await http.GetAsync(new Uri(address, "/mcp/connector/read"), Token)).StatusCode);
+
+            using McpHttpSession session = await McpHttpSession.OpenAsync(
+                new Uri(address, "/mcp/connector/full"),
+                Token);
+            Assert.Equal(
+                ["list-pets", "add-pet"],
+                Names(await session.RequestAsync("tools/list", 2, Token)));
+        }
+        finally
+        {
+            worker.Dispose();
+            manager.Dispose();
+            loader.Dispose();
+
+            if (app is { } listener)
+            {
+                await listener.StopAsync(CancellationToken.None);
+                await listener.DisposeAsync();
+            }
+
+            drain.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task A_generation_reactivates_after_empty_on_the_same_bound_listener_without_a_second_bind()
+    {
+        var firstRevision = new string('b', 64);
+        var emptyRevision = new string('c', 64);
+        var first = Response.Generation(
+            Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector"));
+        var republished = Response.Generation(
+            Generation(GenerationId3, ServedManifests.OneSurface, prefix: "/mcp/connector"));
+        var current = Response.Empty(firstRevision);
+        await using var platform = await PlatformAsync(_ => current);
+
+        ManagedGenerationLoader loader = await OpenLoaderAsync();
+        var manager = new EngineGenerationManager(HostMode.Managed);
+        var drain = new DrainCoordinator();
+        HostBinding binding = ManagedBinding();
+        List<string> diagnostics = [];
+        using var worker = new ManagedSyncWorker(
+            platform.Options(),
+            loader,
+            manager,
+            binding,
+            "test",
+            message =>
+            {
+                lock (diagnostics)
+                {
+                    diagnostics.Add(message);
+                }
+            },
+            backoff: new ManagedSyncBackoff(TimeSpan.FromMilliseconds(20), TimeSpan.FromMilliseconds(50)));
+
+        var starts = 0;
+        var bound = new TaskCompletionSource<Uri>(TaskCreationOptions.RunContinuationsAsynchronously);
+        WebApplication? app = null;
+
+        try
+        {
+            ManagedInitialSync initial = await worker.SynchronizeInitialAsync(Token);
+            Assert.True(initial.Empty);
+
+            worker.EnableFirstListener(async (candidate, token) =>
+            {
+                Interlocked.Increment(ref starts);
+                WebApplication listener = EngineWebHost.BuildManaged(
+                    binding,
+                    drain,
+                    manager,
+                    candidate,
+                    loader.IsConfirmedJournalDegraded);
+                await listener.StartAsync(token);
+                app = listener;
+                bound.TrySetResult(new Uri(listener.Urls.Single(), UriKind.Absolute));
+
+                return FirstListenerStart.Bound(
+                    static () => Task.CompletedTask,
+                    static () => { });
+            });
+
+            worker.Start(Token);
+            current = first;
+
+            Uri address = await bound.Task.WaitAsync(Token);
+            await WaitForAsync(
+                () => worker.ActiveGenerationId == GenerationId1,
+                () => "The first generation never activated: " + string.Join(" | ", diagnostics));
+
+            current = Response.Empty(emptyRevision);
+
+            await WaitForAsync(
+                () => worker.ActiveGenerationId is null
+                    && worker.AppliedDesiredKind == ManagedProtocol.KindEmpty
+                    && worker.AppliedDesiredRevisionId == emptyRevision,
+                () => "The bound listener never retired to the authoritative empty revision: "
+                    + string.Join(" | ", diagnostics));
+
+            using var http = new HttpClient();
+            Assert.Equal(
+                HttpStatusCode.ServiceUnavailable,
+                (await http.GetAsync(new Uri(address, HealthEndpoints.ReadyPath), Token)).StatusCode);
+
+            current = republished;
+
+            await WaitForAsync(
+                () => worker.ActiveGenerationId == GenerationId3,
+                () => "The republished generation never activated on the bound listener: "
+                    + string.Join(" | ", diagnostics));
+
+            Assert.Equal(1, Volatile.Read(ref starts));
+            Assert.DoesNotContain(
+                diagnostics,
+                message => message.Contains("listener-already-bound", StringComparison.Ordinal));
+
+            Assert.Equal(
+                HttpStatusCode.OK,
+                (await http.GetAsync(new Uri(address, HealthEndpoints.ReadyPath), Token)).StatusCode);
+
+            using McpHttpSession session = await McpHttpSession.OpenAsync(
+                new Uri(address, "/mcp/connector/full"),
+                Token);
+            Assert.Equal(
+                ["list-pets", "add-pet"],
+                Names(await session.RequestAsync("tools/list", 2, Token)));
+        }
+        finally
+        {
+            worker.Dispose();
+            manager.Dispose();
+            loader.Dispose();
+
+            if (app is { } listener)
+            {
+                await listener.StopAsync(CancellationToken.None);
+                await listener.DisposeAsync();
+            }
+
+            drain.Dispose();
+        }
+    }
+
+    [Fact]
     public async Task A_no_content_poll_learns_the_platform_epoch_and_the_next_poll_echoes_it()
     {
         await using var platform = await PlatformAsync(_ => Response.NoContent());
@@ -141,15 +1134,15 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     [Fact]
     public async Task A_later_generation_is_activated_while_the_previous_one_keeps_serving_until_replaced()
     {
-        var first = Generation("g1", ServedManifests.ThreeSurfaces, prefix: "/mcp/connector");
-        var second = Generation("g2", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var first = Generation(GenerationId1, ServedManifests.ThreeSurfaces, prefix: "/mcp/connector");
+        var second = Generation(GenerationId2, ServedManifests.OneSurface, prefix: "/mcp/connector");
 
         var current = first;
         await using var platform = await PlatformAsync(_ => Response.Generation(current));
 
         await using ManagedProcess engine = await StartAsync(platform);
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
 
         // A surface only the first generation serves is reachable before the swap. Both
         // generations serve 'full', so the observable difference is the extra surfaces g1 has.
@@ -165,7 +1158,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         // The Platform now desires the replacement, and the worker picks it up on its next poll.
         current = second;
 
-        await WaitForAsync(() => engine.Worker.ActiveGenerationId == "g2");
+        await WaitForAsync(() => engine.Worker.ActiveGenerationId == GenerationId2);
 
         // The replacement serves 'full' but not the surface only the first generation had.
         using (McpHttpSession replacement = await McpHttpSession.OpenAsync(
@@ -192,13 +1185,13 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     [Fact]
     public async Task Open_to_protected_without_an_issuer_is_refused_and_keeps_the_open_generation()
     {
-        var current = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var current = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
         await using var platform = await PlatformAsync(_ => Response.Generation(current));
         await using ManagedProcess engine = await StartAsync(
             platform,
             allowedHosts: ["mcp.example.test"]);
 
-        current = Generation("g2", ServedManifests.ProtectedOneSurface, prefix: "/mcp/connector");
+        current = Generation(GenerationId2, ServedManifests.ProtectedOneSurface, prefix: "/mcp/connector");
 
         await WaitForAsync(
             () =>
@@ -210,7 +1203,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
                 }
             });
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
 
         using McpHttpSession session = await McpHttpSession.OpenAsync(
             engine.At("/mcp/connector/full"),
@@ -227,14 +1220,14 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             active: true,
             TestContext.Current.CancellationToken);
 
-        var current = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var current = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
         await using var platform = await PlatformAsync(_ => Response.Generation(current));
         await using ManagedProcess engine = await StartAsync(
             platform,
             authorization: AuthorizationFor(authorization.Address),
             allowedHosts: []);
 
-        current = Generation("g2", ServedManifests.ProtectedOneSurface, prefix: "/mcp/connector");
+        current = Generation(GenerationId2, ServedManifests.ProtectedOneSurface, prefix: "/mcp/connector");
 
         await WaitForAsync(
             () =>
@@ -246,7 +1239,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
                 }
             });
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
     }
 
     [Fact]
@@ -256,14 +1249,14 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             active: true,
             TestContext.Current.CancellationToken);
 
-        var current = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var current = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
         await using var platform = await PlatformAsync(_ => Response.Generation(current));
         await using ManagedProcess engine = await StartAsync(
             platform,
             authorization: AuthorizationFor(authorization.Address));
 
-        current = Generation("g2", ServedManifests.ProtectedOneSurface, prefix: "/mcp/connector");
-        await WaitForAsync(() => engine.Worker.ActiveGenerationId == "g2");
+        current = Generation(GenerationId2, ServedManifests.ProtectedOneSurface, prefix: "/mcp/connector");
+        await WaitForAsync(() => engine.Worker.ActiveGenerationId == GenerationId2);
 
         Uri endpoint = engine.At("/mcp/connector/full");
         using (HttpClient anonymous = new())
@@ -295,16 +1288,16 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             active: true,
             TestContext.Current.CancellationToken);
 
-        var current = Generation("g1", ServedManifests.ProtectedOneSurface, prefix: "/mcp/connector");
+        var current = Generation(GenerationId1, ServedManifests.ProtectedOneSurface, prefix: "/mcp/connector");
         await using var platform = await PlatformAsync(_ => Response.Generation(current));
         await using ManagedProcess engine = await StartAsync(
             platform,
             authorization: AuthorizationFor(authorization.Address));
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
 
-        current = Generation("g2", ServedManifests.OneSurface, prefix: "/mcp/connector");
-        await WaitForAsync(() => engine.Worker.ActiveGenerationId == "g2");
+        current = Generation(GenerationId2, ServedManifests.OneSurface, prefix: "/mcp/connector");
+        await WaitForAsync(() => engine.Worker.ActiveGenerationId == GenerationId2);
 
         using McpHttpSession session = await McpHttpSession.OpenAsync(
             engine.At("/mcp/connector/full"),
@@ -317,14 +1310,14 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     [Fact]
     public async Task A_candidate_that_cannot_be_loaded_leaves_the_active_generation_serving()
     {
-        var original = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var original = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
 
         // A mount whose bundle is not an archive. The loader refuses it whole, so no generation
         // replaces the one already serving.
         var broken = new Dictionary<string, object?>
         {
-            ["protocolVersion"] = 2,
-            ["generationId"] = "g2",
+            ["protocolVersion"] = 3,
+            ["generationId"] = GenerationId2,
             ["mounts"] = new[]
             {
                 new
@@ -335,7 +1328,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
                 },
             },
             ["secrets"] = new Dictionary<string, string>(StringComparer.Ordinal),
-            ["metadata"] = new { desiredRevisionId = "g2", engineVersion = "fixture" },
+            ["metadata"] = new { desiredRevisionId = GenerationId2, engineVersion = "fixture" },
             ["kind"] = "generation",
             ["compatibility"] = new
             {
@@ -359,7 +1352,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         await using ManagedProcess engine = await StartAsync(platform);
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
 
         // The next poll delivers a candidate the loader refuses. It is refused whole and the
         // generation already serving is untouched.
@@ -367,7 +1360,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         await Task.Delay(TimeSpan.FromMilliseconds(600), TestContext.Current.CancellationToken);
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
 
         using McpHttpSession session = await McpHttpSession.OpenAsync(
             engine.At("/mcp/connector/full"),
@@ -381,14 +1374,14 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     [Fact]
     public async Task A_malformed_generation_response_is_refused_without_replacing_the_active_generation()
     {
-        var original = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var original = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
         var malformed = new Dictionary<string, object?>
         {
-            ["protocolVersion"] = 2,
-            ["generationId"] = "g2",
+            ["protocolVersion"] = 3,
+            ["generationId"] = GenerationId2,
             ["mounts"] = null,
             ["secrets"] = new Dictionary<string, string>(StringComparer.Ordinal),
-            ["metadata"] = new { desiredRevisionId = "g2", engineVersion = "fixture" },
+            ["metadata"] = new { desiredRevisionId = GenerationId2, engineVersion = "fixture" },
             ["kind"] = "generation",
             ["compatibility"] = new
             {
@@ -410,17 +1403,17 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             _ => Response.Bytes(delivering ? originalBytes : malformedBytes, isGeneration: true));
         await using ManagedProcess engine = await StartAsync(platform);
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
         delivering = false;
         await Task.Delay(TimeSpan.FromMilliseconds(600), TestContext.Current.CancellationToken);
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
     }
 
     [Fact]
     public async Task A_response_missing_a_required_member_is_refused_without_replacing_the_active_generation()
     {
-        var original = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
-        var missing = Generation("g2", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var original = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var missing = Generation(GenerationId2, ServedManifests.OneSurface, prefix: "/mcp/connector");
         missing.Remove("mounts");
 
         var delivering = true;
@@ -434,22 +1427,22 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         });
         await using ManagedProcess engine = await StartAsync(platform);
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
         delivering = false;
         await WaitForAsync(() => requests.Any(request =>
             string.Equals(request["lastCandidateOutcome"]?.GetValue<string>(), "candidate-failed", StringComparison.Ordinal)
             && request["lastCandidateDiagnostics"] is JsonArray diagnostics
             && diagnostics.Count > 0
             && diagnostics[0]?["code"]?.GetValue<string>() == "managed/response-json-invalid"));
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
     }
 
     [Fact]
     public async Task A_protocol_v1_generation_is_refused_as_incompatible_and_leaves_g0_active()
     {
-        var original = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var original = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
         var legacy = JsonSerializer.SerializeToNode(
-            Generation("g2", ServedManifests.OneSurface, prefix: "/mcp/connector"))!.AsObject();
+            Generation(GenerationId2, ServedManifests.OneSurface, prefix: "/mcp/connector"))!.AsObject();
         legacy["protocolVersion"] = 1;
         foreach (var mountNode in legacy["mounts"]!.AsArray())
         {
@@ -467,7 +1460,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         });
         await using ManagedProcess engine = await StartAsync(platform);
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
         deliveringLegacy = true;
 
         await WaitForAsync(() => requests.Any(request =>
@@ -476,15 +1469,15 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             && diagnostics.Count > 0
             && diagnostics[0]?["code"]?.GetValue<string>() == "managed/protocol-version-unsupported"));
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
     }
 
     [Fact]
     public async Task An_unknown_surface_resource_mapping_is_refused_before_activation_and_leaves_g0_active()
     {
-        var original = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var original = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
         var invalid = Generation(
-            "g2",
+            GenerationId2,
             ServedManifests.OneSurface,
             prefix: "/mcp/connector",
             externalResources: new Dictionary<string, string>(StringComparer.Ordinal)
@@ -501,7 +1494,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         });
         await using ManagedProcess engine = await StartAsync(platform);
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
         deliveringInvalid = true;
 
         await WaitForAsync(() => requests.Any(request =>
@@ -510,7 +1503,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             && diagnostics.Count > 0
             && diagnostics[0]?["code"]?.GetValue<string>() == "managed/external-resource-surface-unknown"));
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
     }
 
     [Theory]
@@ -525,9 +1518,9 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     [InlineData("https://@tunnel.example/v1/mcp/one")]
     public async Task An_invalid_surface_resource_mapping_is_refused_before_activation_and_leaves_g0_active(string invalidResource)
     {
-        var original = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var original = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
         var invalid = Generation(
-            "g2",
+            GenerationId2,
             ServedManifests.OneSurface,
             prefix: "/mcp/connector",
             externalResources: new Dictionary<string, string>(StringComparer.Ordinal)
@@ -544,7 +1537,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         });
         await using ManagedProcess engine = await StartAsync(platform);
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
         deliveringInvalid = true;
 
         await WaitForAsync(() => requests.Any(request =>
@@ -553,13 +1546,13 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             && diagnostics.Count > 0
             && diagnostics[0]?["code"]?.GetValue<string>() == "managed/external-resource-invalid"));
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
     }
 
     [Fact]
     public async Task A_duplicate_delivery_of_the_active_generation_is_acknowledged_without_a_second_swap()
     {
-        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var generation = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
         var deliveries = 0;
 
         await using var platform = await PlatformAsync(_ =>
@@ -590,13 +1583,13 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     [Fact]
     public async Task A_refused_candidate_is_reported_as_received_and_failed_on_the_next_poll()
     {
-        var original = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var original = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
 
         // A mount whose bundle is not an archive, so the loader refuses the candidate whole.
         var broken = new Dictionary<string, object?>
         {
-            ["protocolVersion"] = 2,
-            ["generationId"] = "g2",
+            ["protocolVersion"] = 3,
+            ["generationId"] = GenerationId2,
             ["mounts"] = new[]
             {
                 new
@@ -607,7 +1600,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
                 },
             },
             ["secrets"] = new Dictionary<string, string>(StringComparer.Ordinal),
-            ["metadata"] = new { desiredRevisionId = "g2", engineVersion = "fixture" },
+            ["metadata"] = new { desiredRevisionId = GenerationId2, engineVersion = "fixture" },
             ["kind"] = "generation",
             ["compatibility"] = new
             {
@@ -635,7 +1628,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         await using ManagedProcess engine = await StartAsync(platform);
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
 
         // The next delivery is the candidate the loader refuses. Engine keeps serving g1.
         delivering = true;
@@ -649,8 +1642,8 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         var reporting = requests.Last(request =>
             string.Equals(request["lastCandidateOutcome"]?.GetValue<string>(), "candidate-failed", StringComparison.Ordinal));
 
-        Assert.Equal("g2", reporting["deliveredGenerationId"]?.GetValue<string>());
-        Assert.Equal("g1", reporting["activeGenerationId"]?.GetValue<string>());
+        Assert.Equal(GenerationId2, reporting["deliveredGenerationId"]?.GetValue<string>());
+        Assert.Equal(GenerationId1, reporting["activeGenerationId"]?.GetValue<string>());
 
         var diagnostics = Assert.IsType<JsonArray>(reporting["lastCandidateDiagnostics"]);
         var diagnostic = Assert.IsType<JsonObject>(Assert.Single(diagnostics));
@@ -662,18 +1655,18 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         Assert.False(string.IsNullOrWhiteSpace(reporting["engineInstanceId"]?.GetValue<string>()));
         Assert.True(reporting["engineReportSequence"]?.GetValue<long>() > 0);
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
     }
 
     [Fact]
     public async Task A_refused_candidate_is_not_retried_in_a_hot_loop()
     {
-        var original = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var original = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
 
         var broken = new Dictionary<string, object?>
         {
-            ["protocolVersion"] = 2,
-            ["generationId"] = "g2",
+            ["protocolVersion"] = 3,
+            ["generationId"] = GenerationId2,
             ["mounts"] = new[]
             {
                 new
@@ -684,7 +1677,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
                 },
             },
             ["secrets"] = new Dictionary<string, string>(StringComparer.Ordinal),
-            ["metadata"] = new { desiredRevisionId = "g2", engineVersion = "fixture" },
+            ["metadata"] = new { desiredRevisionId = GenerationId2, engineVersion = "fixture" },
             ["kind"] = "generation",
             ["compatibility"] = new
             {
@@ -712,7 +1705,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         await using ManagedProcess engine = await StartAsync(platform);
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
 
         delivering = true;
 
@@ -739,7 +1732,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     [Fact]
     public async Task The_pending_reconciliation_count_is_reported_until_the_platform_accepts_it()
     {
-        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var generation = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
         var requests = new System.Collections.Concurrent.ConcurrentQueue<JsonObject>();
 
         await using var platform = await PlatformAsync(request =>
@@ -792,7 +1785,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     public async Task A_missing_deployment_secret_file_is_a_retryable_fault_not_a_crash()
     {
         await using var platform = await PlatformAsync(_ => Response.Generation(
-            Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector")));
+            Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector")));
 
         ManagedInitialSync initial = await SynchronizeInitialAsync(platform, secretFileExists: false);
 
@@ -803,7 +1796,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     [Fact]
     public async Task A_committed_rotation_is_reconciled_with_the_platform_after_the_generation_loads()
     {
-        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var generation = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
 
         var reconciliations = new List<JsonObject>();
 
@@ -824,7 +1817,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         await using var process = await StartAsync(platform, loader);
 
-        Assert.Equal("g1", process.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, process.Worker.ActiveGenerationId);
 
         // A committed rotation is a durable record; the queue regenerates its report from it.
         await slots.ReplaceAsync(
@@ -882,7 +1875,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     public async Task An_evicted_pending_rotation_is_recovered_without_a_new_generation_activation()
     {
         var generation = Generation(
-            "g1",
+            GenerationId1,
             ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
             prefix: "/mcp/connector",
             secrets: new Dictionary<string, string>(StringComparer.Ordinal)
@@ -930,7 +1923,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         // Capacity two: one further distinct identity evicts the oldest queued rotation.
         await using var process = await StartAsync(platform, loader, reconciliationQueueCapacity: 2);
 
-        Assert.Equal("g1", process.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, process.Worker.ActiveGenerationId);
 
         // The durable record is ahead of the delivered generation's declared slot, so a recovery replay
         // re-derives it. The declared identity is the manifest's refreshToken slot; the delivered
@@ -981,14 +1974,14 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             });
 
         // No new generation was delivered or activated; the recovery replay used the active one.
-        Assert.Equal("g1", process.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, process.Worker.ActiveGenerationId);
         await WaitForAsync(() => process.Worker.PendingReconciliations == 0);
     }
 
     [Fact]
     public async Task Multiple_rotations_before_the_first_reconciliation_converge_in_one_report()
     {
-        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var generation = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
 
         var reconciliations = new List<JsonObject>();
 
@@ -1009,7 +2002,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         await using var process = await StartAsync(platform, loader);
 
-        Assert.Equal("g1", process.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, process.Worker.ActiveGenerationId);
 
         // Two sequential rotations commit before any report is sent: the durable record advances
         // 0 -> 1 -> 2 while Platform is still at 0. The report must carry previous=0, revision=2 so
@@ -1064,7 +2057,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     [Fact]
     public async Task A_rotation_with_no_durable_record_is_dropped_rather_than_invented()
     {
-        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var generation = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
         var attempts = 0;
 
         await using var platform = await PlatformAsync(_ => Response.Generation(generation));
@@ -1095,7 +2088,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     [Fact]
     public async Task A_rotation_is_queued_and_retried_when_the_platform_cannot_accept_it()
     {
-        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var generation = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
 
         var attempts = 0;
 
@@ -1138,7 +2131,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     [Fact]
     public async Task A_lost_response_after_a_committed_report_converges_on_an_idempotent_retry()
     {
-        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var generation = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
 
         var attempts = 0;
 
@@ -1199,7 +2192,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     {
         // Platform still describes T0 at epoch E: its stored desired state predates the rotation
         // this deployment committed locally.
-        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var generation = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
 
         await using var platform = await PlatformAsync(_ => Response.Generation(generation));
 
@@ -1255,7 +2248,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         await using var platform = await PlatformAsync(_ => Response.Generation(
             Generation(
-                "g1",
+                GenerationId1,
                 ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
                 prefix: "/mcp/connector",
                 secrets: new Dictionary<string, string>(StringComparer.Ordinal)
@@ -1335,7 +2328,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         await using var platform = await PlatformAsync(_ => Response.Generation(
             Generation(
-                "g1",
+                GenerationId1,
                 ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
                 prefix: "/mcp/connector",
                 secrets: new Dictionary<string, string>(StringComparer.Ordinal)
@@ -1406,7 +2399,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     {
         // The Task 8 Platform fence validates the durable session epoch before any secret mutation,
         // so the reconciliation must present the same epoch the poll established.
-        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var generation = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
 
         await using var platform = await PlatformAsync(_ => Response.Generation(generation));
         platform.OnReconcile = _ => Response.Bytes(
@@ -1445,7 +2438,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         (ManagedGenerationLoader loader, FileMutableSlotStore slots) = await OpenLoaderWithStateAsync();
 
         ManagedGenerationDelivery delivery = DirectDelivery(
-            "g1",
+            GenerationId1,
             TwoSlotRotatableRefreshSurface(new Uri("https://api.example.com/")),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
@@ -1494,7 +2487,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         (ManagedGenerationLoader loader, FileMutableSlotStore slots) = await OpenLoaderWithStateAsync();
 
         ManagedGenerationDelivery delivery = DirectDelivery(
-            "g1",
+            GenerationId1,
             ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
@@ -1538,7 +2531,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         (ManagedGenerationLoader loader, FileMutableSlotStore slots) = await OpenLoaderWithStateAsync();
 
         ManagedGenerationLoad loaded = loader.Load(DirectDelivery(
-            "g1",
+            GenerationId1,
             ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
@@ -1579,7 +2572,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         (ManagedGenerationLoader loader, FileMutableSlotStore slots) = await OpenLoaderWithStateAsync();
 
         ManagedGenerationLoad loaded = loader.Load(DirectDelivery(
-            "g1",
+            GenerationId1,
             ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
@@ -1669,7 +2662,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     public async Task A_read_error_in_an_early_recovery_batch_keeps_recovery_pending_until_the_slot_is_readable()
     {
         var generation = Generation(
-            "g1",
+            GenerationId1,
             TwoSlotRotatableRefreshSurface(new Uri("https://api.example.com/")),
             prefix: "/mcp/connector",
             secrets: new Dictionary<string, string>(StringComparer.Ordinal)
@@ -1770,7 +2763,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             await OpenLoaderWithStateAsync(stateRoot, keyFile);
 
         ManagedGenerationLoad loaded = loader.Load(DirectDelivery(
-            "g1",
+            GenerationId1,
             TwoSlotRotatableRefreshSurface(new Uri("https://api.example.com/")),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
@@ -1830,7 +2823,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             await OpenLoaderWithStateAsync(stateRoot, keyFile);
 
         ManagedGenerationLoad loaded = loader.Load(DirectDelivery(
-            "g1",
+            GenerationId1,
             ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
@@ -1895,7 +2888,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     public async Task An_unreadable_record_during_initial_activation_is_reconciled_after_it_recovers()
     {
         var generation = Generation(
-            "g1",
+            GenerationId1,
             ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
             prefix: "/mcp/connector",
             secrets: new Dictionary<string, string>(StringComparer.Ordinal)
@@ -1985,7 +2978,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             "/mcp/other", "oauth2-authorization-code-pkce-refresh", "refreshToken").State);
 
         ManagedGenerationLoad loaded = loader.Load(DirectDelivery(
-            "g1",
+            GenerationId1,
             ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
             new Dictionary<string, string>(StringComparer.Ordinal)
             {
@@ -2018,7 +3011,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         };
 
         var current = Generation(
-            "g1",
+            GenerationId1,
             TwoSlotRotatableRefreshSurface(new Uri("https://api.example.com/")),
             prefix: "/mcp/connector",
             secrets: secrets);
@@ -2028,7 +3021,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             providedLoader: loader,
             allowedHosts: ["mcp.example.test"]);
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
 
         // One confirmation the active generation declares and one it does not.
         Assert.True(engine.Loader.RecordConfirmedRevision(
@@ -2038,7 +3031,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         // A candidate the host refuses (protected, no issuer) must leave the running generation's
         // confirmation journal untouched (R12.2).
-        current = Generation("g2", ServedManifests.ProtectedOneSurface, prefix: "/mcp/connector");
+        current = Generation(GenerationId2, ServedManifests.ProtectedOneSurface, prefix: "/mcp/connector");
         await WaitForAsync(
             () =>
             {
@@ -2049,18 +3042,18 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
                 }
             });
 
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
         Assert.Equal(ConfirmationState.Confirmed, engine.Loader.ReadConfirmedRevision(
             "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "clientSecret").State);
 
         // A candidate that activates and no longer declares the clientSecret slot prunes only that
         // identity; the slot it still declares keeps its confirmation (R12.2/R11.7).
         current = Generation(
-            "g3",
+            GenerationId3,
             ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
             prefix: "/mcp/connector",
             secrets: secrets);
-        await WaitForAsync(() => engine.Worker.ActiveGenerationId == "g3");
+        await WaitForAsync(() => engine.Worker.ActiveGenerationId == GenerationId3);
 
         Assert.Equal(ConfirmationState.Confirmed, engine.Loader.ReadConfirmedRevision(
             "/mcp/connector", "oauth2-authorization-code-pkce-refresh", "refreshToken").State);
@@ -2074,7 +3067,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     {
         (ManagedGenerationLoader loader, _) = await OpenLoaderWithStateAsync();
 
-        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var generation = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
         await using var platform = await PlatformAsync(_ => Response.Generation(generation));
         await using ManagedProcess engine = await StartAsync(platform, providedLoader: loader);
 
@@ -2119,7 +3112,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             File.WriteAllBytes(journal, []);
         }
 
-        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var generation = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
         await using var platform = await PlatformAsync(_ => Response.Generation(generation));
         await using ManagedProcess engine = await StartAsync(platform, providedLoader: loader);
 
@@ -2137,7 +3130,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         Assert.Contains("integrity", body, StringComparison.Ordinal);
         Assert.Contains("confirmed-revisions reset", body, StringComparison.Ordinal);
         Assert.DoesNotContain(stateRoot, body, StringComparison.Ordinal);
-        Assert.DoesNotContain("g1", body, StringComparison.Ordinal);
+        Assert.DoesNotContain(GenerationId1, body, StringComparison.Ordinal);
         Assert.DoesNotContain(SecretCanary, body, StringComparison.Ordinal);
         Assert.DoesNotContain("DEADBEEF", body, StringComparison.Ordinal);
         Assert.DoesNotContain("refreshToken", body, StringComparison.Ordinal);
@@ -2154,7 +3147,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         (ManagedGenerationLoader loader, _) = await OpenLoaderWithStateAsync(stateRoot, keyFile);
         File.WriteAllBytes(Path.Combine(stateRoot, "confirmed-revisions.txt"), []);
 
-        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var generation = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
         await using var platform = await PlatformAsync(_ => Response.Generation(generation));
         await using ManagedProcess engine = await StartAsync(platform, providedLoader: loader);
 
@@ -2184,7 +3177,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         File.WriteAllText(Path.Combine(stateRoot, "confirmed-revisions.txt"), "x\n");
         loader.ConfirmedJournal!.ReadAllLines = _ => throw new IOException("transient read failure");
 
-        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var generation = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
         await using var platform = await PlatformAsync(_ => Response.Generation(generation));
         await using ManagedProcess engine = await StartAsync(platform, providedLoader: loader);
 
@@ -2223,7 +3216,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             File.WriteAllBytes(journal, []);
         }
 
-        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var generation = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
         await using var platform = await PlatformAsync(_ => Response.Generation(generation));
         await using ManagedProcess engine = await StartAsync(platform, providedLoader: loader);
 
@@ -2235,7 +3228,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             HttpStatusCode.ServiceUnavailable,
             (await http.GetAsync(engine.At(HealthEndpoints.ManagedPath), Token)).StatusCode);
         Assert.Equal(before, await File.ReadAllBytesAsync(journal, TestContext.Current.CancellationToken));
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
 
         // Reset through a second loader over the same root, exactly as the operator CLI does.
         (ManagedGenerationLoader operatorLoader, _) = await OpenLoaderWithStateAsync(stateRoot, keyFile);
@@ -2255,7 +3248,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             () => http.GetAsync(engine.At(HealthEndpoints.ManagedPath), Token).GetAwaiter().GetResult().StatusCode
                 == HttpStatusCode.OK,
             () => "The running host did not observe the reset of the corrupt journal.");
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
         Assert.Equal(1, DiagnosticsContaining(engine, "activated generation"));
 
         // This generation declares no rotatable slot, so the post-reset 200 records nothing: the journal
@@ -2281,7 +3274,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         Func<string, string[]> productionRead = loader.ConfirmedJournal!.ReadAllLines;
         loader.ConfirmedJournal!.ReadAllLines = _ => throw new IOException("transient read failure");
 
-        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var generation = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
         await using var platform = await PlatformAsync(_ => Response.Generation(generation));
         await using ManagedProcess engine = await StartAsync(platform, providedLoader: loader);
 
@@ -2298,7 +3291,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         await WaitForAsync(
             () => DiagnosticsContaining(engine, "failed its integrity check") >= 1,
             () => "Diagnostics: " + string.Join(" | ", engine.Diagnostics));
-        Assert.Equal("g1", engine.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, engine.Worker.ActiveGenerationId);
 
         using var http = new HttpClient();
         Assert.Equal(
@@ -2318,7 +3311,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             Path.Combine(stateRoot, "confirmed-revisions.txt"),
             "#MCPilerConfirmedRevisions\t2\tDEADBEEF\n");
 
-        var generation = Generation("g1", ServedManifests.OneSurface, prefix: "/mcp/connector");
+        var generation = Generation(GenerationId1, ServedManifests.OneSurface, prefix: "/mcp/connector");
         await using var platform = await PlatformAsync(_ => Response.Generation(generation));
         await using ManagedProcess engine = await StartAsync(platform, providedLoader: loader);
 
@@ -2356,7 +3349,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         string kind)
     {
         var generation = Generation(
-            "g1",
+            GenerationId1,
             ServedManifests.RotatableRefreshSurface(new Uri("https://api.example.com/")),
             prefix: "/mcp/connector",
             secrets: new Dictionary<string, string>(StringComparer.Ordinal)
@@ -2400,7 +3393,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         }
 
         await using ManagedProcess process = await StartAsync(platform, loader);
-        Assert.Equal("g1", process.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, process.Worker.ActiveGenerationId);
 
         // While degraded: 503, recovery stays requested, and no report reaches the Platform.
         using var http = new HttpClient();
@@ -2454,7 +3447,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         Assert.Equal(
             HttpStatusCode.OK,
             (await http.GetAsync(process.At(HealthEndpoints.ManagedPath), Token)).StatusCode);
-        Assert.Equal("g1", process.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, process.Worker.ActiveGenerationId);
     }
 
     private static int DiagnosticsContaining(ManagedProcess engine, string text)
@@ -2675,6 +3668,9 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
     private static HostAuthorizationOptions AuthorizationFor(Uri issuer)
         => new(issuer.AbsoluteUri, HostTokenValidation.Introspection);
 
+    private static string GenerationId(string label)
+        => Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(label)));
+
     private static Dictionary<string, object?> Generation(
         string id,
         string manifest,
@@ -2692,7 +3688,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         return new Dictionary<string, object?>(StringComparer.Ordinal)
         {
-            ["protocolVersion"] = 2,
+            ["protocolVersion"] = 3,
             ["generationId"] = id,
             ["mounts"] = new[]
             {
@@ -2705,7 +3701,11 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
                 },
             },
             ["secrets"] = deliveredSecrets,
-            ["metadata"] = new { desiredRevisionId = id, engineVersion = "fixture" },
+            ["metadata"] = new
+            {
+                desiredRevisionId = id,
+                engineVersion = "fixture",
+            },
             ["kind"] = "generation",
             ["compatibility"] = new
             {
@@ -2753,6 +3753,47 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             Directory.Delete(directory, recursive: true);
         }
     }
+
+    /// <summary>
+    /// The absolute path of a file under this repository's <c>tests/fixtures</c>.
+    /// </summary>
+    /// <remarks>
+    /// Resolved from this file's compile-time path rather than the test output directory, so the
+    /// shared managed corpus cannot silently drop out of the suite because a content-copy item was
+    /// forgotten. The output-directory fallback keeps a deterministic CI build working, where a
+    /// mapped source path may not be an accessible checkout.
+    /// </remarks>
+    private static string Fixture(params string[] segments)
+    {
+        var source = Path.GetDirectoryName(SourceFile());
+
+        var root = source is null ? null : FindRoot(source);
+
+        root ??= FindRoot(AppContext.BaseDirectory)
+            ?? throw new InvalidOperationException(
+                "Could not locate MCPiler.Engine.slnx above the test source or output directory.");
+
+        return Path.Combine([root, "tests", "fixtures", .. segments]);
+    }
+
+    private static string? FindRoot(string directory)
+    {
+        var current = new DirectoryInfo(directory);
+
+        while (current is not null)
+        {
+            if (File.Exists(Path.Combine(current.FullName, "MCPiler.Engine.slnx")))
+            {
+                return current.FullName;
+            }
+
+            current = current.Parent;
+        }
+
+        return null;
+    }
+
+    private static string SourceFile([CallerFilePath] string path = "") => path;
 
     private static IEnumerable<string> Names(McpExchange exchange)
         => Tools(exchange).Select(tool => tool!["name"]!.GetValue<string>());
@@ -2870,6 +3911,21 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
 
         public static Response NoContent() => new(204, null, Delay: false);
 
+        public static Response Empty(string desiredRevisionId)
+            => new(
+                200,
+                JsonSerializer.SerializeToUtf8Bytes(new
+                {
+                    protocolVersion = 3,
+                    kind = "empty",
+                    metadata = new
+                    {
+                        desiredRevisionId,
+                        engineVersion = "fixture",
+                    },
+                }),
+                Delay: false);
+
         public static Response Silent() => new(200, null, Delay: true);
 
         public static Response Status(HttpStatusCode status) => new((int)status, null, Delay: false);
@@ -2896,6 +3952,9 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
         public Uri Address { get; private set; }
 
         public ConcurrentQueue<string?> PollSessionEpochHeaders { get; } = new();
+
+        /// <summary>Every decoded poll body in arrival order.</summary>
+        public ConcurrentQueue<JsonObject> PollBodies { get; } = new();
 
         /// <summary>Every session-epoch header presented on a reconciliation request, in order.</summary>
         public ConcurrentQueue<string?> ReconcileSessionEpochHeaders { get; } = new();
@@ -2929,6 +3988,7 @@ public sealed class ManagedSynchronizationTests : IAsyncDisposable
             {
                 var body = await ReadAsync(context, cancellationToken);
                 JsonObject request = JsonNode.Parse(body)?.AsObject() ?? [];
+                standIn.PollBodies.Enqueue(request);
                 var presentedEpoch = context.Request.Headers[ManagedProtocol.SessionEpochHeader].ToString();
                 standIn.PollSessionEpochHeaders.Enqueue(
                     string.IsNullOrEmpty(presentedEpoch) ? null : presentedEpoch);

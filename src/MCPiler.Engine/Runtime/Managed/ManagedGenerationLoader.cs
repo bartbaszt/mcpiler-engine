@@ -88,7 +88,8 @@ public sealed record ManagedGenerationDelivery(
     string GenerationId,
     string? EngineVersion,
     IReadOnlyList<ManagedMountDelivery> Mounts,
-    IReadOnlyDictionary<string, string> Secrets);
+    IReadOnlyDictionary<string, string> Secrets,
+    string? DesiredRevisionId = null);
 
 /// <summary>A loaded generation, ready to be leased and executed.</summary>
 public sealed class ManagedGeneration : IDisposable

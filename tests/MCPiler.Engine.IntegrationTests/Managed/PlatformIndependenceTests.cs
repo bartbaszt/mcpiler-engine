@@ -53,6 +53,11 @@ public sealed class PlatformIndependenceTests : IAsyncDisposable
     private const string SecretCanary = "CANARY-deployment-secret-eng1";
     private const string ProviderKey = "MCPILER_OAUTH2_CLIENT_CREDENTIALS_CLIENTSECRET";
 
+    // The managed protocol uses the generation id as the applied desired revision, so this test
+    // needs a canonical revision id rather than a readable placeholder.
+    private static readonly string GenerationId1 = Convert.ToHexStringLower(
+        System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes("g1")));
+
     private readonly string _root =
         Path.Combine(Path.GetTempPath(), "mcpiler-platform-independence-" + Guid.NewGuid().ToString("N"));
 
@@ -71,7 +76,7 @@ public sealed class PlatformIndependenceTests : IAsyncDisposable
         // A stand-in that speaks enough of the managed protocol for the product's own client to
         // receive one desired generation whose policy points at the loopback upstream. It is a real
         // listener, so stopping it is a genuine outage.
-        var generation = Generation("g1", ServedManifests.Upstream(upstream.Address), prefix: "/mcp/connector");
+        var generation = Generation(GenerationId1, ServedManifests.Upstream(upstream.Address), prefix: "/mcp/connector");
         await using PlatformStandIn platform = await PlatformStandIn.StartAsync(
             Path.Combine(_root, "secret-" + Guid.NewGuid().ToString("N")),
             _ => Response.Generation(generation),
@@ -79,7 +84,7 @@ public sealed class PlatformIndependenceTests : IAsyncDisposable
 
         _process = await StartAsync(platform, upstream.Address);
 
-        Assert.Equal("g1", _process.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, _process.Worker.ActiveGenerationId);
 
         // While the Platform is up: the generation is the one serving.
         string[] onlineNames;
@@ -97,7 +102,7 @@ public sealed class PlatformIndependenceTests : IAsyncDisposable
 
         // The active generation is unchanged and the same surface keeps answering with the same
         // tools. Nothing on the serving path consults the Platform, so the outage is invisible.
-        Assert.Equal("g1", _process.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, _process.Worker.ActiveGenerationId);
 
         using McpHttpSession offline = await McpHttpSession.OpenAsync(
             _process.At("/mcp/connector/full"),
@@ -113,7 +118,7 @@ public sealed class PlatformIndependenceTests : IAsyncDisposable
             $"The invocation did not reach the upstream. Status={call.Status} Body={call.Body} Diagnostics={string.Join(" | ", _process.Diagnostics)}");
         Assert.Equal(["GET /pets?status=available"], upstreamRequests);
 
-        Assert.Equal("g1", _process.Worker.ActiveGenerationId);
+        Assert.Equal(GenerationId1, _process.Worker.ActiveGenerationId);
     }
 
     private static async Task<LoopbackHost> RecordingUpstream(List<string> received)
@@ -207,7 +212,7 @@ public sealed class PlatformIndependenceTests : IAsyncDisposable
 
         return new Dictionary<string, object?>(StringComparer.Ordinal)
         {
-            ["protocolVersion"] = 2,
+            ["protocolVersion"] = 3,
             ["generationId"] = id,
             ["mounts"] = new[]
             {
@@ -219,7 +224,11 @@ public sealed class PlatformIndependenceTests : IAsyncDisposable
                 },
             },
             ["secrets"] = new Dictionary<string, string>(StringComparer.Ordinal),
-            ["metadata"] = new { desiredRevisionId = id, engineVersion = "fixture" },
+            ["metadata"] = new
+            {
+                desiredRevisionId = id,
+                engineVersion = "fixture",
+            },
             ["kind"] = "generation",
             ["compatibility"] = new
             {

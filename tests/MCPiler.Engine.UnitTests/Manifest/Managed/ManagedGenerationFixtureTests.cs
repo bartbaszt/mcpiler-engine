@@ -26,8 +26,11 @@ namespace MCPiler.Engine.UnitTests.Manifest.Managed;
 /// </remarks>
 public sealed class ManagedGenerationFixtureTests
 {
-    private const string GenerationFile = "generation-v2.json";
+    private const string GenerationFile = "generation-v3.json";
     private const string LegacyGenerationFile = "generation-v1.json";
+    private const string PreviousGenerationFile = "generation-v2.json";
+    private const string EmptyFile = "empty-v3.json";
+    private const string RefusalFile = "refusal-v3.json";
     private const string MetadataFile = "expected-metadata.json";
     private const string ProviderKey = "MCPILER_OAUTH2_CLIENT_CREDENTIALS_CLIENTSECRET";
 
@@ -38,7 +41,7 @@ public sealed class ManagedGenerationFixtureTests
     {
         var root = Root();
 
-        Assert.Equal(2, root["protocolVersion"]!.GetValue<int>());
+        Assert.Equal(3, root["protocolVersion"]!.GetValue<int>());
         Assert.True(root["generationId"]!.GetValue<string>().Length > 0);
 
         var mounts = Assert.IsType<JsonArray>(root["mounts"]);
@@ -58,6 +61,35 @@ public sealed class ManagedGenerationFixtureTests
 
         Assert.NotNull(root["secrets"]!.AsObject());
         Assert.NotNull(root["metadata"]!.AsObject());
+
+        // A generation id is the applied desired revision the Engine reports. A fixture that named
+        // a different revision would describe an applied pair the Platform refuses, which is the
+        // permanent refusal loop the shared corpus exists to prevent.
+        var generationId = root["generationId"]!.GetValue<string>();
+        var desiredRevisionId = root["metadata"]!["desiredRevisionId"]!.GetValue<string>();
+
+        Assert.Matches("^[0-9a-f]{64}$", generationId);
+        Assert.Equal(generationId, desiredRevisionId, StringComparer.Ordinal);
+    }
+
+    [Fact]
+    public void The_generation_revision_mismatch_fixture_keeps_two_valid_but_different_identities()
+    {
+        var root = JsonNode.Parse(
+            File.ReadAllText(Path.Combine(
+                FixtureDirectory,
+                "invalid-v3",
+                "generation-revision-mismatch.json")))!.AsObject();
+
+        var generationId = root["generationId"]!.GetValue<string>();
+        var desiredRevisionId = root["metadata"]!["desiredRevisionId"]!.GetValue<string>();
+
+        // Both identities are canonical; only their contradiction makes the response invalid. If
+        // this fixture were ever "fixed" to match, the refusal regression would stop covering the
+        // disagreement it was added for.
+        Assert.Matches("^[0-9a-f]{64}$", generationId);
+        Assert.Matches("^[0-9a-f]{64}$", desiredRevisionId);
+        Assert.NotEqual(generationId, desiredRevisionId);
     }
 
     [Fact]
@@ -71,6 +103,52 @@ public sealed class ManagedGenerationFixtureTests
         {
             Assert.False(mountNode!.AsObject().ContainsKey("externalResources"));
         }
+    }
+
+    [Fact]
+    public void The_empty_fixture_is_a_closed_affirmative_instruction()
+    {
+        var root = JsonNode.Parse(
+            File.ReadAllText(Path.Combine(FixtureDirectory, EmptyFile)))!.AsObject();
+
+        Assert.Equal(3, root["protocolVersion"]!.GetValue<int>());
+        Assert.Equal("empty", root["kind"]!.GetValue<string>());
+        Assert.Equal(
+            ["kind", "metadata", "protocolVersion"],
+            root.Select(pair => pair.Key).Order(StringComparer.Ordinal).ToArray());
+
+        var metadata = root["metadata"]!.AsObject();
+        Assert.Equal(
+            ["desiredRevisionId", "engineVersion"],
+            metadata.Select(pair => pair.Key).Order(StringComparer.Ordinal).ToArray());
+        Assert.Matches("^[0-9a-f]{64}$", metadata["desiredRevisionId"]!.GetValue<string>());
+
+        Assert.False(root.ContainsKey("generationId"));
+        Assert.False(root.ContainsKey("mounts"));
+        Assert.False(root.ContainsKey("secrets"));
+        Assert.False(root.ContainsKey("compatibility"));
+        Assert.False(root.ContainsKey("diagnostics"));
+    }
+
+    [Fact]
+    public void The_refusal_fixture_stays_distinct_from_empty()
+    {
+        var root = JsonNode.Parse(
+            File.ReadAllText(Path.Combine(FixtureDirectory, RefusalFile)))!.AsObject();
+
+        Assert.Equal(3, root["protocolVersion"]!.GetValue<int>());
+        Assert.Equal("refusal", root["kind"]!.GetValue<string>());
+        Assert.NotEmpty(root["diagnostics"]!.AsArray());
+    }
+
+    [Fact]
+    public void The_v2_generation_fixture_is_retained_as_an_incompatible_contract()
+    {
+        var previous = JsonNode.Parse(
+            File.ReadAllText(Path.Combine(FixtureDirectory, PreviousGenerationFile)))!.AsObject();
+
+        Assert.Equal(2, previous["protocolVersion"]!.GetValue<int>());
+        Assert.NotEqual(3, previous["protocolVersion"]!.GetValue<int>());
     }
 
     [Fact]

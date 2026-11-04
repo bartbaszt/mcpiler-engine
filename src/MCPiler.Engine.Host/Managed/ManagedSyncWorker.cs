@@ -38,6 +38,7 @@ internal sealed class ManagedSyncWorker : IDisposable
     private readonly Action<string>? _diagnostics;
     private readonly string _engineVersion;
     private readonly PendingReconciliationQueue _reconciliations;
+    private Func<EngineGeneration, CancellationToken, Task<FirstListenerStart>>? _startListener;
 
     /// <summary>
     /// Minted once per process. The Platform stores it with every report so it can order the
@@ -55,11 +56,23 @@ internal sealed class ManagedSyncWorker : IDisposable
     /// </summary>
     private static readonly TimeSpan JournalDegradedReemitInterval = TimeSpan.FromMinutes(5);
 
+    /// <summary>
+    /// Bounds the candidate diagnostic carried on a poll. The Platform refuses a poll whose code
+    /// exceeds 200 characters or whose message exceeds 500, and that refusal carries no epoch, so
+    /// an oversized diagnostic would be resent forever and no later candidate could ever arrive.
+    /// </summary>
+    private const int MaximumDiagnosticCodeLength = 200;
+    private const int MaximumDiagnosticMessageLength = 500;
+    private const string GenericDiagnosticCode = "managed/candidate-refused";
+    private const string GenericDiagnosticMessage = "The candidate was refused without a diagnostic message.";
+
     private long _reportSequence;
     private long? _sessionEpoch;
 
     private string? _activeGenerationId;
     private string? _deliveredGenerationId;
+    private string? _appliedDesiredKind;
+    private string? _appliedDesiredRevisionId;
 
     /// <summary>
     /// The active generation's mounts, retained so a recovery replay can re-derive an evicted pending
@@ -101,6 +114,12 @@ internal sealed class ManagedSyncWorker : IDisposable
     /// The backoff sequence, or null to use the production initial/maximum delays. Supplied by
     /// tests so a bounded wait does not spend the real retry schedule.
     /// </param>
+    /// <param name="startListener">
+    /// Optional first-bind coordinator. A control-only process supplies it so a later generation
+    /// binds the one process-lifetime listener while the generation manager still has no current
+    /// pointer; the worker activates the candidate only after a successful bind. Null when the
+    /// caller already opened the listener for the initial generation.
+    /// </param>
     public ManagedSyncWorker(
         ManagedSyncOptions options,
         ManagedGenerationLoader loader,
@@ -110,7 +129,8 @@ internal sealed class ManagedSyncWorker : IDisposable
         Action<string>? diagnostics = null,
         ManagedSyncClient? client = null,
         ManagedSyncBackoff? backoff = null,
-        int reconciliationQueueCapacity = PendingReconciliationQueue.DefaultMaximumEntries)
+        int reconciliationQueueCapacity = PendingReconciliationQueue.DefaultMaximumEntries,
+        Func<EngineGeneration, CancellationToken, Task<FirstListenerStart>>? startListener = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(loader);
@@ -125,6 +145,7 @@ internal sealed class ManagedSyncWorker : IDisposable
         _engineVersion = engineVersion;
         _diagnostics = diagnostics;
         _reconciliations = new PendingReconciliationQueue(reconciliationQueueCapacity, diagnostics);
+        _startListener = startListener;
         _client = client ?? new ManagedSyncClient(options);
 
         // One second doubling to thirty seconds: the first retry is quick enough that a
@@ -140,6 +161,32 @@ internal sealed class ManagedSyncWorker : IDisposable
 
     /// <summary>The last generation activated, even if since superseded.</summary>
     public string? DeliveredGenerationId => _deliveredGenerationId;
+
+    /// <summary>The desired-state kind this process last applied successfully, or null.</summary>
+    public string? AppliedDesiredKind => _appliedDesiredKind;
+
+    /// <summary>The desired revision this process last applied successfully, or null.</summary>
+    public string? AppliedDesiredRevisionId => _appliedDesiredRevisionId;
+
+    /// <summary>
+    /// Enables first-listener coordination for a process that started control-only. Must be set
+    /// before the background loop starts and at most once; the callback binds the provisional
+    /// listener while the manager still has no current generation, and can refuse the candidate
+    /// by returning a sanitized failure. The worker activates the candidate only after the bind
+    /// succeeds and reports success only after that activation.
+    /// </summary>
+    public void EnableFirstListener(Func<EngineGeneration, CancellationToken, Task<FirstListenerStart>> startListener)
+    {
+        ArgumentNullException.ThrowIfNull(startListener);
+
+        if (_running is not null)
+        {
+            throw new InvalidOperationException(
+                "First-listener coordination must be enabled before the managed control loop starts.");
+        }
+
+        _startListener = startListener;
+    }
 
     /// <summary>
     /// Records one committed refresh-token rotation for reconciliation.
@@ -351,12 +398,17 @@ internal sealed class ManagedSyncWorker : IDisposable
                                 + "not be loaded. Engine has no prior generation to serve, so it will not "
                                 + "open a listener.");
 
+                    case ManagedPollOutcome.Empty when result.EmptyDesiredRevisionId is { } emptyRevision:
+                        ApplyEmpty(emptyRevision);
+                        return ManagedInitialSync.EmptyApplied(emptyRevision);
+
                     case ManagedPollOutcome.Unchanged:
                         return ManagedInitialSync.Refused(
                             "managed/initial-generation-absent",
-                            "The Platform reports no desired generation for this deployment. Engine "
-                            + "will not open a listener that would serve an empty surface; publish a "
-                            + "connector and restart, or check the configured deployment identity.");
+                            "The Platform reports no current desired state it can confirm for this "
+                            + "deployment. Engine will not open a listener, and a missing response is "
+                            + "never treated as an authoritative empty configuration. Check the "
+                            + "deployment identity, credential and protocol, then retry.");
 
                     case ManagedPollOutcome.CandidateRefused:
                         return ManagedInitialSync.Refused(
@@ -495,11 +547,24 @@ internal sealed class ManagedSyncWorker : IDisposable
 
                 switch (result.Outcome)
                 {
+                    case ManagedPollOutcome.Empty when result.EmptyDesiredRevisionId is { } emptyRevision:
+                        // Empty is an affirmative fenced instruction. Applying it retires the
+                        // admission pointer atomically; the bound listener stays alive and rejects
+                        // ordinary MCP requests until a later generation is published.
+                        ApplyEmpty(emptyRevision);
+                        _backoff.Reset();
+                        break;
+
                     case ManagedPollOutcome.Delivered when result.Delivery is { } delivery:
                         // A duplicate delivery of the generation already active is acknowledged,
                         // not rebuilt. Activating a second generation over an identical one would
                         // retire a generation whose leases are still executing, for no change.
-                        if (string.Equals(delivery.GenerationId, _activeGenerationId, StringComparison.Ordinal))
+                        if (string.Equals(delivery.GenerationId, _activeGenerationId, StringComparison.Ordinal)
+                            && string.Equals(
+                                delivery.GenerationId,
+                                _appliedDesiredRevisionId,
+                                StringComparison.Ordinal)
+                            && string.Equals(_appliedDesiredKind, ManagedProtocol.KindGeneration, StringComparison.Ordinal))
                         {
                             _deliveredGenerationId = delivery.GenerationId;
                             _backoff.Reset();
@@ -522,15 +587,16 @@ internal sealed class ManagedSyncWorker : IDisposable
                         break;
 
                     case ManagedPollOutcome.CandidateRefused:
+                    {
+                        ManagedDiagnosticMessage diagnostic = BoundDiagnostic(
+                            result.Diagnostics.Count > 0 ? result.Diagnostics[0].Code : null,
+                            result.Diagnostics.Count > 0 ? result.Diagnostics[0].Message : null);
                         _lastCandidateOutcome = ManagedProtocol.CandidateFailed;
-                        _lastCandidateCode = result.Diagnostics.Count > 0
-                            ? result.Diagnostics[0].Code
-                            : "managed/refused";
-                        _lastCandidateMessage = result.Diagnostics.Count > 0
-                            ? result.Diagnostics[0].Message
-                            : "The Platform refused the generation.";
+                        _lastCandidateCode = diagnostic.Code;
+                        _lastCandidateMessage = diagnostic.Message;
                         await Task.Delay(_backoff.Next(), cancellationToken).ConfigureAwait(false);
                         break;
+                    }
 
                     case ManagedPollOutcome.Unchanged:
                         _backoff.Reset();
@@ -607,9 +673,19 @@ internal sealed class ManagedSyncWorker : IDisposable
     /// Loads and activates one delivered generation, reporting a refused candidate.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// The refusal is reported and the active generation is left alone. That is the whole point
     /// of validating a candidate completely before the swap: a half-applied generation would
     /// serve a mount set nobody desired, and which one a client saw would depend on timing.
+    /// </para>
+    /// <para>
+    /// A control-only process has no installed pointer yet. Its first listener therefore binds
+    /// against the prepared candidate while the manager still denies every admission; only after
+    /// the socket is operational is the candidate activated. If the bind fails, the process stays
+    /// control-only and the last applied pair is untouched. If activation fails after the bind,
+    /// the provisional listener is stopped and released so the process returns to unbound,
+    /// non-serving control-only operation instead of exposing a socket it cannot admit.
+    /// </para>
     /// </remarks>
     private async Task<bool> TryActivateAsync(ManagedGenerationDelivery delivery, CancellationToken cancellationToken)
     {
@@ -717,9 +793,107 @@ if (_binding.Listener.Transport is HostTransport.Http
             generation.TakeExecution(),
             externalResources: externalResources);
 
-        Task retirement = _generations.Activate(candidate);
+        Task retirement;
+
+        if (_startListener is { } startListener)
+        {
+            FirstListenerStart started;
+
+            try
+            {
+                started = await startListener(candidate, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // The callback disposes a provisional listener it managed to start; the candidate
+                // never became the active generation, so this path owns disposing it.
+                candidate.Dispose();
+                throw;
+            }
+            catch (OperationCanceledException exception)
+            {
+                // Cancellation the Engine did not request, such as an internal bind timeout, is a
+                // failed bind rather than shutdown. The candidate never became current, so this
+                // path must dispose it and keep the process control-only instead of letting an
+                // uncaught cancellation leave the candidate and its secret buffers reachable.
+                candidate.Dispose();
+                CandidateRefused(
+                    delivery.GenerationId,
+                    "managed/listener-start-failed",
+                    "The first MCP listener could not be started for the delivered generation: "
+                        + exception.Message);
+                return false;
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                candidate.Dispose();
+                CandidateRefused(
+                    delivery.GenerationId,
+                    "managed/listener-start-failed",
+                    "The first MCP listener could not be started for the delivered generation: "
+                        + exception.Message);
+                return false;
+            }
+
+            if (started.Refusal is { } startRefusal)
+            {
+                // No provisional listener remains attached, and the manager never installed the
+                // candidate. The last successful applied pair stays exactly as it was: a failed
+                // first bind is not an applied state.
+                candidate.Dispose();
+                CandidateRefused(delivery.GenerationId, startRefusal.Code, startRefusal.Message);
+                return false;
+            }
+
+            try
+            {
+                retirement = _generations.Activate(candidate);
+            }
+            catch (Exception exception) when (exception is
+                ObjectDisposedException or InvalidOperationException or ArgumentOutOfRangeException)
+            {
+                // The socket bound but activation did not complete. If Activate threw after
+                // installing the pointer, retire it before disposing the candidate so no disposed
+                // generation remains current (which would make readiness claim a generation that
+                // can never admit). If it threw before installing, the previous pointer is left
+                // alone. Disposal is idempotent, so this also covers the manager-disposed path.
+                if (ReferenceEquals(_generations.Current, candidate))
+                {
+                    try
+                    {
+                        Observe(_generations.RetireToEmpty());
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                        // Shutdown disposed the manager between the check and the retirement.
+                    }
+                }
+
+                candidate.Dispose();
+                await started.Rollback!().ConfigureAwait(false);
+                CandidateRefused(delivery.GenerationId, "managed/activation-failed", exception.Message);
+                return false;
+            }
+
+            // Only now is the bound listener serving the candidate. The holder may publish this
+            // app to the process-lifetime shutdown wait.
+            started.Confirm!();
+
+            // The first bind succeeded, so the listener is process lifetime. Every later
+            // generation (including after an affirmative empty) is a pointer-only hot swap and
+            // must not ask the coordinator to bind again.
+            _startListener = null;
+        }
+        else
+        {
+            // The listener already exists and served a previous generation. Activation is the
+            // same atomic pointer exchange as any hot swap; no socket lifecycle is involved.
+            retirement = _generations.Activate(candidate);
+        }
 
         _activeGenerationId = delivery.GenerationId;
+        _appliedDesiredKind = ManagedProtocol.KindGeneration;
+        _appliedDesiredRevisionId = delivery.GenerationId;
         _activeMounts = generation.Mounts;
 
         // Only now that the candidate is the active generation may the durable confirmation journal be
@@ -794,15 +968,90 @@ if (_binding.Listener.Transport is HostTransport.Http
             TaskScheduler.Default);
     }
 
+    /// <summary>
+    /// Applies an affirmative empty desired state by retiring the admission pointer atomically.
+    /// </summary>
+    /// <remarks>
+    /// The bound listener is deliberately not disposed: it stays process-lifetime so a later
+    /// generation can serve on the same socket and health endpoints remain observable. The applied
+    /// pair is recorded only after the pointer exchange succeeds; a failure leaves the previous
+    /// generation authoritative. Old leases drain in the background under their existing bound.
+    /// </remarks>
+    private void ApplyEmpty(string desiredRevisionId)
+    {
+        if (string.Equals(_appliedDesiredKind, ManagedProtocol.KindEmpty, StringComparison.Ordinal)
+            && string.Equals(_appliedDesiredRevisionId, desiredRevisionId, StringComparison.Ordinal)
+            && _activeGenerationId is null)
+        {
+            return;
+        }
+
+        Task retirement = _generations.RetireToEmpty();
+
+        _activeGenerationId = null;
+        _activeMounts = null;
+        _appliedDesiredKind = ManagedProtocol.KindEmpty;
+        _appliedDesiredRevisionId = desiredRevisionId;
+        _lastCandidateOutcome = null;
+        _lastCandidateCode = null;
+        _lastCandidateMessage = null;
+
+        _diagnostics?.Invoke(
+            $"managed: applied empty desired revision {desiredRevisionId}; new MCP admissions are "
+            + "closed until a published connector activates a generation.");
+
+        Observe(retirement);
+    }
+
     private void CandidateRefused(string generationId, string code, string message)
     {
         // The receipt was recorded before the load attempt, so this only records the outcome. The
         // Platform distinguishes "received and refused" from "never arrived" using that receipt.
-        _lastCandidateOutcome = ManagedProtocol.CandidateFailed;
-        _lastCandidateCode = code;
-        _lastCandidateMessage = message;
+        ManagedDiagnosticMessage diagnostic = BoundDiagnostic(code, message);
 
-        _diagnostics?.Invoke($"managed: candidate {generationId} refused [{code}] {message}");
+        _lastCandidateOutcome = ManagedProtocol.CandidateFailed;
+        _lastCandidateCode = diagnostic.Code;
+        _lastCandidateMessage = diagnostic.Message;
+
+        _diagnostics?.Invoke(
+            $"managed: candidate {generationId} refused [{diagnostic.Code}] {diagnostic.Message}");
+    }
+
+    /// <summary>
+    /// The one place a candidate diagnostic is bounded before it can reach a poll body.
+    /// </summary>
+    /// <remarks>
+    /// The Platform refuses a poll carrying a diagnostic outside its accepted bounds, and that
+    /// refusal has no session epoch, so the Engine treats it as unreachable and resends the same
+    /// diagnostic forever. Truncation is deterministic and never splits a UTF-16 surrogate pair;
+    /// a missing value becomes a generic non-empty substitute rather than an empty diagnostic.
+    /// </remarks>
+    private static ManagedDiagnosticMessage BoundDiagnostic(string? code, string? message) => new()
+    {
+        Code = BoundDiagnosticPart(code, MaximumDiagnosticCodeLength, GenericDiagnosticCode),
+        Message = BoundDiagnosticPart(message, MaximumDiagnosticMessageLength, GenericDiagnosticMessage),
+    };
+
+    private static string BoundDiagnosticPart(string? value, int maximumLength, string substitute)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return substitute;
+        }
+
+        if (value.Length <= maximumLength)
+        {
+            return value;
+        }
+
+        var length = maximumLength;
+        if (char.IsHighSurrogate(value[length - 1]))
+        {
+            length--;
+        }
+
+        string truncated = value[..length];
+        return string.IsNullOrWhiteSpace(truncated) ? substitute : truncated;
     }
 
     private ManagedPollRequestMessage BuildRequest() => new()
@@ -822,6 +1071,8 @@ if (_binding.Listener.Transport is HostTransport.Http
         PendingReconciliationCount = _reconciliations.Count,
         EngineInstanceId = _instanceId,
         EngineReportSequence = ++_reportSequence,
+        AppliedDesiredKind = _appliedDesiredKind,
+        AppliedDesiredRevisionId = _appliedDesiredRevisionId,
         Compatibility = CompatibilityDescriptor.EngineSupport(),
     };
 
@@ -845,14 +1096,71 @@ if (_binding.Listener.Transport is HostTransport.Http
     }
 }
 
+/// <summary>
+/// The outcome of binding the provisional first listener for one prepared candidate.
+/// </summary>
+/// <remarks>
+/// The callback binds while the generation manager still has no current pointer, so admissions
+/// are denied on the provisional socket. A successful result carries the two operations the
+/// worker needs to own the remaining ordering: <see cref="Confirm"/> once activation installed
+/// the candidate, or <see cref="Rollback"/> when activation failed after the bind.
+/// </remarks>
+internal sealed record FirstListenerStart
+{
+    private FirstListenerStart(StartupRefusal? refusal, Func<Task>? rollback, Action? confirm)
+    {
+        Refusal = refusal;
+        Rollback = rollback;
+        Confirm = confirm;
+    }
+
+    /// <summary>A sanitized refusal when the listener could not be bound; null on success.</summary>
+    internal StartupRefusal? Refusal { get; }
+
+    /// <summary>Stops and disposes the provisional listener when activation fails after the bind.</summary>
+    internal Func<Task>? Rollback { get; }
+
+    /// <summary>Publishes a successfully activated listener to the process-lifetime shutdown wait.</summary>
+    internal Action? Confirm { get; }
+
+    /// <summary>A provisional listener is bound and its candidate may now be activated.</summary>
+    internal static FirstListenerStart Bound(Func<Task> rollback, Action confirm)
+    {
+        ArgumentNullException.ThrowIfNull(rollback);
+        ArgumentNullException.ThrowIfNull(confirm);
+
+        return new FirstListenerStart(null, rollback, confirm);
+    }
+
+    /// <summary>The provisional listener was not bound; the process remains control-only.</summary>
+    internal static FirstListenerStart Refused(StartupRefusal refusal)
+    {
+        ArgumentNullException.ThrowIfNull(refusal);
+
+        return new FirstListenerStart(refusal, null, null);
+    }
+}
+
 /// <summary>The outcome of the bounded initial synchronization.</summary>
 /// <param name="Started">True when a generation was activated.</param>
 /// <param name="GenerationId">The activated generation id, when one was activated.</param>
-/// <param name="Refusal">The startup refusal when none was activated.</param>
-internal sealed record ManagedInitialSync(bool Started, string? GenerationId, StartupRefusal? Refusal)
+/// <param name="Refusal">The startup refusal when no valid state was obtained.</param>
+/// <param name="EmptyRevisionId">The applied empty desired revision, when one was applied.</param>
+internal sealed record ManagedInitialSync(
+    bool Started,
+    string? GenerationId,
+    StartupRefusal? Refusal,
+    string? EmptyRevisionId = null)
 {
+    /// <summary>True when the process is initialized control-only in an acknowledged empty state.</summary>
+    public bool Empty => EmptyRevisionId is not null;
+
     /// <summary>The initial synchronization produced a generation.</summary>
     public static ManagedInitialSync Ready(string generationId) => new(true, generationId, null);
+
+    /// <summary>The initial synchronization applied an authoritative empty state.</summary>
+    public static ManagedInitialSync EmptyApplied(string desiredRevisionId)
+        => new(false, null, null, desiredRevisionId);
 
     /// <summary>The initial synchronization produced a refusal.</summary>
     public static ManagedInitialSync Refused(string code, string message) =>
