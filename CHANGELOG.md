@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.3.0
+
+- Git range: v0.2.0..2cca844ec392ffc2857b6491aa48672eb4ed748a
+- Manifest format: 0.3
+- Diagnostic codes: none
+- Stable Engine release prepared from the reviewed source range above.
+
 ## v0.2.0
 
 - Git range: v0.1.0..0c59273c34dcf9cce5c301824106107ec2c4d657
