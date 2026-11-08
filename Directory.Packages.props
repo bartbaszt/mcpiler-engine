@@ -65,7 +65,7 @@
       deployable's configured token-validation mode; introspection mode ships without
       reaching it.
     -->
-    <PackageVersion Include="Microsoft.IdentityModel.JsonWebTokens" Version="8.22.0" />
+    <PackageVersion Include="Microsoft.IdentityModel.JsonWebTokens" Version="8.23.0" />
   </ItemGroup>
 
   <ItemGroup Label="Testing">
